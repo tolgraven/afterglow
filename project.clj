@@ -29,6 +29,7 @@
                  [ola-clojure "0.1.8" :exclusions [org.clojure/tools.reader]]
                  [selmer "1.12.0" :exclusions [cheshire]]
                  [com.evocomputing/colors "1.0.4"]
+                 [thi.ng/color "1.3.2-SNAPSHOT"]
                  [environ "1.1.0"]
                  [camel-snake-kebab "0.4.0"]
                  [com.taoensso/timbre "4.10.0"]
