@@ -46,6 +46,22 @@ late pressure cannot follow a new instance of the same cue. Holding Shift while
 pressing a held cue launches it persistently, so releasing the pad leaves it
 running. A later Shift press ends that persistent activation.
 
+## Saved cue defaults
+
+Hold Record (CC 86) and press a top button to save all current values of the
+selected instance as that cue's defaults. Hold Shift and Record to clear those
+saved defaults. These gestures call generic `:cue/save-params` and
+`:cue/clear-saved-params` commands with `:cue-id` and `:expected-version`; saving
+also supplies the exact `:instance-id`.
+
+The model publishes a new cue version with a portable `:saved-params` map.
+Authored `:params` remain separate. Launch precedence is effect defaults,
+authored cue parameters, saved parameters, then explicit launch parameters
+(including pressure/velocity overrides). Clearing removes the saved overlay.
+Neither operation mutates running instances. Stale cue versions, unrelated
+instances and values incompatible with the cue's current effect schema reject
+atomically. Ordinary command receipts make retries idempotent.
+
 ## Display contract
 
 `:parameters` contains the visible bank, with existing schema/value fields plus
@@ -54,17 +70,19 @@ offset. `:touched-parameter` is nil or an explicit instance/parameter/encoder/
 component selection. `:active-effects` is a bounded eight-instance window, with
 `:active-effect-navigation` containing index/count/offset. Waveform and captured
 audio projection remain on the offscreen display worker, outside the show clock.
+`:preset` contains `:saved?`, `:changed?`, `:record?` and the intended `:action`
+(`:save` or `:clear`); it carries no source code or private controller state.
 
 ## Remaining parity
 
-Cue parameter presets, tempo/beat controls, distinct stop/run semantics and linked viewports remain
+Tempo/beat controls, distinct stop/run semantics and linked viewports remain
 separate acceptance work. Do not infer those interactions from display widgets.
 The comprehensive cross-surface checklist lives in Tolglow's
 `docs/control-parity-audit.md`.
 
 ## Verification
 
-Focused real-session/typed-helper tests pass 30 tests / 229 assertions. They exercise
-the actual MIDI decoder, composable session, parameter validation and shared
-command reducer with capture transports. No MIDI port, native display or physical
-lighting output is opened.
+The complete `./bin/test parity` lane passes 285 tests / 3,143 assertions. The
+control cases exercise the actual MIDI decoder, composable session, parameter
+validation, versioned cue publication and shared command reducer with capture
+transports. No MIDI port, native display or physical lighting output is opened.

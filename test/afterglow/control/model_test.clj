@@ -1,7 +1,8 @@
 (ns afterglow.control.model-test
   (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.model :as model]
-            [afterglow.control.params :as params]))
+            [afterglow.control.params :as params]
+            [afterglow.control.views :as views]))
 
 (def effect
   {:id :wash :version 1 :duration-ms 500 :envelope {:release-ms 100}
@@ -213,3 +214,58 @@
     (is (= :invalid-params (get-in result [:ack :code])))
     (is (identical? show (:model result)))
     (is (= [] (:events result)))))
+
+(deftest cue-saved-parameters-are-versioned-portable-launch-defaults
+  (let [started (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances started)))
+        changed (-> started (apply! {:op :param/set :instance-id id :param :level :value 0.9})
+                    (apply! {:op :param/set :instance-id id :param :color :value [0 1 0]}))
+        command (command changed {:op :cue/save-params :cue-id :red :instance-id id :expected-version 1})
+        result (model/apply-command changed command)
+        saved (:model result)
+        restarted (apply! saved {:op :show/restart})
+        relaunched (apply! restarted {:op :cue/launch :cue-id :red})
+        overridden (apply! restarted {:op :cue/launch :cue-id :red :launch {:params {:level 0.1}}})
+        cleared (apply! saved {:op :cue/clear-saved-params :cue-id :red :expected-version 2})
+        fresh (-> cleared (apply! {:op :show/restart}) (apply! {:op :cue/launch :cue-id :red}))]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (= 2 (get-in saved [:registry :cues :red :version])))
+    (is (= 0.6 (get-in saved [:registry :cues :red :params :level])) "authored defaults remain separate")
+    (is (= 0.9 (get-in saved [:registry :cues :red :saved-params :level])))
+    (is (= (:instances changed) (:instances saved)))
+    (is (= [:registry/published :cue/params-saved] (mapv :type (:events result))))
+    (is (= (:ack result) (:ack (model/apply-command saved command))))
+    (is (= 2 (get-in (:model (model/apply-command saved command)) [:registry :cues :red :version])))
+    (is (= {:saved? true :color [0 1 0]}
+           (select-keys (views/cue-view restarted :red) [:saved? :color])))
+    (is (= 0.9 (:level (:params (first (vals (:instances relaunched)))))))
+    (is (= 0.1 (:level (:params (first (vals (:instances overridden)))))))
+    (is (= 3 (get-in cleared [:registry :cues :red :version])))
+    (is (nil? (get-in cleared [:registry :cues :red :saved-params])))
+    (is (= 0.9 (get-in cleared [:registry :versions [:cues :red 2] :saved-params :level])))
+    (is (= (:instances saved) (:instances cleared)))
+    (is (= 0.6 (:level (:params (first (vals (:instances fresh)))))))))
+
+(deftest cue-preset-rejections-preserve-state-and-captured-schema-boundaries
+  (let [show (-> (configured)
+                 (apply! {:op :cue/put :cue {:id :other :effect-id :wash}})
+                 (apply! {:op :cue/launch :cue-id :red}))
+        id (first (keys (:instances show)))]
+    (doseq [[operation code] [[{:op :cue/save-params :cue-id :other :instance-id id} :wrong-cue-instance]
+                              [{:op :cue/save-params :cue-id :red :instance-id "missing"} :unknown-instance]
+                              [{:op :cue/save-params :cue-id :missing :instance-id id} :unknown-cue]
+                              [{:op :cue/save-params :cue-id :red :instance-id id :expected-version 9} :stale-definition-version]
+                              [{:op :cue/clear-saved-params :cue-id :red :expected-version 9} :stale-definition-version]
+                              [{:op :cue/put :cue {:id :bad :effect-id :wash :saved-params {:level 4}}} :invalid-params]]]
+      (let [result (model/apply-command show (command show operation))]
+        (is (= code (get-in result [:ack :code])))
+        (is (identical? show (:model result)))
+        (is (= [] (:events result)))))
+    (let [changed (apply! show {:op :registry/publish :kind :effects
+                               :definition (-> effect (assoc :version 2) (update :params dissoc :level))})
+          result (model/apply-command changed (command changed {:op :cue/save-params :cue-id :red :instance-id id}))]
+      (is (= :invalid-params (get-in result [:ack :code]))))
+    (let [invalid (assoc-in show [:registry :cues :red :saved-params :level] 99)
+          result (model/apply-command invalid (command invalid {:op :cue/launch :cue-id :red}))]
+      (is (= :invalid-params (get-in result [:ack :code])))
+      (is (identical? invalid (:model result))))))

@@ -190,3 +190,30 @@
           (receive! h [0xa0 37 127])
           (is (= 2 (:count (values h replacement-id))))))
       (finally (finish! h)))))
+
+(deftest record-saves-selected-parameters-and-shift-record-clears-future-defaults
+  (let [h (harness)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 72 10])
+        (is (= {:saved? false :changed? true :record? false :action :save} (:preset (view h))))
+        (receive! h [0xb0 86 127])
+        (receive! h [0xb0 20 127])
+        (is (= 0.6 (get-in @(:show h) [:registry :cues :latched :saved-params :level])))
+        (is (false? (:enabled (values h id))) "Record does not also toggle the top button's boolean")
+        (is (= {:saved? true :changed? false :record? true :action :save} (:preset (view h))))
+        (receive! h [0xb0 86 0])
+        (receive! h [0x80 37 0])
+        (receive! h [0x90 37 127])
+        (receive! h [0x90 37 127])
+        (let [relaunched (launch! h 37)]
+          (is (not= id relaunched))
+          (is (= 0.6 (:level (values h relaunched))))
+          (receive! h [0xb0 49 127])
+          (receive! h [0xb0 86 127])
+          (receive! h [0xb0 20 127])
+          (is (= 3 (get-in @(:show h) [:registry :cues :latched :version])))
+          (is (nil? (get-in @(:show h) [:registry :cues :latched :saved-params])))
+          (is (= 0.6 (:level (values h relaunched))))
+          (is (= {:saved? false :changed? true :record? true :action :clear} (:preset (view h))))))
+      (finally (finish! h)))))
