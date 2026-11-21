@@ -225,21 +225,21 @@
 (defn- merge-general-assignments!
   [patch ^objects targets assignments ^objects geometry-sources source]
   (let [by-id (:by-id patch)]
-   (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
-    (let [fixture (get by-id target-id)]
-     (validate-assignment! fixture target-id attribute value blend assignment)
-     (when (pos? opacity)
-      (let [index (int (::index fixture))
-           attributes (or (aget targets index) (transient {}))
-           previous (get attributes attribute)
-           blended (blend-value previous value blend opacity)]
-       (when-not (assignment-value? attribute blended)
-         (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
-       (aset targets index (assoc! attributes attribute blended))
-       (when (and geometry-sources (geometric-attributes attribute))
-         ;; Nil deliberately clears an earlier attributed write. An unattributed
-         ;; replacement must not blame the effect that it superseded.
-         (aset geometry-sources index (assoc (aget geometry-sources index) attribute source)))))))))
+    (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
+      (let [fixture (get by-id target-id)]
+        (validate-assignment! fixture target-id attribute value blend assignment)
+        (when (pos? opacity)
+          (let [index (int (::index fixture))
+                attributes (or (aget targets index) (transient {}))
+                previous (get attributes attribute)
+                blended (blend-value previous value blend opacity)]
+            (when-not (assignment-value? attribute blended)
+              (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
+            (aset targets index (assoc! attributes attribute blended))
+            (when (and geometry-sources (geometric-attributes attribute))
+              ;; Nil deliberately clears an earlier attributed write. An unattributed
+              ;; replacement must not blame the effect that it superseded.
+              (aset geometry-sources index (assoc (aget geometry-sources index) attribute source)))))))))
 
 (defn- persist-assignments! [^objects targets]
   (dotimes [index (alength targets)]
@@ -293,22 +293,22 @@
           (fail! "Previous pan/tilt must be normalized finite values" {:fixture-id (:id fixture) :axis axis})))
       (with-effect-source source
         (let [direction (if (:aim assigned) (mapv - (:aim assigned) (:position fixture)) (:direction assigned))
-          [x y z :as local] (local-direction fixture direction)
-          magnitude (Math/sqrt (+ (* x x) (* y y) (* z z)))]
-      (when-not (and (finite? magnitude) (pos? magnitude))
-        (fail! "Aim/direction must have finite nonzero distance" {:fixture-id (:id fixture)}))
-      (when-not (and (contains? (:channels fixture) :pan) (contains? (:channels fixture) :tilt))
-        (fail! "Aim/direction requires pan and tilt channels" {:fixture-id (:id fixture)}))
-      (let [pan-deg (Math/toDegrees (Math/atan2 x z))
-            tilt-deg (Math/toDegrees (Math/atan2 y (Math/sqrt (+ (* x x) (* z z)))))
-            pan (normalized-angle fixture :pan pan-deg (:pan previous))
-            tilt (normalized-angle fixture :tilt tilt-deg (:tilt previous))]
-        ;; Explicit geometric output takes precedence over direct pan/tilt, like
-        ;; the legacy kind order. Attributes inside one kind retain input order.
-        (assoc assigned :pan (:value pan) :tilt (:value tilt)
-               :pan-deg pan-deg :tilt-deg tilt-deg
-               :direction (mapv #(/ % magnitude) direction)
-               :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))))
+              [x y z] (local-direction fixture direction)
+              magnitude (Math/sqrt (+ (* x x) (* y y) (* z z)))]
+          (when-not (and (finite? magnitude) (pos? magnitude))
+            (fail! "Aim/direction must have finite nonzero distance" {:fixture-id (:id fixture)}))
+          (when-not (and (contains? (:channels fixture) :pan) (contains? (:channels fixture) :tilt))
+            (fail! "Aim/direction requires pan and tilt channels" {:fixture-id (:id fixture)}))
+          (let [pan-deg (Math/toDegrees (Math/atan2 x z))
+                tilt-deg (Math/toDegrees (Math/atan2 y (Math/sqrt (+ (* x x) (* z z)))))
+                pan (normalized-angle fixture :pan pan-deg (:pan previous))
+                tilt (normalized-angle fixture :tilt tilt-deg (:tilt previous))]
+            ;; Explicit geometric output takes precedence over direct pan/tilt.
+            ;; Attributes inside one kind retain input order.
+            (assoc assigned :pan (:value pan) :tilt (:value tilt)
+                   :pan-deg pan-deg :tilt-deg tilt-deg
+                   :direction (mapv #(/ % magnitude) direction)
+                   :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))))
     assigned))
 
 (declare pack-value!)
@@ -551,6 +551,18 @@
   (and (<= (::stride patch) 64)
        (<= (* (long (::stride patch)) (count (:fixtures patch))) 4000000)))
 
+(defn- pack-general-state [patch ^objects assigned options]
+  (let [options (prepare-previous-compact patch options)
+        {:keys [universes indexed]} (create-buffers patch)
+        compact (when (:compact-values? options) (create-compact patch))
+        values (reduce (fn [values fixture]
+                         (let [resolved (pack-target! fixture (or (aget assigned (int (::index fixture))) {})
+                                                      options universes indexed compact)]
+                           (if (:include-values? options) (assoc! values (:id fixture) resolved) values)))
+                       (when (:include-values? options) (transient {})) (:fixtures patch))]
+    (cond-> {:values (when values (persistent! values)) :universes universes :target-order (:target-order patch)}
+      compact (assoc :compact (:view compact)))))
+
 (defn resolve-frame
   "Resolve an ordered assignment vector to per-target values and fresh DMX bytes.
 
@@ -581,17 +593,7 @@
      (if (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
               (every? packed-assignment? assignments))
        (resolve-packed-only patch assignments options)
-       (let [assigned (reduce-assignments patch assignments)
-           options (prepare-previous-compact patch options)
-           {:keys [universes indexed]} (create-buffers patch)
-           compact (when (:compact-values? options) (create-compact patch))
-           values (reduce (fn [values fixture]
-                            (let [resolved (pack-target! fixture (or (aget ^objects assigned (int (::index fixture))) {})
-                                                         options universes indexed compact)]
-                              (if (:include-values? options) (assoc! values (:id fixture) resolved) values)))
-                          (when (:include-values? options) (transient {})) (:fixtures patch))]
-       (cond-> {:values (when values (persistent! values)) :universes universes :target-order (:target-order patch)}
-         compact (assoc :compact (:view compact))))))))
+       (pack-general-state patch (reduce-assignments patch assignments) options)))))
 
 (defn project-compact
   "Project selected stable target indices from a completed compact frame.
@@ -718,6 +720,22 @@
      :value (if (= 1 components) (aget ^doubles values row)
                 (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))
 
+(defn- geometry-source-storage [patch blocks]
+  (when (some #(some? (:source %)) blocks)
+    (object-array (count (:fixtures patch)))))
+
+(defn- resolve-general-contributions [patch blocks options]
+  (let [assigned (object-array (count (:fixtures patch)))
+        sources (geometry-source-storage patch blocks)]
+    (doseq [block blocks]
+      (with-effect-source (:source block)
+        (merge-general-assignments! patch assigned
+                                   (case (:kind block)
+                                     :assignments (:assignments block)
+                                     :batch (expand-batch (:compiled block)))
+                                   sources (:source block))))
+    (pack-general-state patch (persist-assignments! assigned) (assoc options ::geometry-sources sources))))
+
 (defn- resolve-partitioned
   [patch blocks options]
   (let [size (* (int (::stride patch)) (count (:fixtures patch)))
@@ -725,31 +743,36 @@
         targets (general-targets blocks)]
     (if (empty? targets)
       (do (doseq [block blocks]
-            (case (:kind block)
-              :assignments (merge-packed-assignments! patch values present (:assignments block))
-              :batch (merge-packed-batches! patch values present [(:compiled block)])))
+            (with-effect-source (:source block)
+              (case (:kind block)
+                :assignments (merge-packed-assignments! patch values present (:assignments block))
+                :batch (merge-packed-batches! patch values present [(:compiled block)]))))
           (pack-dense-state patch values present options))
       (let [general (boolean-array (count (:fixtures patch)))
-            _ (doseq [id targets :let [fixture (get (:by-id patch) id)] :when fixture]
-                (aset-boolean general (int (::index fixture)) true))
-            assignments
-            (reduce (fn [assignments block]
-                      (case (:kind block)
-                        :assignments
-                        (let [groups (group-by #(contains? targets (:target-id %)) (:assignments block))]
-                          (merge-packed-assignments! patch values present (get groups false))
-                          (into assignments (get groups true)))
-                        :batch
-                        (do (merge-packed-batches! patch values present [(:compiled block)] general)
-                            (into assignments (expand-general-rows (:compiled block) general))))) [] blocks)
-            assigned (reduce-assignments patch assignments)]
+            assigned (object-array (count (:fixtures patch)))
+            sources (geometry-source-storage patch blocks)]
+        (doseq [id targets :let [fixture (get (:by-id patch) id)] :when fixture]
+          (aset-boolean general (int (::index fixture)) true))
+        (doseq [block blocks]
+          (with-effect-source (:source block)
+            (case (:kind block)
+              :assignments
+              (let [groups (group-by #(contains? targets (:target-id %)) (:assignments block))]
+                (merge-packed-assignments! patch values present (get groups false))
+                (merge-general-assignments! patch assigned (get groups true) sources (:source block)))
+              :batch
+              (do (merge-packed-batches! patch values present [(:compiled block)] general)
+                  (merge-general-assignments! patch assigned (expand-general-rows (:compiled block) general)
+                                             sources (:source block))))))
+        (persist-assignments! assigned)
         ;; Mark zero-opacity targets too: their absent attributes and history use
         ;; the same reference path. Each target is packed once into private output.
         (dotimes [index (alength general)]
           (when (and (aget general index) (nil? (aget ^objects assigned index)))
             (aset ^objects assigned index {})))
         (pack-dense-state patch values present
-                          (assoc (prepare-previous-compact patch options) ::general-assigned assigned))))))
+                          (assoc (prepare-previous-compact patch options)
+                                 ::general-assigned assigned ::geometry-sources sources))))))
 
 (defn resolve-contributions
   "Resolve the kernel's ordered mixed contribution stream exactly once.
@@ -765,6 +788,12 @@
   preserving earlier contributions and absent-attribute defaults. Geometry uses
   the same componentwise interpolation in world coordinates. Opacity never scales
   authored parameters. Scalar channel overrides remain distinct from RGB color.
+  Blocks may carry :source provenance. Output validation/blending failures add
+  that exact value as :effect-source in ex-data, retaining the original cause
+  and data. Final geometric failures identify the last effective positive-opacity
+  aim source, or direction source when no aim exists. Later valid replacement is
+  allowed. Global patch/options/history errors remain unattributed. Provenance
+  stays per block and sparse geometric target; no source maps are copied per pixel.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))
@@ -778,19 +807,16 @@
      (when-not (vector? contributions) (fail! "Contributions must be an ordered vector" {}))
      (let [blocks (mapv (fn [block]
                           (when-not (map? block) (fail! "Invalid contribution block" {}))
-                          (case (:kind block)
-                            :assignments (do (when-not (vector? (:assignments block))
-                                               (fail! "Assignment contribution needs a vector" {})) block)
-                            :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
-                            (fail! "Unknown contribution kind" {:kind (:kind block)}))) contributions)
+                          (with-effect-source (:source block)
+                            (case (:kind block)
+                              :assignments (do (when-not (vector? (:assignments block))
+                                                 (fail! "Assignment contribution needs a vector" {})) block)
+                              :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
+                              (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
            partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
        (if partitioned?
          (resolve-partitioned patch blocks options)
-         (resolve-frame patch
-                        (into [] (mapcat #(case (:kind %)
-                                          :assignments (:assignments %)
-                                          :batch (expand-batch (:compiled %)))) blocks)
-                        options))))))
+         (resolve-general-contributions patch blocks options))))))
 
 (defn resolve-batches
   "Resolve ordered typed batches; convenience form of resolve-contributions.
