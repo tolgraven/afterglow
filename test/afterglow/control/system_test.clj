@@ -157,11 +157,15 @@
                  (apply! {:op :instance/pause :instance-id "0:1"}))]
     (doseq [invalid [#(dissoc % :state) #(assoc % :done? :yes)
                      #(assoc % :contributions [{:kind :invalid}])]]
-      (is (thrown? clojure.lang.ExceptionInfo
-                   (engine/advance show {:time-ms 100} (fn [_] invalid)))))))
+      (let [result (engine/advance show {:time-ms 100} (fn [_] invalid))]
+        (is (get-in result [:model :instances "0:1" :fault]))
+        (is (empty? (:contributions result)))
+        (is (= [:effect/failed] (mapv :type (:fault-events result))))))))
 
 (deftest default-system-opacity-preserves-ordinary-and-typed-contribution-shapes
   (let [result (advance (launched {}) 0 0)]
     (is (= [{:target-id :lamp :attribute :dimmer :value 0.8}] (:assignments result)))
     (is (= [{:kind :assignments :assignments [{:target-id :lamp :attribute :dimmer :value 0.8}]}]
-           (:contributions result)))))
+           (mapv #(dissoc % :source) (:contributions result))))
+    (is (= {:instance-id "0:1" :effect-id :light :effect-version 1 :cue-id :light}
+           (get-in result [:contributions 0 :source])))))

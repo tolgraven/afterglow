@@ -252,6 +252,14 @@
                               (system/release-instance resumed (system/private-clock resumed global-clock)))))
        :events [{:type (if force? :instance/removed :instance/released) :instance-id id :time-ms time}]
        :result {:instance-id id}})
+    :instance/retry
+    (let [id (:instance-id command) instance (instance! model id)]
+      {:model (assoc-in model [:instances id]
+                        (cond-> (dissoc instance :fault :reload-fault)
+                          (or (:fault instance) (:reload-fault instance))
+                          (assoc :retry-fault (or (:fault instance) (:reload-fault instance)))))
+       :events [{:type :effect/retry-requested :instance-id id}]
+       :result {:instance-id id}})
     :instance/remove
     (do (instance! model (:instance-id command))
         {:model (update model :instances dissoc (:instance-id command))

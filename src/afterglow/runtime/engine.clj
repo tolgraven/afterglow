@@ -5,6 +5,7 @@
   afterglow.show scheduler. The shell captures time, owns the executor/compiler
   cache and commits a successful result before performing returned intents."
   (:require [afterglow.runtime :as runtime]
+            [afterglow.runtime.faults :as faults]
             [afterglow.time :as musical-time]
             [afterglow.control.params :as params]
             [afterglow.control.system :as system]))
@@ -91,6 +92,7 @@
   (let [policy (get instance :reload-policy :pinned)
         current (get-in registry [:effects (:effect-id instance)])]
     (if (and (not= :pinned policy) current
+             (not= (:version current) (get-in instance [:reload-fault :effect-version]))
              (not= (:effect-version instance) (:version current)))
       (do
         (when-not (and (map? current) (= (:id current) (:effect-id instance))
@@ -238,6 +240,132 @@
                                     :reason (if expired? :release-complete :effect-complete)}))))
                  result)))}))
 
+(defn- prepare-isolated [model clock snapshot instance]
+  (let [current (get-in model [:registry :effects (:effect-id instance)])
+        candidate? (and (not (get-in instance [:system :paused?]))
+                        (not= :pinned (:reload-policy instance :pinned)) current
+                        (not= (:version current) (:effect-version instance))
+                        (not= (:version current) (get-in instance [:reload-fault :effect-version])))
+        fallback-model (if candidate? (update-in model [:registry :effects] dissoc (:effect-id instance)) model)
+        fallback (prepare-instance fallback-model clock snapshot instance)]
+    (try
+      (let [candidate (if candidate? (prepare-instance model clock snapshot instance) fallback)]
+        (assoc candidate :before instance :fallback fallback
+               :candidate? (not= (:effect-version instance) (get-in candidate [:instance :effect-version]))))
+      (catch Throwable error
+        (let [fault (faults/diagnostic snapshot instance
+                                       (get-in model [:registry :effects (:effect-id instance) :version]) :reload error)]
+          (-> fallback
+              (assoc :before instance :fallback fallback :candidate? false)
+              (assoc-in [:instance :reload-fault] fault)
+              (update :intents conj (faults/event :effect/reload-failed fault))))))))
+
+(defn- compile-isolated [compile-effect definition]
+  (try
+    (let [step (compile-effect definition)]
+      (when-not (ifn? step)
+        (fail! ::invalid-compiler-result "Compiler must return a callable step" {:effect-id (:id definition)}))
+      {:step step})
+    (catch Throwable error
+      (when-not (faults/recoverable? error) (throw error))
+      {:error error})))
+
+(defn- silent-result [prepared]
+  {:id (get-in prepared [:instance :id]) :instance (:instance prepared)
+   :state (get-in prepared [:instance :state]) :assignments [] :contributions []
+   :intents (:intents prepared) :done? false})
+
+(defn- attempt [snapshot compiled prepared]
+  (let [instance (:instance prepared) {:keys [step error]} (get compiled (:definition instance))]
+    (cond
+      (and (not (:expired? prepared))
+           (= (:effect-version instance) (get-in instance [:fault :effect-version])))
+      (assoc (silent-result prepared) :skipped? true)
+
+      (and error (not (:expired? prepared)))
+      {:failure (faults/diagnostic snapshot instance (:effect-version instance) :compile error)}
+
+      :else
+      (try
+        (let [value (runtime/evaluate-instance snapshot (descriptor {(:definition instance) step} prepared))
+              source (assoc (select-keys instance [:effect-id :effect-version :cue-id]) :instance-id (:id instance))]
+          (-> value
+              (assoc :instance instance)
+              (update :contributions #(mapv (fn [block] (assoc block :source source)) %))))
+        (catch Throwable error
+          {:failure (faults/diagnostic snapshot instance (:effect-version instance)
+                                       (if (some #(#{:afterglow.runtime/invalid-result :afterglow.runtime/invalid-contributions}
+                                                   (:type (ex-data %)))
+                                                 (take 4 (take-while some? (iterate #(.getCause ^Throwable %) error))))
+                                         :result :evaluate) error)})))))
+
+(defn- evaluate-isolated [snapshot compiled prepared]
+  (let [result (attempt snapshot compiled prepared)
+        candidate? (:candidate? prepared)
+        before (:before prepared)
+        fault (:failure result)
+        [result prepared]
+        (if (and fault candidate?)
+          (let [fallback (-> (:fallback prepared)
+                             (assoc :before before :candidate? false)
+                             (assoc-in [:instance :reload-fault] fault)
+                             (update :intents conj (faults/event :effect/reload-failed fault)))]
+            [(attempt snapshot compiled fallback) fallback])
+          [result prepared])
+        succeeded? (and (nil? (:failure result)) (not (:skipped? result)))
+        result (if-let [failure (:failure result)]
+                 (-> (silent-result prepared)
+                     (assoc-in [:instance :fault] failure)
+                     (update :intents conj (faults/event :effect/failed failure)))
+                 result)
+        recovered? (and (nil? fault) succeeded? (not (:expired? prepared))
+                        (or (and candidate? (or (:fault before) (:reload-fault before)))
+                            (:retry-fault before)))
+        result (cond-> (update result :instance dissoc :retry-fault)
+                 (and candidate? (nil? fault)) (update :instance dissoc :fault :reload-fault))
+        result (cond-> result recovered?
+                 (update :intents conj
+                         (merge (select-keys snapshot [:show-id :epoch :time-ms :number])
+                                {:type :effect/recovered :instance-id (:id before) :cue-id (:cue-id before)
+                                 :effect-id (:effect-id before) :effect-version (get-in result [:instance :effect-version])})))]
+    (assoc result :before before :prepared prepared)))
+
+(defn- assemble [model snapshot descriptors evaluations]
+  (let [evaluated (runtime/merge-results {:frame snapshot :effects descriptors} evaluations)
+        instances (into {} (keep (fn [result]
+                                  (when-not (:done? result)
+                                    [(:id result) (assoc (:instance result) :state (:state result))]))) evaluations)
+        events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
+    {:model (faults/record-events (assoc model :instances instances) events)
+     :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
+     :fault-events events
+     ;; Private evaluation records never enter the model or a saved show. A
+     ;; renderer can reject one malformed output without running healthy code twice.
+     ::evaluation {:model model :snapshot snapshot :descriptors descriptors :results evaluations}}))
+
+(defn reject-output
+  "Reject one renderer-attributed output, preserving all other evaluated results.
+  Unknown/global errors and a repeated rejection remain whole-frame failures."
+  [result error]
+  (let [{:keys [model snapshot descriptors results]} (::evaluation result)
+        source (:effect-source (ex-data error))
+        index (first (keep-indexed #(when (= (:instance-id source) (:id %2)) %1) results))
+        evaluated (when (some? index) (nth results index))]
+    (when-not (and evaluated (not (:output-rejected? evaluated))
+                   (= (:effect-version source) (get-in evaluated [:instance :effect-version])))
+      (throw error))
+    (let [prepared (:prepared evaluated) before (:before evaluated)
+          failed (:instance evaluated)
+          diagnostic (faults/diagnostic snapshot failed (:effect-version failed) :output error)
+          candidate? (not= (:effect-version before) (:effect-version failed))
+          prepared (if candidate? (:fallback prepared) prepared)
+          next (-> (silent-result prepared)
+                   (update :instance dissoc :retry-fault)
+                   (assoc :before before :prepared prepared :output-rejected? true)
+                   (assoc-in [:instance (if candidate? :reload-fault :fault)] diagnostic)
+                   (update :intents conj (faults/event (if candidate? :effect/reload-failed :effect/failed) diagnostic)))]
+      (assemble model snapshot descriptors (assoc results index next)))))
+
 (defn advance
   "Advance the new control model by one fully evaluated frame.
 
@@ -247,7 +375,8 @@
   default :reload-policy :pinned keeps them. :preserve-state adopts a newer
   definition while retaining state/time; :restart resets state and start time.
   Both opt-in policies retain common parameter values and add new defaults.
-  Retained parameters must validate against the new schemas or the frame fails.
+  Retained parameters must validate against new schemas; a rejected candidate
+  retains and evaluates the captured last-good revision.
   Captured authored durations remain fixed until relaunch. Explicit system AR
   controls are independent and can be edited through the command reducer.
   System pause freezes private time/beat/frame number and effect state, then
@@ -266,8 +395,10 @@
   compile-effect is called once per distinct definition needed by this frame.
   Supply an explicitly owned bounded compiler cache at the shell if desired.
   Optional map-work follows afterglow.runtime/render-frame's blocking contract.
-  Compilation, evaluation or validation failure throws without returning any new
-  model, contributions or intents. :contributions retains ordered typed and
+  Recoverable effect failures quarantine that revision without publishing its
+  attempted state/output/intents. Healthy effects continue. A newer revision or
+  explicit :instance/retry permits another attempt. Global model/executor errors
+  and cancellation still fail the frame. :contributions retains ordered typed and
   ordinary blocks; :assignments is nil if any batch is present. Consumers of a
   batch compiler must resolve the contribution stream, never just assignments.
   No hardware output or external work happens here.
@@ -294,21 +425,19 @@
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
-         prepared (mapv (partial prepare-instance model clock snapshot)
+         prepared (mapv (partial prepare-isolated model clock snapshot)
                         (sort-by (juxt :priority :order :id) (vals (:instances model))))
-         definitions (distinct (map (comp :definition :instance) (remove :expired? prepared)))
-         compiled (into {} (map (fn [definition]
-                                 (let [step (compile-effect definition)]
-                                   (when-not (ifn? step)
-                                     (fail! ::invalid-compiler-result "Compiler must return a callable step"
-                                            {:effect-id (:id definition)}))
-                                   [definition step]))) definitions)
-         evaluated (runtime/render-frame {:frame snapshot :effects (mapv (partial descriptor compiled) prepared)}
-                                         map-work)
-         instances (into {} (map (fn [result]
-                                   [(:id result) (assoc (:instance result) :state (:state result))]))
-                         (:effects evaluated))]
-     {:model (assoc model :instances instances :time-ms time-ms
-                    :last-frame-time-ms time-ms :last-frame-beat (:beat clock) :frame-number frame-number)
-      :assignments (:assignments evaluated) :contributions (:contributions evaluated)
-      :intents (:intents evaluated)})))
+         definitions (distinct (map (comp :definition :instance)
+                                    (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
+                                                                  (get-in % [:instance :fault :effect-version])))
+                                            (mapcat #(cond-> [%] (:candidate? %) (conj (:fallback %))) prepared))))
+         compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
+         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :state]) :step identity) prepared)
+         evaluations (vec (map-work (partial evaluate-isolated snapshot compiled) prepared))
+         ;; Worker completion order is deliberately discarded before the model,
+         ;; fault journal and result records are assembled.
+         evaluations (vec (sort-by (juxt #(get-in % [:instance :priority])
+                                         #(get-in % [:instance :order]) :id) evaluations))]
+     (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
+                            :last-frame-beat (:beat clock) :frame-number frame-number)
+               snapshot descriptors evaluations))))

@@ -243,15 +243,16 @@
   (let [recording (replay/new-recording (assoc (initial-show) :value (float 0.1)))]
     (is (= recording (edn/read-string (pr-str recording))))))
 
-(deftest failures-and-invalid-inputs-return-no-partial-recording
+(deftest effect-faults-record-isolation-while-invalid-frame-inputs-fail
   (let [model (:model (replay/record (initial-show) setup-steps compile-test-effect))
         original (replay/digest model)
-        error (error-data #(replay/record model [(at 0)]
-                                         (fn [_] (fn [_] (throw (ex-info "Bad effect" {:failure :effect}))))))]
-    (is (= ::replay/step-failed (:type error)))
-    (is (= 0 (:step-index error)))
-    (is (= ::runtime/step-failed (get-in error [:cause-data :type])))
-    (is (= "0:1" (get-in error [:cause-data :effect-id])))
+        result (replay/record model [(at 0)]
+                              (fn [_] (fn [_] (throw (ex-info "Bad effect" {:failure :effect})))))]
+    (is (= :evaluate (get-in result [:model :instances "0:1" :fault :stage])))
+    (is (= :effect/failed (get-in result [:model :variables :runtime :events 0 :type])))
+    (is (= 1 (count (get-in result [:recording :steps]))))
+    (is (= (get-in model [:instances "0:1" :state])
+           (get-in result [:model :instances "0:1" :state])))
     (is (= original (replay/digest model)))
     (doseq [input [{:kind :wrong :frame {}}
                   {:kind :frame :frame {} :command {}}
