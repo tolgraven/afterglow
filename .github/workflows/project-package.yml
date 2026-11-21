@@ -6,6 +6,8 @@ on:
       - 'project.clj'
       - '.github/scripts/install-lein'
       - 'package*.json'
+      - 'src/afterglow/render/**'
+      - 'resources/gpu/**'
       - '.github/workflows/project-package.yml'
 permissions:
   contents: read
@@ -35,3 +37,14 @@ jobs:
           grep -Fx 'api_doc/index.html' "$RUNNER_TEMP/afterglow-jar-entries"
           grep -Fx 'afterglow/version.edn' "$RUNNER_TEMP/afterglow-jar-entries"
           java -jar target/afterglow.jar --help
+      - name: Load the packaged shaders outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          java -Djava.awt.headless=true -cp "$GITHUB_WORKSPACE/target/afterglow.jar" clojure.main -e '
+            (require (quote [afterglow.render.gpu :as gpu])
+                     (quote [clojure.java.io :as io])
+                     (quote [clojure.string :as str]))
+            (doseq [asset [:moving-head-vertex :moving-head-solver :expression-runner]]
+              (let [url (io/resource (gpu/resources asset))]
+                (assert (= "jar" (some-> url .getProtocol)) (str "Missing packaged asset " asset))
+                (assert (seq (str/trim (gpu/source asset))) (str "Empty shader source for " asset))))'
