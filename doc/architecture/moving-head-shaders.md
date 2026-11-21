@@ -72,3 +72,13 @@ Performance on physical Mac GPUs and byte-equivalence for DMX remain unverified.
 
 The [JVM lighting-expression runner](native-expression-shaders.md) uses the
 same context, fence and readback ownership for named color, focus and other fields.
+
+`afterglow.render.frame/fixture-pose` reconstructs the commanded beam from the
+normalized pan and tilt in a committed frame. It accepts either rich target
+values or one projected compact target. The result includes the unwrapped
+mechanical angles and the world-space beam direction after fixture mounting.
+For example, a wide-pan head may reach a requested −170° bearing by turning
+to +190°. A target beyond the tilt range stops at the calibrated end of travel.
+Use the pose for visualisation and the original aim for an editing handle.
+This projection describes channel commands. Optical calibration, motor lag
+and fixture feedback require measurements from the physical fixture.
