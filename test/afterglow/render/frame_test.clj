@@ -621,3 +621,35 @@
         hidden (frame/resolve-frame [moving] (conj base (assoc (assignment :moving :aim [3 2 7]) :opacity 0)))]
     (is (= (:values expected) (:values blended)))
     (is (= (:values (frame/resolve-frame [moving] base)) (:values hidden)))))
+
+(deftest projected-pose-uses-committed-axes-at-mechanical-stops
+  (let [fixture {:id :hung :universe 1 :address 1 :channels {:pan [1 2] :tilt [3 4]}
+                 :rotation-deg [0 0 180] :calibration {:pan {:min-deg -30 :max-deg 30}
+                                                       :tilt {:min-deg -20 :max-deg 20}}}
+        frame (frame/resolve-frame [fixture] [(assignment :hung :aim [-1 -1 0])]
+                                   {:compact-values? true})
+        rich (get-in frame [:values :hung])
+        compact (first (frame/project-compact (:compact frame)))
+        pose (frame/fixture-pose fixture rich)
+        expected [-0.46984631039295416 -0.3420201433256687 0.8137976813493738]]
+    (is (false? (:aim-reachable? rich)))
+    (is (near? 90 (:pan-deg rich)))
+    (is (near? 45 (:tilt-deg rich)))
+    (is (every? true? (map near? expected (:direction pose))))
+    (is (= [30.0 20.0] ((juxt :pan-deg :tilt-deg) pose)))
+    (is (= pose (frame/fixture-pose fixture compact)))
+    (is (= pose (frame/fixture-pose fixture (select-keys rich [:channels]))))
+    (is (nil? (frame/fixture-pose fixture {:pan 1.0 :aim [-1 -1 0]})))))
+
+(deftest projected-pose-keeps-multi-turn-and-reversed-calibration
+  (let [fixture {:id :wide :universe 1 :address 1 :channels {:pan 1 :tilt 2}
+                 :calibration {:pan {:min-deg -270 :max-deg 270} :tilt [127.5 -127.5]}}
+        angle (Math/toRadians -170.0)
+        aim [(Math/sin angle) 0 (Math/cos angle)]
+        rich (get-in (frame/resolve-frame [fixture] [(assignment :wide :direction aim)]
+                                         {:previous-values {:wide {:pan 0.95}}}) [:values :wide])
+        pose (frame/fixture-pose fixture rich)]
+    (is (near? -170.0 (:pan-deg rich)))
+    (is (near? 190.0 (:pan-deg pose)))
+    (is (every? true? (map near? aim (:direction pose))))
+    (is (near? -180.0 (:tilt-deg (frame/fixture-pose fixture {:pan 0.5 :tilt 1.0}))))))
