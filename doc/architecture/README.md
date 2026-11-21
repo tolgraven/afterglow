@@ -2,6 +2,7 @@
 
 The cross-repository program lives in the sibling tolglow checkout:
 
+* [Physical output and RDM](physical-output.md)
 * [Documentation index](../../../tolglow/docs/README.md)
 * [Current code survey](../../../tolglow/docs/codebase-survey.md)
 * [Functional runtime](../../../tolglow/docs/architecture/functional-runtime.md)

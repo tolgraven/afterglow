@@ -12,11 +12,14 @@
     afterglow.control.devices.push-3-test afterglow.control.devices.mpe-test
     afterglow.control.codecs.x-touch-test afterglow.control.devices.x-touch-test
     afterglow.control.devices.session-test afterglow.control.devices.transports-test
+    afterglow.output.artnet-test afterglow.output.ola-test afterglow.output.scheduler-test
+    afterglow.rdm.transport-test
     afterglow.render.frame-test afterglow.render.ir-test afterglow.render.presentation-test])
 
 (def suites
   {"pure" pure-tests
    "parity" (into pure-tests '[
+               afterglow.output.ola-protocol-parity-test
                afterglow.channels-test afterglow.rhythm-test
                afterglow.controllers.ableton-push-2-test
                afterglow.effects-test afterglow.effects.color-test
