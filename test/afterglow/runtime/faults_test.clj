@@ -3,6 +3,7 @@
             [afterglow.runtime.engine :as engine]
             [afterglow.runtime.engine-test :as fixture]
             [afterglow.runtime.executor :as executor]
+            [afterglow.runtime.replay :as replay]
             [afterglow.control.model :as control]))
 
 (defn- invoke [show t compile] (engine/advance show {:time-ms t} compile))
@@ -106,6 +107,19 @@
                (engine/advance (fixture/model (fixture/instance "a")) {:time-ms 10} fixture/compiler
                                (fn [_ _] [])))))
 
+(deftest an-unsuccessful-explicit-retry-does-not-report-recovery-next-frame
+  (let [compile (fn [_] (fn [_] (throw (ex-info "Still bad" {}))))
+        failed (invoke (control/new-show (fixture/model (fixture/instance "live"))) 1 compile)
+        retry (:model (control/apply-command (:model failed)
+                                             {:op :instance/retry :instance-id "live" :command-id "retry"
+                                              :source :test :show-id "test-show" :epoch 3}))
+        failed-again (invoke retry 2 compile)
+        held (invoke (:model failed-again) 3 compile)]
+    (is (= [:effect/failed] (mapv :type (:fault-events failed-again))))
+    (is (empty? (:fault-events held)))
+    (is (get-in held [:model :instances "live" :fault]))
+    (is (nil? (get-in held [:model :instances "live" :retry-fault])))))
+
 (deftest renderer-rejection-does-not-repeat-healthy-evaluation
   (let [calls (atom []) compile (calls-compiler calls (fn [d c] ((fixture/compiler d) c)))
         show (fixture/model (fixture/instance "bad") (fixture/instance "good" :order 1))
@@ -127,8 +141,25 @@
     (with-open [pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
       (let [serial (invoke show 10 compile)
             parallel (engine/advance show {:time-ms 10} compile (executor/mapper pool))]
+        (is (= serial parallel))
         (is (= (:assignments serial) (:assignments parallel)))
         (is (= (mapv :state (vals (get-in serial [:model :instances])))
                (mapv :state (vals (get-in parallel [:model :instances])))))
         (is (= (mapv #(select-keys % [:type :instance-id :stage]) (:fault-events serial))
                (mapv #(select-keys % [:type :instance-id :stage]) (:fault-events parallel))))))))
+
+(deftest fault-history-is-bounded-and-recordings-replay-across-worker-schedules
+  (let [compile (fn [_] (fn [_] (throw (ex-info "Deterministic authored fault" {:path [:outputs 0]}))))
+        show (control/new-show (fixture/model (fixture/instance "broken")))
+        recorded (replay/record show [{:kind :frame :frame {:time-ms 10}}] compile)
+        many (reduce (fn [model n]
+                       (let [retried (:model (control/apply-command
+                                              model {:op :instance/retry :instance-id "broken"
+                                                     :show-id (:show-id model) :epoch (:epoch model)
+                                                     :source :test :command-id (str "retry-" n)}))]
+                         (:model (invoke retried (inc n) compile)))) show (range 100))]
+    (is (= 64 (count (get-in many [:variables :runtime :events]))))
+    (is (= 100 (get-in many [:variables :runtime :event-sequence])))
+    (is (= 37 (get-in many [:variables :runtime :events 0 :sequence])))
+    (with-open [pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
+      (is (= 1 (:verified-steps (replay/replay (:recording recorded) compile {:map-work (executor/mapper pool)})))))))

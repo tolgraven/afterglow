@@ -280,7 +280,7 @@
     (cond
       (and (not (:expired? prepared))
            (= (:effect-version instance) (get-in instance [:fault :effect-version])))
-      (silent-result prepared)
+      (assoc (silent-result prepared) :skipped? true)
 
       (and error (not (:expired? prepared)))
       {:failure (faults/diagnostic snapshot instance (:effect-version instance) :compile error)}
@@ -310,17 +310,17 @@
                              (update :intents conj (faults/event :effect/reload-failed fault)))]
             [(attempt snapshot compiled fallback) fallback])
           [result prepared])
+        succeeded? (and (nil? (:failure result)) (not (:skipped? result)))
         result (if-let [failure (:failure result)]
                  (-> (silent-result prepared)
                      (assoc-in [:instance :fault] failure)
                      (update :intents conj (faults/event :effect/failed failure)))
                  result)
-        recovered? (and (nil? fault) (nil? (:failure result))
+        recovered? (and (nil? fault) succeeded?
                         (or (and candidate? (or (:fault before) (:reload-fault before)))
                             (:retry-fault before)))
-        result (cond-> result
-                 (and candidate? (nil? fault)) (update :instance dissoc :fault :reload-fault)
-                 recovered? (update :instance dissoc :retry-fault))
+        result (cond-> (update result :instance dissoc :retry-fault)
+                 (and candidate? (nil? fault)) (update :instance dissoc :fault :reload-fault))
         result (cond-> result recovered?
                  (update :intents conj
                          (merge (select-keys snapshot [:show-id :epoch :time-ms :number])
@@ -358,6 +358,7 @@
           candidate? (not= (:effect-version before) (:effect-version failed))
           prepared (if candidate? (:fallback prepared) prepared)
           next (-> (silent-result prepared)
+                   (update :instance dissoc :retry-fault)
                    (assoc :before before :prepared prepared :output-rejected? true)
                    (assoc-in [:instance (if candidate? :reload-fault :fault)] diagnostic)
                    (update :intents conj (faults/event (if candidate? :effect/reload-failed :effect/failed) diagnostic)))]
@@ -433,7 +434,8 @@
          evaluations (vec (map-work (partial evaluate-isolated snapshot compiled) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
-         evaluations (vec (sort-by #(get-in % [:instance :order]) evaluations))]
+         evaluations (vec (sort-by (juxt #(get-in % [:instance :priority])
+                                         #(get-in % [:instance :order]) :id) evaluations))]
      (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
                             :last-frame-beat (:beat clock) :frame-number frame-number)
                snapshot descriptors evaluations))))
