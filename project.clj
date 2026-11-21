@@ -64,7 +64,8 @@
                  [buddy/buddy-core "1.12.0-430"]
                  [instaparse "1.5.0"]
                  [http-kit "2.8.1"]]
-  :repositories {"sonatype-snapshots" "https://oss.sonatype.org/content/repositories/snapshots"}
+  :repositories {"central" "https://repo.maven.apache.org/maven2/"
+                 "sonatype-snapshots" "https://oss.sonatype.org/content/repositories/snapshots"}
   :main afterglow.core
   :uberjar-name "afterglow.jar"
 
