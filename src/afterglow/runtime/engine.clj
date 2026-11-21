@@ -294,8 +294,10 @@
               (update :contributions #(mapv (fn [block] (assoc block :source source)) %))))
         (catch Throwable error
           {:failure (faults/diagnostic snapshot instance (:effect-version instance)
-                                       (if (#{:afterglow.runtime/invalid-result :afterglow.runtime/invalid-contributions}
-                                             (:type (ex-data error))) :result :evaluate) error)})))))
+                                       (if (some #(#{:afterglow.runtime/invalid-result :afterglow.runtime/invalid-contributions}
+                                                   (:type (ex-data %)))
+                                                 (take 4 (take-while some? (iterate #(.getCause ^Throwable %) error))))
+                                         :result :evaluate) error)})))))
 
 (defn- evaluate-isolated [snapshot compiled prepared]
   (let [result (attempt snapshot compiled prepared)
@@ -316,7 +318,7 @@
                      (assoc-in [:instance :fault] failure)
                      (update :intents conj (faults/event :effect/failed failure)))
                  result)
-        recovered? (and (nil? fault) succeeded?
+        recovered? (and (nil? fault) succeeded? (not (:expired? prepared))
                         (or (and candidate? (or (:fault before) (:reload-fault before)))
                             (:retry-fault before)))
         result (cond-> (update result :instance dissoc :retry-fault)
