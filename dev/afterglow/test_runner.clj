@@ -19,6 +19,7 @@
 (def suites
   {"pure" pure-tests
    "parity" (into pure-tests '[
+               afterglow.control.devices.osc-transport-parity-test
                afterglow.output.ola-protocol-parity-test
                afterglow.channels-test afterglow.rhythm-test
                afterglow.controllers.ableton-push-2-test
