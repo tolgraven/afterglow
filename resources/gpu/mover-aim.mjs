@@ -96,29 +96,37 @@ export function createMovingHeadSolver(fixtures, vertexSource, canvas = globalTh
       gl.enableVertexAttribArray(slot);
       gl.vertexAttribPointer(slot, width, gl.FLOAT, false, 52, offset * 4);
     }
-    const input = allocate(gl.ARRAY_BUFFER, count * 16, gl.STREAM_DRAW);
+    // Per head: three world coordinates, the last accepted pan, and input kind.
+    const targets = new Float32Array(count * 5);
+    const input = allocate(gl.ARRAY_BUFFER, targets.byteLength, gl.STREAM_DRAW);
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(5);
+    gl.vertexAttribPointer(5, 1, gl.FLOAT, false, 20, 16);
     const output = allocate(gl.TRANSFORM_FEEDBACK_BUFFER, count * 16, gl.STREAM_COPY);
     const staging = allocate(gl.COPY_WRITE_BUFFER, count * 16, gl.STREAM_READ);
     gl.enable(gl.RASTERIZER_DISCARD);
     if (gl.getError() !== gl.NO_ERROR) throw new Error('Unable to configure moving-head buffers');
-    const targets = new Float32Array(count * 4);
     const info = gl.getExtension('WEBGL_debug_renderer_info');
     const renderer = gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
 
-    async function solve(aims, previousAxes) {
+    async function solve(inputs, previousAxes) {
       if (disposed || gl.isContextLost()) throw new Error('Moving-head solver is unavailable');
       if (busy) throw new Error('A moving-head frame is already in flight');
-      if (aims.length !== count || (previousAxes != null && previousAxes.length !== targets.length))
-        throw new RangeError('Aims and previous axes must describe this rig in patch order');
+      if (inputs?.length !== count || (previousAxes != null && previousAxes.length !== count * 4))
+        throw new RangeError('Movement inputs and previous axes must describe this rig in patch order');
       const started = performance.now();
       for (let i = 0; i < count; i++) {
         const prior = previousAxes == null ? -1 : previousAxes[i * 4];
-        if (!triple(aims[i]) || (previousAxes != null && !(prior >= 0 && prior <= 1)))
-          throw new RangeError('Invalid world target or prior normalized pan');
-        targets.set(aims[i], i * 4);
-        targets[i * 4 + 3] = prior;
+        const input = inputs[i];
+        const direction = input?.aim == null && input?.direction != null;
+        const coordinates = direction ? input.direction : (input?.aim ?? input);
+        if (!triple(coordinates) || (previousAxes != null && !(prior >= 0 && prior <= 1)))
+          throw new RangeError('Invalid world target, direction or prior normalized pan');
+        const offset = i * 5;
+        targets.set(coordinates, offset);
+        targets[offset + 3] = prior;
+        targets[offset + 4] = direction ? 1 : 0;
       }
       if (!targets.every(Number.isFinite)) throw new RangeError('Targets must fit float32');
       busy = true;
@@ -133,7 +141,7 @@ export function createMovingHeadSolver(fixtures, vertexSource, canvas = globalTh
         gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
         gl.bindBuffer(gl.COPY_READ_BUFFER, output);
         gl.bindBuffer(gl.COPY_WRITE_BUFFER, staging);
-        gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, targets.byteLength);
+        gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, count * 4 * Float32Array.BYTES_PER_ELEMENT);
         const pending = waitForReadback(gl), submitted = performance.now();
         await pending;
         if (disposed) throw new Error('Moving-head solver disposed during frame');
@@ -144,7 +152,7 @@ export function createMovingHeadSolver(fixtures, vertexSource, canvas = globalTh
         if (gl.getError() !== gl.NO_ERROR || !axes.every(Number.isFinite))
           throw new Error('Invalid moving-head readback');
         for (let i = 3; i < axes.length; i += 4)
-          if (axes[i] !== 1) throw new RangeError('Aim has zero distance from its fixture');
+          if (axes[i] !== 1) throw new RangeError('Aim or direction has zero length in fixture coordinates');
         const copied = performance.now();
         return { axes, timing: { uploadMs: uploaded-started, submitMs: submitted-uploaded,
           fenceWaitMs: ready-submitted, readbackMs: copied-ready, totalMs: copied-started } };
