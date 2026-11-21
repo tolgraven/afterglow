@@ -1,0 +1,18 @@
+name: Moving-head GPU solver
+on:
+  pull_request:
+    paths: ['resources/gpu/**', 'test/js/moving-head-solver.cjs', 'package*.json', '.github/workflows/moving-head-gpu.yml']
+  push:
+    branches: [master]
+    paths: ['resources/gpu/**', 'test/js/moving-head-solver.cjs', 'package*.json', '.github/workflows/moving-head-gpu.yml']
+jobs:
+  shader:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '26'
+      - run: npm ci --ignore-scripts
+      - run: npx --no-install playwright-core install --with-deps chromium
+      - run: node --test test/js/moving-head-solver.cjs
