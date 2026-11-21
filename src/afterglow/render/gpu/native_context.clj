@@ -49,7 +49,7 @@
           (.glGetProgramInfoLog gl handle (alength log) n 0 log 0)
           (.glGetShaderInfoLog gl handle (alength log) n 0 log 0))
         (throw (ex-info "GLSL compilation or link failed"
-                        {:stage (if program? :link :compile)
+                        {:type ::invalid-program :stage (if program? :link :compile)
                          :log (String. log 0 (aget n 0) StandardCharsets/UTF_8)}))))))
 
 (defn- attach! [^GL3 gl program kind source]
@@ -63,12 +63,14 @@
 
 (defn shader-program [^GL3 gl source varyings]
   (let [program (.glCreateProgram gl)]
-    (attach! gl program GL2ES2/GL_VERTEX_SHADER (str/replace-first source "#version 300 es" "#version 330 core"))
-    (attach! gl program GL2ES2/GL_FRAGMENT_SHADER "#version 330 core\nout vec4 color; void main(){color=vec4(0.0);}")
-    (.glTransformFeedbackVaryings gl program (count varyings) (into-array String varyings) GL2ES3/GL_INTERLEAVED_ATTRIBS)
-    (.glLinkProgram gl program)
-    (check-compiled! gl program true)
-    program))
+    (try
+      (attach! gl program GL2ES2/GL_VERTEX_SHADER (str/replace-first source "#version 300 es" "#version 330 core"))
+      (attach! gl program GL2ES2/GL_FRAGMENT_SHADER "#version 330 core\nout vec4 color; void main(){color=vec4(0.0);}")
+      (.glTransformFeedbackVaryings gl program (count varyings) (into-array String varyings) GL2ES3/GL_INTERLEAVED_ATTRIBS)
+      (.glLinkProgram gl program)
+      (check-compiled! gl program true)
+      program
+      (catch Throwable error (.glDeleteProgram gl program) (throw error)))))
 
 (defrecord Context [^GLAutoDrawable drawable resources ^ReentrantLock lock closed? timeout-ms kind]
   Closeable
@@ -112,6 +114,15 @@
   (try
     (with-context (:drawable owner) f)
     (catch Throwable error (.close owner) (throw error))))
+
+(defn prepare!
+  "Compile owned resources. A rejected shader leaves existing programs usable."
+  [^Context owner f]
+  (try
+    (with-context (:drawable owner) f)
+    (catch Throwable error
+      (when-not (= ::invalid-program (:type (ex-data error))) (.close owner))
+      (throw error))))
 
 (defn- await-fence! [^GL3 gl timeout-ms]
   (let [fence (.glFenceSync gl GL3ES3/GL_SYNC_GPU_COMMANDS_COMPLETE 0)]

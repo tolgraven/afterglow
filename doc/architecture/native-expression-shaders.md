@@ -57,3 +57,41 @@ values have an exploratory 0.001 absolute tolerance. Arithmetic/vector fields
 use 0.000003 absolute plus 0.000003 relative tolerance. The 256-pixel packing
 case uses exactly representable arithmetic and requires identical DMX bytes.
 These measurements do not bound transcendental error for other inputs.
+
+## One context for a show
+
+```clojure
+(require '[afterglow.render.gpu.session :as gpu])
+
+(def spots (gpu/group fields [[0 0 0] [0.5 0 0] [1 0 0]]))
+
+(with-open [owner (gpu/open! {:max-programs 8 :queue-capacity 4 :timeout-ms 25})]
+  (let [rendered (gpu/evaluate! owner spots {:params {:wash [1 0.25 0.5] :focus 0.7}})]
+    (frame/resolve-batches patch [(assoc rendered :target-ids [:left :center :right])])))
+```
+
+Create one owner at show startup. Prepare a group when editing effects or
+patching fixtures and reuse it across frames. The value key contains the complete
+definitions and copied positions in patch order, normalized to the GPU's float32
+inputs. Equal descriptions reuse a program even if built independently from a
+packed double array or vectors. Moving or reordering fixtures produces a new
+group whenever the ordered GPU inputs change. Keep the matching target IDs in
+the caller’s frame snapshot. The cache retains up to `:max-programs` (default
+eight). It compiles one prospective replacement before evicting the least
+recently used group, so a rejected shader preserves the prior program. Use
+`(gpu/evict! owner group)` to explicitly discard a retired rig or definition.
+
+One worker serializes GPU calls. Multiple frame workers can call `evaluate!`
+or use `(gpu/submit! owner group env)` for a Java Future. Submission captures
+uniforms immediately. The queue has room for `:queue-capacity` waiting jobs
+(default four) plus one active job. Saturation throws `::gpu/busy` immediately.
+The host chooses how to handle a late frame. Each successful evaluation owns
+its output arrays; later draws and eviction cannot change them. `gpu/status`
+reports renderer, queued and resident counts, cache hits, misses and evictions.
+
+`(gpu/close! owner)` stops intake, cancels waiting futures, lets the active draw
+finish and releases the context before returning. `(gpu/close! owner 25)`
+waits up to 25 ms for cleanup and returns false if the worker is still releasing
+the context. Cleanup then completes independently. Driver calls and compilation
+can outlast the fence timeout. Cancelling a future never interrupts an executing
+native call. The show publisher controls whether to accept a completed frame.
