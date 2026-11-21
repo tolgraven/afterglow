@@ -2,6 +2,7 @@
 
 The cross-repository program lives in the sibling tolglow checkout:
 
+* [Named GPU fixture fields](numeric-shader-fields.md)
 * [Physical output and RDM](physical-output.md)
 * [Documentation index](../../../tolglow/docs/README.md)
 * [Current code survey](../../../tolglow/docs/codebase-survey.md)
