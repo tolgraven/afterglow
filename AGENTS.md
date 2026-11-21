@@ -55,3 +55,12 @@ cue semantics. Waveform/modulation state, clocks and RNG remain explicit and
 deterministic across workers. Optional webview/Max hosts or Link/AbleSet adapters
 must not reintroduce a legacy effect compatibility layer or own a competing show
 clock. Preserve reference licenses and distinguish tested codecs from hardware.
+
+The shared performance layer stores opacity/AR/private-clock controls under
+instance `:system`, independent of authored parameters. Pause freezes evolution
+but live parameter/global inputs remain responsive. Never cache typed output
+arrays in the model; regenerate paused outputs without repeating intents. Group
+selectors use captured output-derived categories and one atomic command receipt.
+Phone/Watch sensor middleware must carry explicit immutable state, provenance,
+units/calibration and musical timing; use supported APIs rather than infer raw
+finger gestures from unrelated motion capabilities.

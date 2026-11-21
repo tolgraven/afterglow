@@ -5,6 +5,7 @@
             [afterglow.control.devices.push-2 :as push]
             [afterglow.control.devices.push-3 :as push-3]
             [afterglow.control.devices.seaboard :as seaboard]
+            [afterglow.control.devices.x-touch :as x-touch]
             [afterglow.control.devices.generic :as generic]
             [afterglow.control.devices.transports :as transports]))
 
@@ -72,4 +73,11 @@
   "Open a Seaboard M with its configured MPE zone and cue/axis mappings."
   [options]
   (seaboard/connect! (cond-> options
+                      (not (:transport options)) (assoc :transport (transports/midi-transport options)))))
+
+(defn open-x-touch!
+  "Open an explicitly selected X-Touch or extender in MCU mode. Each unit owns
+  its MIDI ports and session; use x-touch/connect-group! for coordinated banks."
+  [options]
+  (x-touch/connect! (cond-> (with-feedback options)
                       (not (:transport options)) (assoc :transport (transports/midi-transport options)))))

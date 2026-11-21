@@ -188,11 +188,12 @@
        (catch clojure.lang.ExceptionInfo error
          [(assoc (ex-data error) :message (.getMessage error))])))
 
-(defn- blend-value [previous value blend]
-  (let [op (case blend :replace (fn [_ value] value) :max max :add +)]
+(defn- blend-value [previous value blend opacity]
+  (let [op (case blend :replace (fn [_ value] value) :max max :add +)
+        composite (if (== 1 opacity) op (fn [before value] (+ before (* opacity (- (op before value) before)))))]
     (if (vector? value)
-      (mapv op (or previous (vec (repeat (count value) 0))) value)
-      (op (or previous 0) value))))
+      (mapv composite (or previous (vec (repeat (count value) 0))) value)
+      (composite (or previous 0) value))))
 
 (defn- assignment-value? [attribute value]
   (case attribute
@@ -203,7 +204,7 @@
 (defn- validate-assignment! [fixture target-id attribute value blend assignment]
   (when-not (and (map? assignment) fixture
                  (keyword? attribute) (#{:replace :max :add} blend)
-                 (assignment-value? attribute value))
+                 (assignment-value? attribute value) (unit? (:opacity assignment 1)))
     (fail! "Invalid assignment target, attribute, blend or value" {:assignment assignment}))
   (when (and (= attribute :color) (not (::rgb? fixture)))
     (fail! "Color assignment requires red, green and blue channels" {:target-id target-id}))
@@ -218,16 +219,17 @@
   ;; rebuilding the outer persistent map for every per-pixel contribution.
   (let [targets (object-array (count (:fixtures patch)))
         by-id (:by-id patch)]
-   (doseq [{:keys [target-id attribute value blend] :or {blend :replace} :as assignment} assignments]
+   (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
     (let [fixture (get by-id target-id)]
      (validate-assignment! fixture target-id attribute value blend assignment)
-     (let [index (int (::index fixture))
+     (when (pos? opacity)
+      (let [index (int (::index fixture))
            attributes (or (aget targets index) (transient {}))
            previous (get attributes attribute)
-           blended (blend-value previous value blend)]
+           blended (blend-value previous value blend opacity)]
        (when-not (assignment-value? attribute blended)
          (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
-       (aset targets index (assoc! attributes attribute blended)))))
+       (aset targets index (assoc! attributes attribute blended))))))
    (dotimes [index (alength targets)]
      (when-let [attributes (aget targets index)]
        (aset targets index (persistent! attributes))))
@@ -423,14 +425,16 @@
       (put-byte! universes coarse (Math/round value)))))
 
 (defn- write-packed-assignment!
-  [^doubles values ^booleans present index value blend target-id attribute]
-  (let [index (int index)
+  [^doubles values ^booleans present index value blend opacity target-id attribute]
+  (when (pos? opacity)
+   (let [index (int index)
         before (aget values index)
-        next-value (double (case blend :replace value :add (+ before value) :max (max before value)))]
+        blended (case blend :replace value :add (+ before value) :max (max before value))
+        next-value (double (if (== 1 opacity) blended (+ before (* opacity (- blended before)))))]
     (when-not (unit? next-value)
       (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value next-value}))
     (aset-double values index next-value)
-    (aset-boolean present index true)))
+    (aset-boolean present index true))))
 
 (defn- pack-dense-state
   [patch ^doubles values ^booleans present {:keys [master blackout? compact-values?]}]
@@ -493,20 +497,21 @@
         values (double-array count)
         present (boolean-array count)
         by-id (:by-id patch)]
-    (doseq [{:keys [target-id attribute value blend] :or {blend :replace} :as assignment} assignments]
+    (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
       (let [fixture (get by-id target-id)]
         (validate-assignment! fixture target-id attribute value blend assignment)
         (let [base (* stride (int (::index fixture)))]
           (if (= :color attribute)
             (dotimes [component 3]
               (write-packed-assignment! values present (+ base component) (nth value component)
-                                        blend target-id attribute))
+                                        blend opacity target-id attribute))
             (write-packed-assignment! values present (+ base (int (get slots attribute))) value
-                                      blend target-id attribute)))))
+                                      blend opacity target-id attribute)))))
     (pack-dense-state patch values present options)))
 
 (defn- packed-assignment? [assignment]
   (and (not (geometric-attributes (:attribute assignment)))
+       (packed-number? (:opacity assignment 1))
        (let [value (:value assignment)]
          (if (vector? value) (every? packed-number? value) (packed-number? value)))))
 
@@ -585,9 +590,9 @@
 (defn- validate-batches [patch batches]
   (when-not (vector? batches) (fail! "Batches must be an ordered vector" {}))
   (mapv
-   (fn [{:keys [target-ids outputs blend count] :or {blend :replace} :as batch}]
+   (fn [{:keys [target-ids outputs blend count opacity] :or {blend :replace opacity 1} :as batch}]
      (when-not (and (map? batch) (vector? target-ids) (map? outputs) (seq outputs)
-                    (#{:replace :max :add} blend) (or (nil? count) (= count (clojure.core/count target-ids))))
+                    (#{:replace :max :add} blend) (unit? opacity) (or (nil? count) (= count (clojure.core/count target-ids))))
        (fail! "Invalid batch shape, count or blend" {}))
      (let [same-order? (= target-ids (:target-order patch))
            target-indices (if same-order? nil
@@ -612,12 +617,12 @@
                         {:attribute attribute :components components :values values
                          :slot (if (= attribute :color) 0 (get (::attribute-slots patch) attribute))}))
                     (sort-by (comp str key) outputs))]
-       {:target-ids target-ids :target-indices target-indices :columns columns :blend blend})) batches))
+       {:target-ids target-ids :target-indices target-indices :columns columns :blend blend :opacity opacity})) batches))
 
 (defn- merge-packed-batches!
   [patch ^doubles target-values ^booleans target-present batches]
   (let [stride (int (::stride patch))]
-    (doseq [{:keys [target-ids target-indices columns blend]} batches
+    (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
             {:keys [attribute components values slot]} columns]
       (let [^doubles source values, row-count (count target-ids), components (int components)]
         (dotimes [row row-count]
@@ -629,31 +634,33 @@
                   (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
                 (let [destination (+ base component)
                       before (aget target-values destination)
-                      level (case blend :replace value :add (+ before value) :max (max before value))]
+                      blended (case blend :replace value :add (+ before value) :max (max before value))
+                      level (if (== 1 opacity) blended (+ before (* opacity (- blended before))))]
                   (when-not (and (Double/isFinite level) (<= 0.0 level) (<= level 1.0))
                     (fail! "Blended assignment exceeds its finite attribute range"
                            {:target-id (nth target-ids row) :attribute attribute :value level}))
-                  (aset-double target-values destination level)
-                  (aset-boolean target-present destination true))))))))))
+                  (when (pos? opacity)
+                    (aset-double target-values destination level)
+                    (aset-boolean target-present destination true)))))))))))
 
 (defn- merge-packed-assignments!
   [patch ^doubles values ^booleans present assignments]
   (let [stride (int (::stride patch)), slots (::attribute-slots patch), by-id (:by-id patch)]
-    (doseq [{:keys [target-id attribute value blend] :or {blend :replace} :as assignment} assignments]
+    (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
       (let [fixture (get by-id target-id)]
         (validate-assignment! fixture target-id attribute value blend assignment)
         (let [base (* stride (int (::index fixture)))]
           (if (= :color attribute)
             (dotimes [component 3]
               (write-packed-assignment! values present (+ base component) (nth value component)
-                                        blend target-id attribute))
+                                        blend opacity target-id attribute))
             (write-packed-assignment! values present (+ base (int (get slots attribute))) value
-                                      blend target-id attribute)))))))
+                                      blend opacity target-id attribute)))))))
 
-(defn- expand-batch [{:keys [target-ids columns blend]}]
+(defn- expand-batch [{:keys [target-ids columns blend opacity]}]
   (for [row (range (count target-ids))
         {:keys [attribute components values]} columns]
-    {:target-id (nth target-ids row) :attribute attribute :blend blend
+    {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity opacity
      :value (if (= 1 components) (aget ^doubles values row)
                 (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))
 
@@ -665,6 +672,11 @@
   moved ahead of or behind them. Scalar/color transport frames reduce directly
   into one owned dense target state, then pack once. Geometry, exact numbers,
   heterogeneous patches and rich values use the general reference path.
+  Assignments and batches accept :opacity in [0,1], default 1. Each write is
+  previous + opacity * (blend(previous, value) - previous); zero skips the write,
+  preserving earlier contributions and absent-attribute defaults. Geometry uses
+  the same componentwise interpolation in world coordinates. Opacity never scales
+  authored parameters. Scalar channel overrides remain distinct from RGB color.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))
@@ -687,7 +699,8 @@
                        (every? (fn [block]
                                  (case (:kind block)
                                    :assignments (every? packed-assignment? (:assignments block))
-                                   :batch (not-any? #(geometric-attributes (:attribute %)) (get-in block [:compiled :columns])))) blocks))]
+                                   :batch (and (packed-number? (get-in block [:compiled :opacity]))
+                                               (not-any? #(geometric-attributes (:attribute %)) (get-in block [:compiled :columns]))))) blocks))]
        (if dense?
          (let [size (* (int (::stride patch)) (count (:fixtures patch)))
                values (double-array size), present (boolean-array size)]

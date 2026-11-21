@@ -238,7 +238,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "cf69f9f0791c327b08bcc7a8d59eb1d8e2b36fa5f488e1b88659de0e3a5a79bc",
+     "d6c84dccebe655ce15dcb504de513c4a6b601e3f59dad8bf60205a6ee0dd82df",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -265,6 +265,12 @@
      [{:type :instance/launched,
        :instance
        {:definition {:id :base, :version 1, :program :solid},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {},
         :phase :running,
         :state {},
@@ -292,7 +298,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "253a3f8439759acba681427e4dfe4d7ccdd973caf3daecd69d16fe025e0b8c13",
+     "8f326fe0513a57a000463cbfdaca5c15268fdc252e4bc272550449d9546ef6ec",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -340,6 +346,12 @@
          :params
          {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
          :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {:level 0.8},
         :phase :running,
         :state {},
@@ -367,7 +379,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "c02e51eedc35513a144c461a4aaf993488479291dd1177d6aa1b876762b31a09",
+     "d76e81f5d13026eed67d596dc8fc0059eac3ed53ac5a281a369db1ab1d02b35c",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -427,6 +439,12 @@
          :params
          {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
          :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {:level 0.8},
         :phase :running,
         :state {},
@@ -454,7 +472,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "08f1c34f9f10ab3d2e20904372eee0a29485c222e2e7a7e8d63d99fb577a71eb",
+     "1b22f74731705f7a4bf87f3cdc2d5cd45de3bd454c9902252803f06d07b8d4d8",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -526,6 +544,12 @@
          :params
          {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
          :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {:level 0.8},
         :phase :running,
         :state {},
@@ -547,7 +571,7 @@
     :clock {:time-ms 0.0, :beat 0.0},
     :expected
     {:model-digest
-     "527cf373f766136d09e8213080afbf289264aa3e6d770cb9775dfb7dc8420314",
+     "bde5877403f0d7f4c5128bd7e873f030d455275e170f353ef3b37c2367d6d5b4",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -616,7 +640,7 @@
      :value 2.0},
     :expected
     {:model-digest
-     "527cf373f766136d09e8213080afbf289264aa3e6d770cb9775dfb7dc8420314",
+     "bde5877403f0d7f4c5128bd7e873f030d455275e170f353ef3b37c2367d6d5b4",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -693,7 +717,7 @@
      :value 0.4},
     :expected
     {:model-digest
-     "362dfebe2e43d94d21cee14603829b28c44413eb696ab76cf0aed855bdc3164b",
+     "75bc7d5aad42ddd498a3f0aa620ab0431a724562c9615c13c2997a81e9a33302",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -768,7 +792,7 @@
      :value 0.4},
     :expected
     {:model-digest
-     "362dfebe2e43d94d21cee14603829b28c44413eb696ab76cf0aed855bdc3164b",
+     "75bc7d5aad42ddd498a3f0aa620ab0431a724562c9615c13c2997a81e9a33302",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -832,7 +856,7 @@
     :clock {:time-ms 100.0, :beat 0.2},
     :expected
     {:model-digest
-     "423a784fcbc3cceb06a821b8caaac262accff0a7952aa00a5db71b6c283acc2c",
+     "a0b5c25c578b668837374d40208732e9b2ba19690f402b13c16cce54929fba7e",
      :output-digest
      "3e35feaa7b6fcbffc63b7a454506c02627b25d6b444f974e756113864352a15f",
      :instances
@@ -912,7 +936,7 @@
       :release-duration-ms 50}},
     :expected
     {:model-digest
-     "5d0e1cdf4af4912ca0d18ab2b9d2fb70c2e83a4ef5457de8ff8e4a8e89bdec6e",
+     "03fef9d886eaa1d634f4cb320b9a9d17291055163d1cc2da320ccd8ea4c30c6b",
      :output-digest
      "3e35feaa7b6fcbffc63b7a454506c02627b25d6b444f974e756113864352a15f",
      :instances
@@ -982,7 +1006,7 @@
     :clock {:time-ms 200.0, :beat 0.4},
     :expected
     {:model-digest
-     "d6ae425ff9428660b8af1b3efbb49fb584f13fd0da10bbc23ec2375f14d5434c",
+     "22cf9c49951435300810aa2dfc4cfb3ec17e35e565ffa26f929d2f7e244a7070",
      :output-digest
      "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
      :instances
@@ -1060,7 +1084,7 @@
      :time-ms 200.0},
     :expected
     {:model-digest
-     "ec5bd90a31759ff2f6573a9acc31c160900e48c78b1ea95c381b2c50a29447ea",
+     "94e1acf6f0fb85c5947f9e9c185cf35bf2a4e9f434752e752545a4bf64df02a9",
      :output-digest
      "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
      :instances
@@ -1128,7 +1152,7 @@
     :clock {:time-ms 225.0, :beat 0.45},
     :expected
     {:model-digest
-     "4ef97ff5e4dca9150c411368e448c43563d3bcbb4d5687941ee1099a3a405f70",
+     "a2f63fdc07baac5de92d5072c79382d01cccec1e866e52fdb5b9e6cef58a1c68",
      :output-digest
      "f637103cc1fb9cd6cf04d534aa1daa0c55f3fa0c5f5f65c10b0e6858dcd13f59",
      :instances
@@ -1195,7 +1219,7 @@
     :clock {:time-ms 250.0, :beat 0.5},
     :expected
     {:model-digest
-     "817dea9682063c73cced370a62732ff8a5ab0206db517aee99138d941c3f8a56",
+     "a3cab902d913797271d0bee0a9491b0b5d9040a870aea8979ec9e08898acf89b",
      :output-digest
      "be2a3ee99fa65a2c4b691444bee57b6b3c2ec42f63b6b9a9d00b8dc9d33c7fd2",
      :instances
@@ -1252,7 +1276,7 @@
      :value 0.5},
     :expected
     {:model-digest
-     "5e028db619b6d77d97d1c3756ecc4028cd8c5048204d21f08314bfaf4d5fd01d",
+     "67813b2f7ac9de6799e070fe6dc5b1d3ce8f850b6162b780edd68bac5477da08",
      :output-digest
      "be2a3ee99fa65a2c4b691444bee57b6b3c2ec42f63b6b9a9d00b8dc9d33c7fd2",
      :instances
@@ -1304,7 +1328,7 @@
     :clock {:time-ms 300.0, :beat 0.6},
     :expected
     {:model-digest
-     "d90958e7b85e61d609bb43a3a2fbefb10eece88d441c69e407bf77b138554781",
+     "c3cafd8950dfae25f5c3cffbd005685ac1baddca23aea01302d773302c0ba8a0",
      :output-digest
      "18bd7737bbd267700609ab94f507d1f2b5c0dc0e903b070daa6e5cb59c3ad8a7",
      :instances
@@ -1361,7 +1385,7 @@
      :value true},
     :expected
     {:model-digest
-     "90c5d5a1ea3833aac1c78b5300b0f782cc0927eddd7382c791f94261dd99c1a7",
+     "00c3d1143dabfa601ecae4bce4d4a236f46da97800c54b0715615a2116be108e",
      :output-digest
      "18bd7737bbd267700609ab94f507d1f2b5c0dc0e903b070daa6e5cb59c3ad8a7",
      :instances
@@ -1413,7 +1437,7 @@
     :clock {:time-ms 350.0, :beat 0.7},
     :expected
     {:model-digest
-     "d545304d7f428af749815df0265bd57814e355865573737f73d25803320a5f73",
+     "50ffd1a87ada0a2b963cabad723e15cd9e22f4435d68975b6e9a0791a9434818",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances
@@ -1550,7 +1574,7 @@
     :clock {:time-ms 450.0, :beat 0.9},
     :expected
     {:model-digest
-     "352fc0dd315f46081bcd8cda7c903442f1b975be399f2219afc8724159a9a071",
+     "c7281f38fff65f0a39b8c3bd84fd91c4ee9b28f18b2862b4fd94de805b71d25e",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances
@@ -1586,6 +1610,12 @@
          :params
          {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
          :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {:level 0.8},
         :phase :running,
         :state {},
@@ -1608,7 +1638,7 @@
     :clock {:time-ms 450.0, :beat 0.9},
     :expected
     {:model-digest
-     "d9d34d7d2ece4727f0d6e2dd77b1412a3df4a0618ea5de227b7a36b9b1a89d11",
+     "f7d3eb6f4bee03b5db87ff1c23f211288a1eefa7eb5c40a4fd96a74bf8a94b3e",
      :output-digest
      "b629de865dceb439ac0a96a9c52834c209f21268a181977cc9b3d6f5072b187c",
      :instances
@@ -1631,7 +1661,7 @@
     :clock {:time-ms 575.0, :beat 1.15},
     :expected
     {:model-digest
-     "57bc7027e7ef4e93320b6a3bc6850938eba71506c7501f988de78939df7089cb",
+     "b081cc61028f40c7c40bec11634feb6dd989f44ecfd3ca55cfc0672e886925a0",
      :output-digest
      "f230021b873df8c8c04bfaee57fcb1d3a35eb6fc110e375b02c1b58d0c8ec81a",
      :instances
@@ -1678,7 +1708,7 @@
      :time-ms 600.0},
     :expected
     {:model-digest
-     "e902f7a41ef37f2450dfcee6902a76797508a410c8cc3a3aa10a937e240cda8e",
+     "79a297e84717728c6a1943ac3bbc2ca2d2cc152c2b5114d301c1e3f398d23c96",
      :output-digest
      "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
      :instances
@@ -1705,6 +1735,12 @@
      [{:type :instance/launched,
        :instance
        {:definition {:id :base, :version 1, :program :solid},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {},
         :phase :running,
         :state {},
@@ -1733,7 +1769,7 @@
     :clock {:time-ms 620.0, :beat 1.24},
     :expected
     {:model-digest
-     "1ca1496b47887f681832673d899222d0bcd0480355223149e5f568a4409c2f30",
+     "35f277278dbfe70152e43b0fee0716d8de5411575504f2aa69297525849fa66c",
      :output-digest
      "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
      :instances
@@ -1781,6 +1817,12 @@
          :params
          {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
          :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
         :params {:level 0.8},
         :phase :running,
         :state {},
@@ -1802,7 +1844,7 @@
     :clock {:time-ms 620.0, :beat 1.24},
     :expected
     {:model-digest
-     "e30a50e5b66deb0b1e5597d3179e546ddd388ac4a34791defe1555352ca58999",
+     "4053fcb32543b7e07c84477b777fd35d28e443018b690904fb26ea56e1483c5d",
      :output-digest
      "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
      :instances
@@ -1838,7 +1880,7 @@
     :clock {:time-ms 720.0, :beat 1.44},
     :expected
     {:model-digest
-     "fe2856e336939a771edba27521b4969623a86ef08d1bd753dd6bab95cea92d6b",
+     "6433e2a2da08de6845860ca383618692e68a49078666a707f762a1eff1ad4e16",
      :output-digest
      "11973271a8536af7b8d05dd283d76f592988aec751b11c674bba7a08130c4e14",
      :instances

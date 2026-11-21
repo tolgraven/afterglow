@@ -124,13 +124,24 @@
 (defn display-view
   "Device-independent labels/values. A display transport draws this map."
   [state model]
-  (let [instance (get-in model [:instances (:selected-instance state)])]
+  (let [instance (get-in model [:instances (:selected-instance state)])
+        cue (get-in model [:registry :cues (:selected-cue state)])
+        effect (or (:definition instance) (get-in model [:registry :effects (:effect-id cue)]))
+        cue-view (when cue (views/cue-view model (:id cue)))]
     {:title "Tolglow" :page (:page-id state) :origin (:origin state)
      :status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
      :master (:master model) :blackout? (:blackout? model)
      :bpm (get-in model [:transport :bpm])
      :selected (:selected-cue state)
-     :parameters (mapv (fn [[k v]] {:name (name k) :value v}) (sort-by (comp str key) (:params instance)))
+     :cue (when cue (select-keys cue-view [:id :name :color :active? :releasing?]))
+     :effect (when effect (select-keys effect [:id :name :categories :modifiers :envelope]))
+     :swatch (:color cue-view)
+     :parameters (mapv (fn [[k v]] {:id k :param k :name (or (get-in effect [:params k :name]) (name k))
+                                   :value v :schema (get-in effect [:params k])
+                                   :preview-samples (get-in effect [:params k :preview-samples])})
+                       (sort-by (comp str key) (:params instance)))
+     :cells (mapv (fn [x] (when-let [cue (cue-at state model (codec/pad-note x 0))]
+                            (views/cue-view model (:id cue)))) (range 8))
      :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))}))
 
 (defn- feedback [device-id timeout-ms batch-size state model envelope]

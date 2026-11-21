@@ -2,7 +2,9 @@
   "Immutable show commands. Time and identity enter through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.control.params :as params]
-            [afterglow.time :as musical-time]))
+            [afterglow.time :as musical-time]
+            [afterglow.control.categories :as categories]
+            [afterglow.control.system :as system]))
 
 (defn- reject! [code message & [details]]
   (throw (ex-info message {:control/error code :details details})))
@@ -91,6 +93,10 @@
     (require! (nonnegative? (:release-duration-ms definition)) :invalid-duration "Release duration must be nonnegative"))
   (when (contains? definition :duration) (check-duration! (:duration definition) true))
   (when (contains? definition :release-duration) (check-duration! (:release-duration definition) false))
+  (when (contains? definition :system) (system/validate-options (:system definition)))
+  (when (contains? definition :categories)
+    (require! (and (vector? (:categories definition)) (every? keyword? (:categories definition)))
+              :invalid-definition "Categories must be a vector of keyword tags"))
   (case kind
     :effects
     (let [schemas (get definition :params {})]
@@ -179,7 +185,11 @@
                    (and (#{:timed :one-shot} mode) musical-duration)
                    (assoc :duration musical-duration :duration-timer (musical-time/start musical-duration clock))
                    musical-release (assoc :release-duration musical-release)
-                   (:gesture-id command) (assoc :gesture-id (:gesture-id command)))]
+                   (:gesture-id command) (assoc :gesture-id (:gesture-id command)))
+        _ (doseq [source [effect cue launch] :when (contains? source :system)]
+            (system/validate-options (:system source)))
+        instance (system/initialize instance
+                                    (merge {} (:system effect) (:system cue) (:system launch)) clock)]
     {:model (-> model (assoc-in [:instances id] instance)
                 (assoc-in [:control :next-instance] next-id)
                 (update-in [:control :next-order] inc))
@@ -215,18 +225,44 @@
     (let [id (:instance-id command)
           instance (instance! model id)
           time (time! model command)
-          force? (get command :force? false)]
+          force? (get command :force? false)
+          global-clock (clock model time)]
       (require! (instance? Boolean force?) :invalid-value "Force must be boolean")
       {:model (if force? (update model :instances dissoc id)
-                  (if (= :releasing (:phase instance)) model
-                      (assoc-in model [:instances id]
-                                (cond-> (assoc instance :phase :releasing :release-at-ms time
-                                                        :release-at-beat (get-in model [:transport :beat] 0.0))
-                                  (:release-duration instance)
-                                  (assoc :release-timer (musical-time/start (:release-duration instance)
-                                                                         (assoc (clock model time) :meter (:timing-meter instance))))))))
+                  (let [resumed (system/apply-control instance {:op :instance/resume} global-clock)]
+                    (assoc-in model [:instances id]
+                              (system/release-instance resumed (system/private-clock resumed global-clock)))))
        :events [{:type (if force? :instance/removed :instance/released) :instance-id id :time-ms time}]
        :result {:instance-id id}})
+    :instance/remove
+    (do (instance! model (:instance-id command))
+        {:model (update model :instances dissoc (:instance-id command))
+         :events [{:type :instance/removed :instance-id (:instance-id command)}]
+         :result {:instance-id (:instance-id command)}})
+    (:instance/pause :instance/resume :instance/opacity-set :instance/opacity-toggle :instance/envelope-set)
+    (let [id (:instance-id command), instance (instance! model id)
+          changed (system/apply-control instance command (clock model (time! model command)))]
+      {:model (assoc-in model [:instances id] changed)
+       :events [{:type :instance/system-changed :instance-id id :system (:system changed)}]
+       :result {:instance-id id}})
+    :group/apply
+    (let [action (:action command)
+          _ (require! (and (map? action)
+                           (#{:instance/pause :instance/resume :instance/remove :instance/end
+                              :instance/opacity-set :instance/opacity-toggle :instance/envelope-set} (:op action))
+                           (every? #{:op :value :envelope :force?} (keys action)))
+                      :invalid-action "Group actions accept only instance system/lifecycle operations")
+          _ (time! model command)
+          _ (case (:op action)
+              :instance/end (require! (instance? Boolean (:force? action false)) :invalid-value "Force must be boolean")
+              :instance/remove nil
+              (system/validate-control action))
+          members (categories/select-instances model (:selector command))
+          results (reduce (fn [{:keys [model events]} instance]
+                            (let [result (apply-operation model (merge command action {:instance-id (:id instance)}))]
+                              {:model (:model result) :events (into events (:events result))}))
+                          {:model model :events []} members)]
+      (assoc results :result {:instance-ids (mapv :id members)}))
     :param/set
     (let [id (:instance-id command)
           instance (instance! model id)

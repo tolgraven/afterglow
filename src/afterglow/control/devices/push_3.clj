@@ -141,12 +141,16 @@
 (defn control-view
   "Pure labels/values for an external UI. This does not drive Push 3's display."
   [state model]
-  {:page (:page-id state) :origin (:origin state)
+  (let [state (if (:controls state)
+                (cond-> (:controls state)
+                  (get-in state [:mpe :selected-instance])
+                  (assoc :selected-instance (get-in state [:mpe :selected-instance]))) state)]
+   {:page (:page-id state) :origin (:origin state)
    :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
    :touches (:touches state) :master (:master model) :blackout? (:blackout? model)
    :parameters (get-in model [:instances (:selected-instance state) :params] {})
    :cells (mapv (fn [[x y]] {:x x :y y :cue (some->> (cue-at state model [x y]) :id (views/cue-view model))})
-                (for [y (range 8) x (range 8)] [x y]))})
+                (for [y (range 8) x (range 8)] [x y]))}))
 
 (defn- acknowledge [state command ack]
   (let [hold (when-let [gesture (:gesture-id command)]

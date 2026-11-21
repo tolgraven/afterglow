@@ -372,3 +372,50 @@
 (deftest empty-physical-frame-has-a-portable-save-shape
   (is (= {:target-order [] :values {} :universes {}}
          (frame/portable-frame (frame/resolve-frame [] [] {:include-values? false})))))
+
+(deftest compositing-opacity-respects-blend-precedence-and-zero-skips-attributes
+  (let [base [(assignment :rgb :color [0.8 0.4 0.2])]
+        lower (frame/resolve-frame [rgb] base)
+        hidden (frame/resolve-frame [rgb] (conj base (assoc (assignment :rgb :color [0 1 1]) :opacity 0)))
+        mixed (frame/resolve-frame [rgb] (conj base (assoc (assignment :rgb :color [0 0.8 1]) :opacity 0.25)))
+        maxed (frame/resolve-frame [rgb] (conj base (assoc (assignment :rgb :color [0 0.8 1] :max) :opacity 0.25)))
+        added (frame/resolve-frame [rgb] (conj base (assoc (assignment :rgb :color [0.8 0.4 0.4] :add) :opacity 0.25)))]
+    (is (= (:values lower) (:values hidden)))
+    (is (every? true? (map near? [0.6 0.5 0.4] (get-in mixed [:values :rgb :emitted-color]))))
+    (is (every? true? (map near? [0.8 0.5 0.4] (get-in maxed [:values :rgb :emitted-color]))))
+    (is (every? true? (map near? [1.0 0.5 0.3] (get-in added [:values :rgb :emitted-color]))))
+    (doseq [opacity [-1 2 Double/NaN nil]]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (frame/resolve-frame [rgb] [(assoc (assignment :rgb :red 1) :opacity opacity)]))))))
+
+(deftest typed-and-map-opacity-match-general-and-dense-rendering-with-owned-buffers
+  (let [source (double-array [0.2 0.8 0.4])
+        batch {:target-ids [:rgb] :opacity 0.5 :blend :replace
+               :outputs {:color {:type :vec3 :components 3 :values source}}}
+        blocks [{:kind :assignments :assignments [(assignment :rgb :color [0.6 0.2 0.4])]}
+                {:kind :batch :batch batch}
+                {:kind :assignments :assignments [(assoc (assignment :rgb :color [0.8 0 0] :add) :opacity 0.25)]}]
+        rich (frame/resolve-contributions [rgb] blocks)
+        dense (frame/resolve-contributions [rgb] blocks {:include-values? false :compact-values? true})
+        exact (frame/resolve-contributions [rgb] (assoc-in blocks [1 :batch :opacity] 1/2)
+                                           {:include-values? false})]
+    (is (= [153 128 102] (bytes-at rich 1 1 2 3)))
+    (is (= (bytes-at rich 1 1 2 3) (bytes-at dense 1 1 2 3) (bytes-at exact 1 1 2 3)))
+    (is (= [0.2 0.8 0.4] (vec source)))
+    (is (= [153 128 102] (bytes-at (frame/resolve-frame [rgb]
+                                                     [(assignment :rgb :color [0.6 0.2 0.4])
+                                                      (assoc (assignment :rgb :color [0.2 0.8 0.4]) :opacity 0.5)
+                                                      (assoc (assignment :rgb :color [0.8 0 0] :add) :opacity 0.25)]
+                                                     {:include-values? false}) 1 1 2 3)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (frame/resolve-batches [rgb] [(assoc batch :opacity Double/NaN)])))
+    (is (= [0 0 0] (bytes-at (frame/resolve-batches [rgb] [(assoc batch :opacity 0)]
+                                                 {:include-values? false}) 1 1 2 3)))))
+
+(deftest geometry-opacity-blends-world-targets-and-zero-does-not-change-aim
+  (let [base [(assignment :moving :aim [1 2 7])]
+        blended (frame/resolve-frame [moving] (conj base (assoc (assignment :moving :aim [3 2 7]) :opacity 1/2)))
+        expected (frame/resolve-frame [moving] [(assignment :moving :aim [2 2 7])])
+        hidden (frame/resolve-frame [moving] (conj base (assoc (assignment :moving :aim [3 2 7]) :opacity 0)))]
+    (is (= (:values expected) (:values blended)))
+    (is (= (:values (frame/resolve-frame [moving] base)) (:values hidden)))))

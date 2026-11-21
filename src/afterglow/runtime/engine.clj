@@ -6,7 +6,8 @@
   cache and commits a successful result before performing returned intents."
   (:require [afterglow.runtime :as runtime]
             [afterglow.time :as musical-time]
-            [afterglow.control.params :as params]))
+            [afterglow.control.params :as params]
+            [afterglow.control.system :as system]))
 
 (defn- fail!
   [type message data]
@@ -22,6 +23,7 @@
 
 (defn- validate-instance!
   [id instance]
+  (system/validate-state instance)
   (when-not (and (map? instance) (string? id) (= id (:id instance))
                  (map? (:definition instance))
                  (= (:effect-id instance) (get-in instance [:definition :id]))
@@ -105,6 +107,12 @@
                                   (assoc :state (get current :initial-state {})
                                          :started-at-ms (:time-ms clock) :started-at-beat (:beat clock) :phase :running)
                                   (dissoc :release-at-ms :release-at-beat :release-timer)
+                                  (update :system dissoc :last-input-state :last-clock :last-delta-ms :last-frame-number :gate)
+                                  (cond-> (get-in instance [:system :attack])
+                                    (assoc-in [:system :gate]
+                                              {:kind :attack :from 0.0
+                                               :timer (musical-time/start (get-in instance [:system :attack])
+                                                                          (assoc clock :meter (:timing-meter instance)))}))
                                   (cond-> (:duration instance)
                                     (assoc :duration-timer
                                            (musical-time/start (:duration instance)
@@ -119,9 +127,10 @@
   "Interpolate within the last explicit clock interval, used only when a
   deadline crosses from beats to a millisecond release (or vice versa)."
   [model clock instance unit deadline]
-  (let [a-ms (max (:started-at-ms instance) (get model :last-frame-time-ms (:started-at-ms instance)))
+  (let [last-clock (get-in instance [:system :last-clock])
+        a-ms (max (:started-at-ms instance) (or (:time-ms last-clock) (get model :last-frame-time-ms (:started-at-ms instance))))
         a-beat (if (= a-ms (:started-at-ms instance)) (:started-at-beat instance)
-                   (get model :last-frame-beat (:started-at-beat instance)))
+                   (or (:beat last-clock) (get model :last-frame-beat (:started-at-beat instance))))
         b-ms (:time-ms clock) b-beat (:beat clock)
         interpolate (fn [a b c d x fallback]
                       (if (and (every? finite-number? [a b c d x]) (< a b) (<= a x b))
@@ -139,36 +148,87 @@
       (let [unit (get-in timer [:duration :unit])
             deadline (+ (:started-at timer) (get-in timer [:duration :value]))
             release-clock (assoc (boundary-clock model clock instance unit deadline) :meter (:timing-meter instance))]
-        (cond-> (assoc instance :phase :releasing :release-at-ms (:time-ms release-clock)
-                                :release-at-beat (:beat release-clock))
-          (:release-duration instance) (assoc :release-timer (musical-time/start (:release-duration instance) release-clock))))
+        (system/release-instance instance release-clock))
       instance)))
 
 (defn- release-finished?
   [clock instance]
   (and (= :releasing (:phase instance))
-       (if-let [timer (:release-timer instance)]
+       (if-let [timer (if (system/system-release? instance)
+                        (get-in instance [:system :gate :timer]) (:release-timer instance))]
          (:done? (musical-time/sample timer clock))
          (>= (:time-ms clock) (+ (:release-at-ms instance) (get instance :release-duration-ms 0))))))
 
 (defn- prepare-instance
-  [model clock instance]
-  (let [[reloaded intents] (reload-instance (:registry model) clock instance)
-        prepared (release-if-expired model clock reloaded)]
+  [model global-clock snapshot instance]
+  (let [paused? (true? (get-in instance [:system :paused?]))
+        clock (system/private-clock instance global-clock)
+        [reloaded intents] (if paused? [instance []] (reload-instance (:registry model) clock instance))
+        prepared (if paused? reloaded (release-if-expired model clock reloaded))
+        input-state (if paused? (get-in prepared [:system :last-input-state] (:state prepared)) (:state prepared))
+        delta (if paused? (get-in prepared [:system :last-delta-ms] 0)
+                  (max 0 (- (:time-ms clock) (get-in prepared [:system :last-clock :time-ms]
+                                                   (- (:time-ms clock) (:delta-ms snapshot))))))
+        number (if paused? (get-in prepared [:system :last-frame-number] (:number snapshot))
+                   (if-let [previous (get-in prepared [:system :last-frame-number])] (inc previous) (:number snapshot)))
+        prepared (-> prepared
+                     (assoc-in [:system :last-input-state] input-state)
+                     (assoc-in [:system :last-clock] clock)
+                     (assoc-in [:system :last-delta-ms] delta)
+                     (assoc-in [:system :last-frame-number] number))]
     (validate-instance! (:id prepared) prepared)
-    {:instance prepared :intents intents :expired? (release-finished? clock prepared)}))
+    {:instance prepared :intents intents :clock clock :paused? paused?
+     :input-state input-state :delta-ms delta :number number
+     :expired? (and (not paused?) (release-finished? clock prepared))}))
+
+(defn- with-opacity [result opacity]
+  (cond
+    (== 1 opacity) result
+    (zero? opacity) (assoc result :assignments [] :contributions [])
+    :else
+    (let [weight (fn [value] (update value :opacity (fnil * 1.0) opacity))]
+      (-> result
+          (update :assignments #(mapv weight %))
+          (update :contributions
+                  #(mapv (fn [block]
+                           (case (:kind block)
+                             :assignments (update block :assignments (fn [values] (mapv weight values)))
+                             :batch (update block :batch weight)
+                             block)) %))))))
+
+(defn- valid-step-shape? [result]
+  (and (map? result) (contains? result :state) (vector? (:assignments result))
+       (vector? (:intents result)) (instance? Boolean (:done? result))
+       (or (not (contains? result :contributions)) (vector? (:contributions result)))))
 
 (defn- descriptor
-  [compiled {:keys [instance intents expired?]}]
+  [compiled {:keys [instance intents expired? clock paused? input-state delta-ms number]}]
   (let [step (get compiled (:definition instance))]
     {:id (:id instance) :priority (:priority instance) :order (:order instance)
      :state (:state instance) :instance instance
      :step (fn [context]
-             (let [result (if expired?
+             (let [private-frame (-> (:frame context)
+                                     (merge (select-keys clock [:time-ms :beat :bpm :meter :playing?]))
+                                     (assoc :delta-ms delta-ms :number number)
+                                     (update :transport merge (select-keys clock [:beat :bpm :meter :playing?])))
+                   step-instance (cond-> instance
+                                   (system/system-release? instance) (assoc :phase :running))
+                   result (if expired?
                             (assoc context :done? true)
-                            (step context))]
-               ;; The kernel validates the step output. Do not repair malformed
-               ;; vectors here, since that would turn an effect failure into success.
+                            (step (assoc context :frame private-frame :instance step-instance :state input-state)))
+                   valid? (valid-step-shape? result)
+                   ;; Validate block shapes before opacity can discard a hidden
+                   ;; contribution, preserving the kernel failure contract.
+                   _ (when valid? (runtime/append-contributions result []))
+                   result (if valid?
+                            (with-opacity result (* (get-in instance [:system :opacity] 1.0)
+                                                    (system/gain instance clock))) result)
+                   ;; Paused steps regenerate owned output buffers at the frozen
+                   ;; input, but cannot advance state, fire intents or finish.
+                   result (if (and paused? valid?)
+                            (assoc result :state (:state instance) :done? false :intents []) result)
+                   result (if (and (system/system-release? instance) (not expired?) valid?)
+                            (assoc result :done? false) result)]
                (if (and (map? result) (vector? (:intents result)))
                  (update result :intents
                          (fn [effect-intents]
@@ -188,8 +248,13 @@
   definition while retaining state/time; :restart resets state and start time.
   Both opt-in policies retain common parameter values and add new defaults.
   Retained parameters must validate against the new schemas or the frame fails.
-  Launch duration and release duration remain fixed for an existing instance;
-  relaunch to adopt changed timing defaults.
+  Captured authored durations remain fixed until relaunch. Explicit system AR
+  controls are independent and can be edited through the command reducer.
+  System pause freezes private time/beat/frame number and effect state, then
+  regenerates output from the last input state without repeating intents. Manual
+  parameters and other frame inputs remain live. Resume advances private clocks
+  without consuming the paused interval. No typed result buffers enter the model.
+  System opacity weights the blend result, never authored parameter values.
   A removed registry definition leaves captured running instances valid.
 
   Duration expiry enters release at the exact logical deadline. During a positive
@@ -229,7 +294,7 @@
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
-         prepared (mapv (partial prepare-instance model clock)
+         prepared (mapv (partial prepare-instance model clock snapshot)
                         (sort-by (juxt :priority :order :id) (vals (:instances model))))
          definitions (distinct (map (comp :definition :instance) (remove :expired? prepared)))
          compiled (into {} (map (fn [definition]

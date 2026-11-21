@@ -158,7 +158,8 @@
   only for tests/alternate native implementations; real hardware is never opened
   until open!. Independent MIDI sessions can use separate non-Wayang displays."
   ([] (wayang-display {}))
-  ([{:keys [backend]}]
+  ([{:keys [backend renderer!] :or {renderer! render-view!}}]
+   (when-not (ifn? renderer!) (throw (ex-info "Display renderer must be callable" {})))
    (let [backend (or backend (native-wayang)) token (Object.)]
      {:open! (fn []
                (locking wayang-owner
@@ -173,7 +174,7 @@
                  (locking wayang-owner
                    (when-not (identical? token @wayang-owner)
                      (throw (ex-info "Display lease is no longer active" {})))
-                   (render-view! image view)
+                   (renderer! image view)
                    ((:send! backend))))
       :close! (fn [{:keys [token]}]
                 (locking wayang-owner
