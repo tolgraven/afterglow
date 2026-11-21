@@ -95,8 +95,13 @@
 (defn profile-defaults
   "Shared profile-option defaults for a cue, before persisted show policy."
   [options cue-id]
-  (update (:mapping-policy options {}) :params
-          #(merge {} % (:param-mappings options) (lookup (:cue-mappings options) cue-id))))
+  (let [base (:mapping-policy options {}) cue (lookup (:cues base) cue-id)]
+    (-> (merge base cue)
+        (dissoc :cues)
+        (assoc :enabled? (not-any? #(false? (:enabled? %)) [base cue])
+               :disabled-axes (set (concat (:disabled-axes base) (:disabled-axes cue)))
+               :params (merge {} (:params base) (:param-mappings options) (:params cue)
+                              (lookup (:cue-mappings options) cue-id))))))
 
 (defn policy
   "Resolve captured profile defaults, device settings and cue overrides. Device

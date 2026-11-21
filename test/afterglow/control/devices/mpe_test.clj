@@ -258,3 +258,17 @@
           (is (= :running (get-in @db [:instances second-id :phase])))
           (is (empty? (:errors (session/snapshot device))))))
       (finally (session/close! device)))))
+
+(deftest profile-defaults-resolve-nested-cues-before-explicit-cue-options
+  (let [defaults (expressive/profile-defaults
+                  {:mapping-policy {:enabled? false :disabled-axes #{:glide}
+                                    :params {:level :pressure}
+                                    :cues {"expressive" {:enabled? true :auto? false :disabled-axes #{:lift}
+                                                        :params {:level :slide :step :strike}}}}
+                   :param-mappings {:level :strike}
+                   :cue-mappings {:expressive {:level :pressure}}} :expressive)]
+    (is (false? (:enabled? defaults)))
+    (is (false? (:auto? defaults)))
+    (is (= #{:glide :lift} (:disabled-axes defaults)))
+    (is (= {:level :pressure :step :strike} (:params defaults)))
+    (is (not (contains? defaults :cues)))))
