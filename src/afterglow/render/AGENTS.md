@@ -78,3 +78,7 @@ These namespaces are independent of the legacy show scheduler and perform no I/O
   reordering. Avoid full map projections just to maintain movement history.
   portable-frame deliberately projects all targets and copies bytes at save time;
   a bounded browser preview must never become the complete saved output state.
+- Rich movement history uses explicit top-level pan/tilt first, then packed
+  channel values when an axis was not authored (for example all opacity zero).
+  Missing axes may fall back to compact history or the neutral calibration
+  default. Keep this consistent across reordered rigs and rich/compact output.
