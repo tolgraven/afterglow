@@ -169,6 +169,7 @@
           extra-attributes (sort (remove (set base-attributes) (set (mapcat (comp keys :channels) compiled))))
           attribute-slots (zipmap (concat base-attributes extra-attributes) (range 3 (+ 10 (count extra-attributes))))]
       {:type ::patch :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
+       ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
        :target-order (mapv :id compiled) ::attribute-slots attribute-slots
        ::stride (+ 10 (count extra-attributes))
        ::dense-fixtures
@@ -312,14 +313,15 @@
         nearest (first (sort-by #(Math/abs (double (- % target))) (if (seq legal) legal candidates)))]
     {:value (clamp nearest 0 1) :reachable? (boolean (seq legal)) :degrees degrees}))
 
+(defn- check-movement-history! [fixture previous]
+  (doseq [axis [:pan :tilt] :let [value (get previous axis)]]
+    (when (and (some? value) (not (unit? value)))
+      (fail! "Previous pan/tilt must be normalized finite values" {:fixture-id (:id fixture) :axis axis}))))
+
 (defn- resolve-geometry [fixture assigned previous source]
   (if (or (:aim assigned) (:direction assigned))
     (do
-      ;; History is a global render option, not authored output. Keep malformed
-      ;; history errors outside effect attribution.
-      (doseq [axis [:pan :tilt] :let [value (get previous axis)]]
-        (when (and (some? value) (not (unit? value)))
-          (fail! "Previous pan/tilt must be normalized finite values" {:fixture-id (:id fixture) :axis axis})))
+      (check-movement-history! fixture previous)
       (with-effect-source source
         (let [direction (if (:aim assigned) (mapv - (:aim assigned) (:position fixture)) (:direction assigned))
               [x y z] (local-direction fixture direction)
@@ -339,6 +341,19 @@
                    :direction (mapv #(/ % magnitude) direction)
                    :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))))
     assigned))
+
+(defn- apply-solved-geometry [fixture assigned previous solution source]
+  (check-movement-history! fixture previous)
+  (with-effect-source source
+    (let [{:keys [pan tilt pan-deg tilt-deg aim-reachable?]} solution
+          direction (if (:aim assigned) (mapv - (:aim assigned) (:position fixture)) (:direction assigned))
+          [x y z] (mapv double direction)
+          magnitude (Math/sqrt (+ (* x x) (* y y) (* z z)))]
+      (when-not (and (unit? pan) (unit? tilt) (finite? pan-deg) (finite? tilt-deg)
+                     (boolean? aim-reachable?) (Double/isFinite magnitude) (pos? magnitude))
+        (fail! "Invalid calibrated movement result" {:fixture-id (:id fixture)}))
+      (assoc assigned :direction (mapv #(/ % magnitude) direction)
+             :pan pan :tilt tilt :pan-deg pan-deg :tilt-deg tilt-deg :aim-reachable? aim-reachable?))))
 
 (declare pack-value!)
 
@@ -436,7 +451,10 @@
   (let [id (:id fixture)
         source (when-let [^objects sources (::geometry-sources options)]
                  (get (aget sources (int (::index fixture))) (if (:aim assigned) :aim :direction)))
-        assigned (resolve-geometry fixture assigned (previous-for-target options fixture) source)
+        previous (previous-for-target options fixture)
+        assigned (if-let [solved (get (::solved-movement options) id)]
+                   (apply-solved-geometry fixture assigned previous solved source)
+                   (resolve-geometry fixture assigned previous source))
         color (:color assigned [0.0 0.0 0.0])
         has-emitters? (::emitter? fixture)
         dimmer (:dimmer assigned (if has-emitters? 1.0 0.0))
@@ -775,6 +793,22 @@
   (when (some #(some? (:source %)) blocks)
     (object-array (count (:fixtures patch)))))
 
+(defn- finish-contributions [patch ^objects assigned options pack]
+  (if (::prepare-movement? options)
+    (let [targets (if assigned
+                    (into {} (keep (fn [fixture]
+                                     (let [attributes (aget assigned (int (::index fixture)))]
+                                       (cond (:aim attributes) [(:id fixture) {:aim (:aim attributes)}]
+                                             (:direction attributes) [(:id fixture) {:direction (:direction attributes)}]))))
+                          (::moving-heads patch))
+                    {})]
+      {:targets targets
+       :pack (fn [solved]
+               (when-not (and (map? solved) (every? #(contains? targets %) (keys solved)))
+                 (fail! "Movement results do not belong to this frame's active heads" {}))
+               (pack (assoc options ::solved-movement solved)))})
+    (pack options)))
+
 (defn- resolve-general-contributions [patch blocks options]
   (let [assigned (object-array (count (:fixtures patch)))
         sources (geometry-source-storage patch blocks)]
@@ -785,7 +819,9 @@
                                      :assignments (:assignments block)
                                      :batch (expand-batch (:compiled block)))
                                    sources (:source block))))
-    (pack-general-state patch (persist-assignments! assigned) (assoc options ::geometry-sources sources))))
+    (persist-assignments! assigned)
+    (finish-contributions patch assigned (assoc options ::geometry-sources sources)
+                          #(pack-general-state patch assigned %))))
 
 (defn- resolve-partitioned
   [patch blocks options]
@@ -798,7 +834,7 @@
               (case (:kind block)
                 :assignments (merge-packed-assignments! patch values present (:assignments block))
                 :batch (merge-packed-batches! patch values present [(:compiled block)]))))
-          (pack-dense-state patch values present options))
+          (finish-contributions patch nil options #(pack-dense-state patch values present %)))
       (let [general (boolean-array (count (:fixtures patch)))
             assigned (object-array (count (:fixtures patch)))
             sources (geometry-source-storage patch blocks)]
@@ -821,9 +857,31 @@
         (dotimes [index (alength general)]
           (when (and (aget general index) (nil? (aget ^objects assigned index)))
             (aset ^objects assigned index {})))
-        (pack-dense-state patch values present
-                          (assoc (prepare-previous-compact patch options)
-                                 ::general-assigned assigned ::geometry-sources sources))))))
+        (finish-contributions patch assigned
+                              (assoc (prepare-previous-compact patch options)
+                                     ::general-assigned assigned ::geometry-sources sources)
+                              #(pack-dense-state patch values present %))))))
+
+(defn- reduce-contributions [fixtures contributions options]
+  (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
+        options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)]
+    (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
+                   (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))
+                   (map? (:previous-values options)))
+      (fail! "Invalid render options" {:options options}))
+    (when-not (vector? contributions) (fail! "Contributions must be an ordered vector" {}))
+    (let [blocks (mapv (fn [block]
+                         (when-not (map? block) (fail! "Invalid contribution block" {}))
+                         (with-effect-source (:source block)
+                           (case (:kind block)
+                             :assignments (do (when-not (vector? (:assignments block))
+                                                (fail! "Assignment contribution needs a vector" {})) block)
+                             :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
+                             (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
+          partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
+      (if partitioned?
+        (resolve-partitioned patch blocks options)
+        (resolve-general-contributions patch blocks options)))))
 
 (defn resolve-contributions
   "Resolve the kernel's ordered mixed contribution stream exactly once.
@@ -849,25 +907,17 @@
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))
   ([fixtures contributions options]
-   (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
-         options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)]
-     (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
-                    (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))
-                    (map? (:previous-values options)))
-       (fail! "Invalid render options" {:options options}))
-     (when-not (vector? contributions) (fail! "Contributions must be an ordered vector" {}))
-     (let [blocks (mapv (fn [block]
-                          (when-not (map? block) (fail! "Invalid contribution block" {}))
-                          (with-effect-source (:source block)
-                            (case (:kind block)
-                              :assignments (do (when-not (vector? (:assignments block))
-                                                 (fail! "Assignment contribution needs a vector" {})) block)
-                              :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
-                              (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
-           partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
-       (if partitioned?
-         (resolve-partitioned patch blocks options)
-         (resolve-general-contributions patch blocks options))))))
+   (reduce-contributions fixtures contributions (dissoc options ::prepare-movement? ::solved-movement))))
+
+(defn prepare-movement-frame
+  "Purely merge ordered contributions once and capture effective world-space movement.
+  :targets maps active head IDs to :aim or :direction after all priority/opacity
+  layers. Call :pack with calibrated results for this exact frame (normalized
+  pan/tilt, requested pan-deg/tilt-deg and aim-reachable?). Omitted heads use
+  CPU geometry. Passing {} is the full CPU fallback. Capture the patch, options
+  and last committed history together; the returned plan belongs to this frame."
+  [patch contributions options]
+  (reduce-contributions patch contributions (assoc (dissoc options ::solved-movement) ::prepare-movement? true)))
 
 (defn resolve-batches
   "Resolve ordered typed batches; convenience form of resolve-contributions.

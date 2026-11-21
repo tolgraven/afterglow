@@ -96,3 +96,9 @@ limit and use the declared clock and parameter bindings before a draw.
 The optional JVM moving-head solver uses a private desktop OpenGL context and the
 same packaged GLSL. Keep geometry out of the JOGL binding. Reuse the CPU frame
 history lookup for stable fixture IDs, and explicitly retire failed contexts.
+
+For physical native output, feed the ordered contribution stream to
+`gpu.movement/resolve-contributions!` after deferred field evaluation. Blend
+before rotation. Keep one bounded owner per show and pass only accepted movement
+history. Native results must stay with their submitting frame. Check the
+published rich and compact poses and coarse/fine DMX, including fallback.

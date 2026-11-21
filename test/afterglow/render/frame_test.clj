@@ -73,6 +73,31 @@
                                                      [(assignment :d :dimmer 0.5)])
                                  [:values :d :emitted-color])))))
 
+(deftest prepared-movement-packs-only-axes-for-the-captured-targets
+  (let [head {:id :head :position [0 2 0] :universe 0 :address 1 :channels {:pan 1 :tilt 2}}
+        patch (frame/compile-patch [head rgb])
+        blocks [{:kind :assignments :source :point :assignments [(assignment :head :aim [1 3 4])
+                                                                 (assignment :rgb :red 1/2)]}
+                {:kind :assignments :source :overlay
+                 :assignments [(assoc (assignment :head :aim [3 3 0]) :opacity 1/2)
+                               (assignment :head :direction [0 1 0])]}]
+        solution {:pan 0.25 :tilt 0.75 :pan-deg 45.0 :tilt-deg 12.0 :aim-reachable? true}]
+    (doseq [rich? [true false]
+            :let [opts {:include-values? rich? :compact-values? true}
+                  {:keys [pack targets]} (frame/prepare-movement-frame patch blocks opts)]]
+      (is (= {:head {:aim [2N 3N 2N]}} targets))
+      (is (= (frame/portable-frame (frame/resolve-contributions patch blocks opts))
+             (frame/portable-frame (pack {}))))
+      (let [out (pack {:head solution})]
+        (is (= [64 191] (bytes-at out 0 1 2)))
+        (is (= [128] (bytes-at out 1 1)))
+        (is (= [2.0 3.0 2.0] (:aim (first (frame/project-compact (:compact out))))))
+        (when rich? (is (= solution (select-keys (get-in out [:values :head]) (keys solution))))))
+      (is (thrown? clojure.lang.ExceptionInfo (pack {:rgb solution})))
+      (try (pack {:head (assoc solution :pan ##NaN)})
+           (is false "invalid movement cannot pack")
+           (catch clojure.lang.ExceptionInfo error (is (= :overlay (:effect-source (ex-data error)))))))))
+
 (deftest multi-universe-coarse-fine-and-inversion
   (let [fixture {:id :head :position [0 0 0] :universe 2 :address 512
                  :channels {:pan [1 2] :dimmer {:offset 3 :inverted-from 0}}}
