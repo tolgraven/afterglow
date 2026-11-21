@@ -138,12 +138,8 @@
               :invalid-time "An explicit nondecreasing time-ms is required")
     time))
 
-(defn- launch-cue [model command]
-  (let [cue (get-in model [:registry :cues (:cue-id command)])
-        _ (require! cue :unknown-cue "Cue does not exist")
-        effect (effect-definition model cue)
-        _ (require! effect :unknown-effect "Cue effect is not published")
-        time (time! model command)
+(defn- launch-instance [model command cue effect]
+  (let [time (time! model command)
         launch (get command :launch {})
         _ (require! (map? launch) :invalid-launch "Launch options must be a map")
         mode (get launch :mode :persistent)
@@ -238,7 +234,13 @@
                                                    [k (update page :cells
                                                               #(into {} (remove (fn [[_ v]] (= id v))) %))])) pages))))
        :events [{:type :cue/deleted :cue-id id}]})
-    :cue/launch (launch-cue model command)
+    (:cue/launch :effect/launch)
+    (let [cue (when (= op :cue/launch)
+                (or (get-in model [:registry :cues (:cue-id command)])
+                    (reject! :unknown-cue "Cue does not exist" {:cue-id (:cue-id command)})))
+          effect (if cue (effect-definition model cue) (get-in model [:registry :effects (:effect-id command)]))]
+      (require! effect :unknown-effect "Effect is not published")
+      (launch-instance model command cue effect))
     :instance/end
     (let [id (:instance-id command)
           instance (instance! model id)
