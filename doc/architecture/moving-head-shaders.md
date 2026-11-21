@@ -70,6 +70,9 @@ successive frames. CI exercised native execution and readback on Mesa llvmpipe
 OpenGL 4.5 on Ubuntu and Apple Software Renderer OpenGL 4.1 on macOS 15.
 Performance on physical Mac GPUs and byte-equivalence for DMX remain unverified.
 
+The [JVM lighting-expression runner](native-expression-shaders.md) uses the
+same context, fence and readback ownership for named color, focus and other fields.
+
 `afterglow.render.frame/fixture-pose` reconstructs the commanded beam from the
 normalized pan and tilt in a committed frame. It accepts either rich target
 values or one projected compact target. The result includes the unwrapped
