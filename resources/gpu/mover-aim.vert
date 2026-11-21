@@ -14,6 +14,7 @@ layout(location = 4) in vec4 axisCalibration;
 // a world-space direction, which is independent of the mount position.
 layout(location = 5) in float directionInput;
 out vec4 axes;
+out vec3 requestedAnglesAndStable;
 
 bool legal(float x) { return x >= 0.0 && x <= 1.0; }
 
@@ -37,5 +38,18 @@ void main() {
   }
   float tilt = axisCalibration.z + axisCalibration.w*elevation;
   axes = vec4(clamp(vec2(pan,tilt), 0.0, 1.0), float(legal(pan) && legal(tilt)), float(length(local) > 0.0));
+  // Float rounding near a mechanical stop or a tie can select a different
+  // whole turn. Let physical output use the float64 reference for that head.
+  float epsilon = 0.00001;
+  bool stable = horizontal > epsilon * length(local) &&
+                (local.z >= 0.0 || abs(local.x) > epsilon * horizontal) &&
+                abs(tilt) > epsilon && abs(1.0 - tilt) > epsilon;
+  for (int i = 0; i < 3; ++i) {
+    float c = candidates[i];
+    if (abs(c) <= epsilon || abs(1.0 - c) <= epsilon ||
+        (c != pan && legal(c) == legal(pan) &&
+         abs(abs(c-prior) - abs(pan-prior)) <= epsilon)) stable = false;
+  }
+  requestedAnglesAndStable = vec3(yaw, elevation, float(stable));
   gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
 }

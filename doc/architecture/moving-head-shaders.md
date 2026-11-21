@@ -1,6 +1,6 @@
 # Calibrated moving-head GPU solver
 
-Afterglow owns the world-space target convention, inverse mounting rotations, fixture calibration, wrap selection and GPU readback. `afterglow.render.frame/resolve-frame` is the CPU reference and the physical-output backend. The optional WebGL2 solver produces numeric axes for consumers that can tolerate float32 precision.
+Afterglow owns the world-space target convention, inverse mounting rotations, fixture calibration, wrap selection and GPU readback. `afterglow.render.frame/resolve-frame` is the CPU reference. Physical frame packing defaults to CPU rotation. The optional WebGL2 solver produces numeric axes for consumers that can tolerate float32 precision.
 
 A host reads the packaged vertex source with `(afterglow.render.gpu/source :moving-head-vertex)` and serves the module at the `:moving-head-solver` resource URL. Pass fixtures in stable patch order with the same `position`, `rotation-deg` and pan/tilt `calibration` used by the CPU renderer. The solver uploads the mount data once per rig.
 
@@ -82,3 +82,49 @@ to +190°. A target beyond the tilt range stops at the calibrated end of travel.
 Use the pose for visualisation and the original aim for an editing handle.
 This projection describes channel commands. Optical calibration, motor lag
 and fixture feedback require measurements from the physical fixture.
+
+
+## Render movement after effect blending
+
+A show that opts into native rotation owns one `afterglow.render.gpu.movement`
+instance. Supply the same ordered contribution stream and compiled patch that
+the CPU renderer uses. Reuse the compiled patch across frames. If effects
+produce deferred numeric fields, first materialize them into contribution
+blocks. Feed previous values only from the last accepted physical frame.
+
+```clojure
+(require '[afterglow.render.gpu.movement :as movement])
+
+(with-open [owner (movement/open! {:budget-ms 25 :timeout-ms 1000})]
+  (movement/resolve-contributions!
+    owner patch
+    [{:kind :assignments :source :sweep
+      :assignments [{:target-id :spot :attribute :aim :value [-2 0 4]}]}]
+    {:include-values? false :compact-values? true
+     :previous-values {:spot {:pan 0.75}}}))
+```
+
+Blend order, opacity, aim precedence and error attribution use the CPU frame
+reducer. The movement shader receives the resulting targets, solves mounting
+rotations, calibration and wrap from the captured pans, then returns the axes
+to the same physical DMX packer. Direct pan/tilt and zero-opacity assignments
+retain the CPU renderer’s behavior. The output adds a `:movement` map with
+`:backend`, `:gpu-heads` and `:cpu-heads`. Native float32 values can round to an
+adjacent 16-bit DMX word. Exact coordinates, unstable float32 subtraction, and
+ambiguous wrap, clamp or pole decisions go through the reference solver.
+
+The host can pass `:deadline-nanos` from its frame clock (`System/nanoTime`).
+The GPU stage honors the earlier of that deadline and the owner's frame budget.
+A timeout, busy owner, missing native library or driver failure sends this
+call's captured targets to the CPU. Its `:movement :reason` identifies the
+fallback. CPU packing and transport still take their normal time. One worker
+owns a single mounted rig, with at most one outstanding draw and no backlog of
+frames. A late draw can finish but only its original call could consume it.
+A changed compiled patch replaces the resident rig. Close and reopen an owner
+to retry an unavailable context on the same patch. `(movement/close! owner ms)`
+allows a bounded shutdown wait while any native cleanup continues.
+
+The native tests exercise layered aim and opacity, direct axes, exact values,
+ID-based compact history across rig changes, coarse/fine DMX across universes,
+deadline expiry, and an intentionally delayed draw. Physical fixture travel
+and GPU speed on show hardware still require measurement.

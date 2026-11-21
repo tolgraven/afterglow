@@ -25,9 +25,9 @@
     (.flip data)))
 
 (defn- configure! [^GL3 gl ^FloatBuffer rig-data count]
-  (let [program (context/shader-program gl (gpu/source :moving-head-vertex) ["axes"])
+  (let [program (context/shader-program gl (gpu/source :moving-head-vertex) ["axes" "requestedAnglesAndStable"])
         vao (int-array 1) buffers (int-array 3)
-        output-bytes (* count 16)]
+        output-bytes (* count 28)]
     (.glGenVertexArrays gl 1 vao 0)
     (.glBindVertexArray gl (aget vao 0))
     (.glUseProgram gl program)
@@ -63,24 +63,27 @@
      (when (zero? n) (throw (ex-info "Patch has no pan/tilt fixtures" {})))
      (let [data (mounts fixtures)
            inputs (context/floats-buffer (* n 5))
-           outputs (context/floats-buffer (* n 4))]
+           outputs (context/floats-buffer (* n 7))]
        (assoc (context/open! ::moving-heads timeout-ms #(configure! % data n))
               :patch patch :ids ids :ids-set (set ids) :input-buffer inputs :output-buffer outputs)))))
 
-(defn- target-buffer! [{:keys [patch ids ids-set input-buffer]} targets history]
-  (when-not (and (map? targets) (= ids-set (set (keys targets))))
-    (throw (ex-info "Supply one aim or direction for every moving head in the patch" {:expected ids})))
+(defn- target-buffer! [{:keys [patch ids ids-set input-buffer]} targets history all?]
+  (when-not (and (map? targets) (every? #(contains? ids-set %) (keys targets))
+                 (or (not all?) (= (count ids) (count targets))))
+    (throw (ex-info "Supply valid moving-head targets for the compiled patch" {:expected ids})))
   (let [^FloatBuffer data input-buffer
-        pans (frame/previous-pans patch ids history)]
+        active (vec (keys targets))
+        pans (zipmap active (frame/previous-pans patch active history))]
     (.clear data)
-    (doseq [[id pan] (map vector ids pans)
-            :let [assignment (get targets id)
+    (doseq [id ids
+            ;; Idle slots share the static mount buffer. Their output is discarded.
+            :let [assignment (get targets id {:direction [0 0 1]})
                   direction? (and (map? assignment) (nil? (:aim assignment)))
                   target (if (map? assignment) (or (:aim assignment) (:direction assignment)) assignment)]]
       (when-not (and (vector? target) (= 3 (count target)))
         (throw (ex-info "Expected a world-space aim or direction vector" {:fixture-id id :target target})))
       (doseq [coord target] (.put data (context/finite-float coord)))
-      (.put data (float (or pan -1)))
+      (.put data (float (or (get pans id) -1)))
       (.put data (float (if direction? 1 0))))
     (.flip data)))
 
@@ -94,14 +97,26 @@
     (.glBufferSubData gl GL/GL_ARRAY_BUFFER 0 (* n 20) targets)
     (context/capture! gl output n data (:timeout-ms solver))))
 
-(defn- values [ids ^FloatBuffer data]
-  (into {} (map (fn [id]
-                  (let [pan (.get data) tilt (.get data) reachable (.get data) valid (.get data)]
-                    (when-not (and (= valid 1.0) (<= 0.0 pan 1.0) (<= 0.0 tilt 1.0)
-                                   (or (= reachable 0.0) (= reachable 1.0)))
-                      (throw (ex-info "Invalid aim result or zero-distance target" {:fixture-id id})))
-                    [id {:pan (double pan) :tilt (double tilt) :aim-reachable? (= reachable 1.0)}])))
-        ids))
+(defn- values [ids targets ^FloatBuffer data angles?]
+  (reduce (fn [result id]
+            (let [pan (.get data) tilt (.get data) reachable (.get data) valid (.get data)
+                  yaw (.get data) elevation (.get data) stable (.get data)]
+              (if (and (contains? targets id) (or (not angles?) (= stable 1.0)))
+                (do
+                  (when-not (and (= valid 1.0) (<= 0.0 pan 1.0) (<= 0.0 tilt 1.0)
+                                 (Float/isFinite yaw) (Float/isFinite elevation)
+                                 (or (= reachable 0.0) (= reachable 1.0)))
+                    (throw (ex-info "Invalid aim result or zero-distance target" {:fixture-id id})))
+                  (assoc result id (cond-> {:pan (double pan) :tilt (double tilt) :aim-reachable? (= reachable 1.0)}
+                                     angles? (assoc :pan-deg (double yaw) :tilt-deg (double elevation)))))
+                result))) {} ids))
+
+(defn- solve-batch! [solver targets history all?]
+  (context/exclusively! solver
+    (fn []
+      (let [input (target-buffer! solver targets history all?)]
+        (context/invoke! solver #(dispatch! % solver input))
+        (values (:ids solver) targets (:output-buffer solver) (not all?))))))
 
 (defn solve!
   "Solve one batch of world-space targets/directions keyed by fixture ID. A
@@ -110,8 +125,11 @@
   map of fixture IDs to normalized pan, tilt and reachability. Never publishes."
   ([solver targets] (solve! solver targets {}))
   ([solver targets history]
-   (context/exclusively! solver
-     (fn []
-       (let [input (target-buffer! solver targets history)]
-         (context/invoke! solver #(dispatch! % solver input))
-         (values (:ids solver) (:output-buffer solver)))))))
+   (solve-batch! solver targets history true)))
+
+(defn solve-selected!
+  "Solve active targets by stable fixture ID for this frame. In addition to
+  normalized axes, return the requested pan/tilt degrees for rich fixture state.
+  Omit ambiguous wraps, mechanical stops and singulars for CPU resolution."
+  [solver targets history]
+  (solve-batch! solver targets history false))
