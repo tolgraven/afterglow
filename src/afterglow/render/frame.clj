@@ -25,6 +25,15 @@
 (defn- fail! [message data]
   (throw (ex-info message (assoc data :type ::invalid-frame))))
 
+(defn- attributed-error [error source]
+  (if (and (some? source) (not (contains? (ex-data error) :effect-source)))
+    (ex-info (.getMessage ^Exception error) (assoc (ex-data error) :effect-source source) error)
+    error))
+
+(defmacro ^:private with-effect-source [source & body]
+  `(try ~@body
+        (catch Exception error# (throw (attributed-error error# ~source)))))
+
 (defn- finite? [x]
   (and (number? x) (Double/isFinite (double x))))
 
@@ -213,12 +222,9 @@
   (when (and (contains? geometric-attributes attribute) (not= :replace blend))
     (fail! "Geometry assignments require :replace blend" {:target-id target-id :attribute attribute})))
 
-(defn- reduce-assignments [patch assignments]
-  (when-not (vector? assignments) (fail! "Assignments must be a vector" {}))
-  ;; Scratch storage is private to this evaluation. Stable target indices avoid
-  ;; rebuilding the outer persistent map for every per-pixel contribution.
-  (let [targets (object-array (count (:fixtures patch)))
-        by-id (:by-id patch)]
+(defn- merge-general-assignments!
+  [patch ^objects targets assignments ^objects geometry-sources source]
+  (let [by-id (:by-id patch)]
    (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
     (let [fixture (get by-id target-id)]
      (validate-assignment! fixture target-id attribute value blend assignment)
@@ -229,11 +235,25 @@
            blended (blend-value previous value blend opacity)]
        (when-not (assignment-value? attribute blended)
          (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
-       (aset targets index (assoc! attributes attribute blended))))))
-   (dotimes [index (alength targets)]
-     (when-let [attributes (aget targets index)]
-       (aset targets index (persistent! attributes))))
-   targets))
+       (aset targets index (assoc! attributes attribute blended))
+       (when (and geometry-sources (geometric-attributes attribute))
+         ;; Nil deliberately clears an earlier attributed write. An unattributed
+         ;; replacement must not blame the effect that it superseded.
+         (aset geometry-sources index (assoc (aget geometry-sources index) attribute source)))))))))
+
+(defn- persist-assignments! [^objects targets]
+  (dotimes [index (alength targets)]
+    (when-let [attributes (aget targets index)]
+      (aset targets index (persistent! attributes))))
+  targets)
+
+(defn- reduce-assignments [patch assignments]
+  (when-not (vector? assignments) (fail! "Assignments must be a vector" {}))
+  ;; Scratch storage is private to this evaluation. Stable target indices avoid
+  ;; rebuilding the outer persistent map for every per-pixel contribution.
+  (let [targets (object-array (count (:fixtures patch)))]
+    (merge-general-assignments! patch targets assignments nil nil)
+    (persist-assignments! targets)))
 
 (defn- rotate [v axis radians]
   (let [[x y z] v, c (Math/cos radians), s (Math/sin radians)]
@@ -250,8 +270,6 @@
         (rotate :x (Math/toRadians (- (double x)))))))
 
 (defn- normalized-angle [fixture axis degrees previous]
-  (when (and (some? previous) (not (unit? previous)))
-    (fail! "Previous pan/tilt must be normalized finite values" {:fixture-id (:id fixture) :axis axis}))
   (let [calibration (get-in fixture [:calibration axis]
                             (if (= axis :pan) {:min-deg -180 :max-deg 180}
                                 {:min-deg -90 :max-deg 90}))
@@ -265,10 +283,17 @@
         nearest (first (sort-by #(Math/abs (double (- % target))) (if (seq legal) legal candidates)))]
     {:value (clamp nearest 0 1) :reachable? (boolean (seq legal)) :degrees degrees}))
 
-(defn- resolve-geometry [fixture assigned previous]
-  (if-let [direction (cond (:aim assigned) (mapv - (:aim assigned) (:position fixture))
-                          (:direction assigned) (:direction assigned))]
-    (let [[x y z :as local] (local-direction fixture direction)
+(defn- resolve-geometry [fixture assigned previous source]
+  (if (or (:aim assigned) (:direction assigned))
+    (do
+      ;; History is a global render option, not authored output. Keep malformed
+      ;; history errors outside effect attribution.
+      (doseq [axis [:pan :tilt] :let [value (get previous axis)]]
+        (when (and (some? value) (not (unit? value)))
+          (fail! "Previous pan/tilt must be normalized finite values" {:fixture-id (:id fixture) :axis axis})))
+      (with-effect-source source
+        (let [direction (if (:aim assigned) (mapv - (:aim assigned) (:position fixture)) (:direction assigned))
+          [x y z :as local] (local-direction fixture direction)
           magnitude (Math/sqrt (+ (* x x) (* y y) (* z z)))]
       (when-not (and (finite? magnitude) (pos? magnitude))
         (fail! "Aim/direction must have finite nonzero distance" {:fixture-id (:id fixture)}))
@@ -283,7 +308,7 @@
         (assoc assigned :pan (:value pan) :tilt (:value tilt)
                :pan-deg pan-deg :tilt-deg tilt-deg
                :direction (mapv #(/ % magnitude) direction)
-               :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))
+               :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))))
     assigned))
 
 (declare pack-value!)
@@ -358,7 +383,9 @@
 
 (defn- pack-target! [fixture assigned {:keys [master blackout? include-values?] :as options} universes indexed compact]
   (let [id (:id fixture)
-        assigned (resolve-geometry fixture assigned (previous-for-target options fixture))
+        source (when-let [^objects sources (::geometry-sources options)]
+                 (get (aget sources (int (::index fixture))) (if (:aim assigned) :aim :direction)))
+        assigned (resolve-geometry fixture assigned (previous-for-target options fixture) source)
         color (:color assigned [0.0 0.0 0.0])
         has-emitters? (::emitter? fixture)
         dimmer (:dimmer assigned (if has-emitters? 1.0 0.0))
