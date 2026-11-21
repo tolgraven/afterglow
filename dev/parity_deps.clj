@@ -1,5 +1,5 @@
 ;; Read dependency data, never evaluate the Leiningen project or its plugins.
-;; Used by bin/test legacy; keeps the test classpath aligned with project.clj.
+;; Used by bin/test parity; keeps the test classpath aligned with project.clj.
 (require '[clojure.java.io :as io])
 
 (defn qualified-lib [lib]

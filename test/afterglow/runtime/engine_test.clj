@@ -39,6 +39,60 @@
                                      :definition-version (:version definition)
                                      :source (:id instance) :blend :replace})))))
 
+(defn musical-show []
+  (control/new-show
+   {:registry {:effects {:music {:id :music :version 1 :params {}
+                                :duration {:bars 1} :release-duration {:beats 1/2}}}
+               :cues {:music {:id :music :version 1 :effect-id :music}}}}))
+
+(defn control! [show payload]
+  (let [result (control/apply-command show (merge {:command-id (str (:revision show))
+                                                  :show-id (:show-id show) :epoch (:epoch show)
+                                                  :time-ms (:time-ms show) :source {:adapter :test}}
+                                                 payload))]
+    (is (= :accepted (get-in result [:ack :status])))
+    (:model result)))
+
+(defn at-beat [show milliseconds beat]
+  (engine/advance (assoc-in show [:transport :beat] beat) {:time-ms milliseconds}
+                  (fn [_] #(update % :intents conj {:seen-phase (get-in % [:instance :phase])}))))
+
+(deftest musical-one-shots-and-fractional-release-follow-beats-through-tempo-and-pause
+  (let [launched (control! (musical-show) {:op :cue/launch :cue-id :music :launch {:mode :one-shot}})
+        first-frame (at-beat launched 500 1)
+        paused (at-beat (assoc-in (:model first-frame) [:transport :playing?] false) 6000 1)
+        running (at-beat (update (:model paused) :transport assoc :bpm 60 :playing? true) 8000 3.75)
+        release (at-beat (:model running) 8500 4.25)
+        instance (first (vals (get-in release [:model :instances])))
+        done (at-beat (:model release) 9000 4.5)]
+    (is (= :running (-> paused :intents first :seen-phase)))
+    (is (= :running (-> running :intents first :seen-phase)))
+    (is (= :releasing (:phase instance)))
+    (is (== 4 (:release-at-beat instance)) "Late frames retain the exact beat boundary")
+    (is (= 8250.0 (:release-at-ms instance)))
+    (is (== 4 (get-in instance [:release-timer :started-at])))
+    (is (empty? (get-in done [:model :instances])))))
+
+(deftest musical-meter-is-captured-and-restart-resets-the-beat-anchor
+  (let [initial (-> (musical-show)
+                    (assoc-in [:transport :meter] {:beats-per-bar 3 :bars-per-phrase 2}))
+        launched (control! initial {:op :cue/launch :cue-id :music
+                                     :launch {:mode :one-shot :reload-policy :restart}})
+        id (first (keys (:instances launched)))
+        _ (is (= 3 (get-in launched [:instances id :duration-timer :duration :value])))
+        new-version (-> launched
+                        (assoc-in [:transport :meter] {:beats-per-bar 7 :bars-per-phrase 4})
+                        (assoc-in [:registry :effects :music :version] 2))
+        reloaded (at-beat new-version 1000 2)
+        instance (get-in reloaded [:model :instances id])
+        ended (control! (:model reloaded) {:op :instance/end :instance-id id})
+        done (at-beat ended 1100 2.5)]
+    (is (= 2 (:started-at-beat instance)))
+    (is (= 2 (get-in instance [:duration-timer :started-at])))
+    (is (= 3 (get-in instance [:duration-timer :duration :value])))
+    (is (= 2 (get-in ended [:instances id :release-at-beat])))
+    (is (empty? (get-in done [:model :instances])))))
+
 (deftest captured-definitions-and-current-params
   (let [show (-> (model (instance "a"))
                  (assoc-in [:registry :effects :pulse :version] 2)

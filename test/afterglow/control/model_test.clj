@@ -31,7 +31,8 @@
        (apply! {:op :cue/put :cue {:id :red :effect-id :wash :params {:level 0.6}}}))))
 
 (deftest construction-is-inert-and-validates-basic-shape
-  (is (= {:bpm 120 :playing? true} (:transport (model/new-show))))
+    (is (= {:bpm 120 :playing? true :beat 0.0 :meter {:beats-per-bar 4 :bars-per-phrase 4}}
+           (:transport (model/new-show))))
   (is (= {} (:instances (model/new-show))))
   (doseq [options [{:history-limit 0} {:epoch -1} {:revision 0.5} {:time-ms Double/NaN}
                    {:master 2} {:blackout? :yes} {:instances []} {:show-id nil}]]

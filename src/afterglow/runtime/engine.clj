@@ -5,6 +5,7 @@
   afterglow.show scheduler. The shell captures time, owns the executor/compiler
   cache and commits a successful result before performing returned intents."
   (:require [afterglow.runtime :as runtime]
+            [afterglow.time :as musical-time]
             [afterglow.control.params :as params]))
 
 (defn- fail!
@@ -52,7 +53,10 @@
     (fail! ::invalid-duration "Instance deadline exceeds finite logical time"
            {:instance-id id}))
   (when-not (#{:pinned :restart :preserve-state} (get instance :reload-policy :pinned))
-    (fail! ::invalid-reload-policy "Unknown instance reload policy" {:instance-id id})))
+    (fail! ::invalid-reload-policy "Unknown instance reload policy" {:instance-id id}))
+  (doseq [field [:duration :release-duration] :when (contains? instance field)]
+    (when (seq (musical-time/validate-duration (get instance field)))
+      (fail! ::invalid-duration "Invalid musical duration" {:instance-id id :field field}))))
 
 (defn- validate-input!
   [model frame compile-effect]
@@ -81,7 +85,7 @@
     (validate-instance! id instance)))
 
 (defn- reload-instance
-  [registry time-ms instance]
+  [registry clock instance]
   (let [policy (get instance :reload-policy :pinned)
         current (get-in registry [:effects (:effect-id instance)])]
     (if (and (not= :pinned policy) current
@@ -99,33 +103,60 @@
               next-instance (if (= :restart policy)
                               (-> next-instance
                                   (assoc :state (get current :initial-state {})
-                                         :started-at-ms time-ms :phase :running)
-                                  (dissoc :release-at-ms))
+                                         :started-at-ms (:time-ms clock) :started-at-beat (:beat clock) :phase :running)
+                                  (dissoc :release-at-ms :release-at-beat :release-timer)
+                                  (cond-> (:duration instance)
+                                    (assoc :duration-timer
+                                           (musical-time/start (:duration instance)
+                                                               (assoc clock :meter (:timing-meter instance))))))
                               next-instance)]
           [next-instance [{:type :effect/reloaded :instance-id (:id instance)
                            :from-version (:effect-version instance) :to-version (:version current)
                            :policy policy}]]))
       [instance []])))
 
+(defn- boundary-clock
+  "Interpolate within the last explicit clock interval, used only when a
+  deadline crosses from beats to a millisecond release (or vice versa)."
+  [model clock instance unit deadline]
+  (let [a-ms (max (:started-at-ms instance) (get model :last-frame-time-ms (:started-at-ms instance)))
+        a-beat (if (= a-ms (:started-at-ms instance)) (:started-at-beat instance)
+                   (get model :last-frame-beat (:started-at-beat instance)))
+        b-ms (:time-ms clock) b-beat (:beat clock)
+        interpolate (fn [a b c d x fallback]
+                      (if (and (every? finite-number? [a b c d x]) (< a b) (<= a x b))
+                        (+ c (* (/ (- x a) (- b a)) (- d c))) fallback))]
+    (case unit
+      :beats (assoc clock :beat deadline :time-ms (interpolate a-beat b-beat a-ms b-ms deadline b-ms))
+      :ms (assoc clock :time-ms deadline :beat (interpolate a-ms b-ms a-beat b-beat deadline b-beat)))))
+
 (defn- release-if-expired
-  [time-ms instance]
-  (if (and (= :running (:phase instance)) (:duration-ms instance)
-           (>= time-ms (+ (:started-at-ms instance) (:duration-ms instance))))
-    (assoc instance :phase :releasing
-           :release-at-ms (+ (:started-at-ms instance) (:duration-ms instance)))
-    instance))
+  [model clock instance]
+  (let [timer (or (:duration-timer instance)
+                  (when-let [duration (:duration-ms instance)]
+                    {:duration {:unit :ms :value duration} :started-at (:started-at-ms instance)}))]
+    (if (and (= :running (:phase instance)) timer (:done? (musical-time/sample timer clock)))
+      (let [unit (get-in timer [:duration :unit])
+            deadline (+ (:started-at timer) (get-in timer [:duration :value]))
+            release-clock (assoc (boundary-clock model clock instance unit deadline) :meter (:timing-meter instance))]
+        (cond-> (assoc instance :phase :releasing :release-at-ms (:time-ms release-clock)
+                                :release-at-beat (:beat release-clock))
+          (:release-duration instance) (assoc :release-timer (musical-time/start (:release-duration instance) release-clock))))
+      instance)))
 
 (defn- release-finished?
-  [time-ms instance]
+  [clock instance]
   (and (= :releasing (:phase instance))
-       (>= time-ms (+ (:release-at-ms instance) (get instance :release-duration-ms 0)))))
+       (if-let [timer (:release-timer instance)]
+         (:done? (musical-time/sample timer clock))
+         (>= (:time-ms clock) (+ (:release-at-ms instance) (get instance :release-duration-ms 0))))))
 
 (defn- prepare-instance
-  [model time-ms instance]
-  (let [[reloaded intents] (reload-instance (:registry model) time-ms instance)
-        prepared (release-if-expired time-ms reloaded)]
+  [model clock instance]
+  (let [[reloaded intents] (reload-instance (:registry model) clock instance)
+        prepared (release-if-expired model clock reloaded)]
     (validate-instance! (:id prepared) prepared)
-    {:instance prepared :intents intents :expired? (release-finished? time-ms prepared)}))
+    {:instance prepared :intents intents :expired? (release-finished? clock prepared)}))
 
 (defn- descriptor
   [compiled {:keys [instance intents expired?]}]
@@ -191,7 +222,11 @@
                           :time-ms time-ms :delta-ms delta-ms
                           :variables (:variables model) :master (:master model)
                           :blackout? (:blackout? model) :transport (:transport model)})
-         prepared (mapv (partial prepare-instance model time-ms)
+         clock (musical-time/frame-clock snapshot)
+         _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
+                      (< (:beat clock) (:last-frame-beat model)))
+             (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
+         prepared (mapv (partial prepare-instance model clock)
                         (sort-by (juxt :priority :order :id) (vals (:instances model))))
          definitions (distinct (map (comp :definition :instance) (remove :expired? prepared)))
          compiled (into {} (map (fn [definition]
@@ -206,5 +241,5 @@
                                    [(:id result) (assoc (:instance result) :state (:state result))]))
                          (:effects evaluated))]
      {:model (assoc model :instances instances :time-ms time-ms
-                    :last-frame-time-ms time-ms :frame-number frame-number)
+                    :last-frame-time-ms time-ms :last-frame-beat (:beat clock) :frame-number frame-number)
       :assignments (:assignments evaluated) :intents (:intents evaluated)})))

@@ -1,7 +1,8 @@
 (ns afterglow.control.model
   "Immutable show commands. Time and identity enter through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
-  (:require [afterglow.control.params :as params]))
+  (:require [afterglow.control.params :as params]
+            [afterglow.time :as musical-time]))
 
 (defn- reject! [code message & [details]]
   (throw (ex-info message {:control/error code :details details})))
@@ -12,6 +13,19 @@
 (defn- identifier? [x] (or (keyword? x) (and (string? x) (not (empty? x)))))
 (defn- duration? [x] (and (params/finite-number? x) (pos? x)))
 (defn- nonnegative? [x] (and (params/finite-number? x) (<= 0 x)))
+
+(defn- timing-option [sources field legacy-field]
+  (some (fn [source]
+          (cond (contains? source field) {:duration (get source field)}
+                (contains? source legacy-field) {:legacy (get source legacy-field)})) sources))
+
+(defn- check-duration! [duration positive?]
+  (require! (and (empty? (musical-time/validate-duration duration))
+                 (or (not positive?) (pos? (val (first duration)))))
+            :invalid-duration "Duration must contain one valid beat, bar, phrase or ms value"))
+
+(defn- clock [model time-ms]
+  (musical-time/frame-clock {:time-ms time-ms :transport (:transport model)}))
 
 (defn new-show
   "Create an inert model. Optional :history-limit bounds accepted-command retry
@@ -24,7 +38,8 @@
                        :registry {:effects {} :cues {} :fixtures {} :versions {}}
                        :instances {} :pages {} :variables {}
                        :master 1.0 :blackout? false
-                       :transport {:bpm 120 :playing? true}}
+                       :transport {:bpm 120 :playing? true :beat 0.0
+                                   :meter {:beats-per-bar 4 :bars-per-phrase 4}}}
                       (dissoc initial :history-limit :control))]
      (require! (and (integer? limit) (pos? limit)) :invalid-model "History limit must be positive")
      (require! (identifier? (:show-id model)) :invalid-model "Show ID must be a keyword or nonempty string")
@@ -39,7 +54,8 @@
        (require! (map? (get model k)) :invalid-model "Expected map" {:field k}))
      (assoc model
             :registry (merge {:effects {} :cues {} :fixtures {} :versions {}} (:registry model))
-            :transport (merge {:bpm 120 :playing? true} (:transport model))
+            :transport (merge {:bpm 120 :playing? true :beat 0.0
+                               :meter {:beats-per-bar 4 :bars-per-phrase 4}} (:transport model))
             :control {:next-instance 0
                       :next-order (if (seq (:instances model))
                                     (inc (apply max (map #(get % :order 0) (vals (:instances model))))) 0)
@@ -73,6 +89,8 @@
     (require! (duration? (:duration-ms definition)) :invalid-duration "Duration must be positive"))
   (when (contains? definition :release-duration-ms)
     (require! (nonnegative? (:release-duration-ms definition)) :invalid-duration "Release duration must be nonnegative"))
+  (when (contains? definition :duration) (check-duration! (:duration definition) true))
+  (when (contains? definition :release-duration) (check-duration! (:release-duration definition) false))
   (case kind
     :effects
     (let [schemas (get definition :params {})]
@@ -123,18 +141,25 @@
         _ (require! (map? launch) :invalid-launch "Launch options must be a map")
         mode (get launch :mode :persistent)
         _ (require! (#{:persistent :held :timed :one-shot} mode) :invalid-launch "Unknown launch mode")
-        duration (or (:duration-ms launch) (:duration-ms cue) (:duration-ms effect))
+        duration-option (timing-option [launch cue effect] :duration :duration-ms)
+        duration (:legacy duration-option)
+        musical-duration (:duration duration-option)
         _ (when (#{:timed :one-shot} mode)
-            (require! (duration? duration) :invalid-duration "Timed/one-shot cues need a positive duration"))
+            (if (contains? duration-option :duration) (check-duration! musical-duration true)
+                (require! (duration? duration) :invalid-duration "Timed/one-shot cues need a positive duration")))
         _ (require! (map? (get launch :params {})) :invalid-params "Launch params must be a map")
         overrides (merge (get cue :params {}) (get launch :params {}))
         _ (check-params! (get effect :params {}) overrides)
         values (try (params/resolve-values (get effect :params {}) overrides)
                     (catch clojure.lang.ExceptionInfo e
                       (reject! :invalid-params "Invalid parameter defaults" (ex-data e))))
-        release (or (:release-duration-ms launch) (:release-duration-ms cue)
-                    (:release-duration-ms effect) (get-in effect [:envelope :release-ms]) 0)
+        release-option (or (timing-option [launch cue effect] :release-duration :release-duration-ms)
+                           (timing-option [(:envelope effect)] :release :release-ms))
+        musical-release (:duration release-option)
+        release (if (contains? release-option :duration) 0 (get release-option :legacy 0))
+        _ (when (contains? release-option :duration) (check-duration! musical-release false))
         _ (require! (nonnegative? release) :invalid-duration "Release duration must be nonnegative")
+        clock (clock model time)
         reload-policy (or (:reload-policy launch) (:reload-policy cue) :pinned)
         _ (require! (#{:pinned :restart :preserve-state} reload-policy) :invalid-launch "Unknown reload policy")
         next-id (loop [candidate (inc (get-in model [:control :next-instance]))]
@@ -145,11 +170,15 @@
         instance (cond-> {:id id :cue-id (:id cue) :effect-id (:id effect)
                           :effect-version (:version effect) :definition effect
                           :source (:source command)
-                          :params values :started-at-ms time :state {}
+                          :params values :started-at-ms time :started-at-beat (:beat clock)
+                          :timing-meter (musical-time/normalize-meter (:meter clock)) :state {}
                           :priority (get cue :priority 0) :order order :phase :running
                           :launch-mode mode :release-duration-ms release
                           :reload-policy reload-policy}
-                   (#{:timed :one-shot} mode) (assoc :duration-ms duration)
+                   (and (#{:timed :one-shot} mode) (not musical-duration)) (assoc :duration-ms duration)
+                   (and (#{:timed :one-shot} mode) musical-duration)
+                   (assoc :duration musical-duration :duration-timer (musical-time/start musical-duration clock))
+                   musical-release (assoc :release-duration musical-release)
                    (:gesture-id command) (assoc :gesture-id (:gesture-id command)))]
     {:model (-> model (assoc-in [:instances id] instance)
                 (assoc-in [:control :next-instance] next-id)
@@ -191,7 +220,11 @@
       {:model (if force? (update model :instances dissoc id)
                   (if (= :releasing (:phase instance)) model
                       (assoc-in model [:instances id]
-                                (assoc instance :phase :releasing :release-at-ms time))))
+                                (cond-> (assoc instance :phase :releasing :release-at-ms time
+                                                        :release-at-beat (get-in model [:transport :beat] 0.0))
+                                  (:release-duration instance)
+                                  (assoc :release-timer (musical-time/start (:release-duration instance)
+                                                                         (assoc (clock model time) :meter (:timing-meter instance))))))))
        :events [{:type (if force? :instance/removed :instance/released) :instance-id id :time-ms time}]
        :result {:instance-id id}})
     :param/set
@@ -211,13 +244,14 @@
         {:model (assoc model :blackout? (:value command)) :events [{:type :blackout/changed :value (:value command)}]})
     :transport/set
     (let [changes (:transport command)]
-      (require! (and (map? changes) (every? #{:bpm :playing?} (keys changes)))
-                :invalid-value "Transport accepts bpm and playing?")
+      (require! (and (map? changes) (every? #{:bpm :playing? :meter} (keys changes)))
+                :invalid-value "Transport accepts bpm, playing? and meter")
       (when (contains? changes :bpm)
         (require! (and (params/finite-number? (:bpm changes)) (<= 1 (:bpm changes) 1000))
                   :invalid-value "BPM must be in [1,1000]"))
       (when (contains? changes :playing?)
         (require! (instance? Boolean (:playing? changes)) :invalid-value "Playing must be boolean"))
+      (when (contains? changes :meter) (musical-time/normalize-meter (:meter changes)))
       {:model (update model :transport merge changes) :events [{:type :transport/changed :transport changes}]})
     :page/put
     (let [page (:page command)]
