@@ -65,6 +65,12 @@ These namespaces are independent of the legacy show scheduler and perform no I/O
   stride still use the full general oracle. Validate both partitions, pack each
   target once, and retain compact history by stable ID. Never convert an earlier
   exact target contribution to doubles merely because a later write is typed.
+- Contribution blocks may carry opaque `:source` data. Validation/merge errors
+  preserve their cause and ex-data while adding `:effect-source`. Final geometry
+  uses the last positive-opacity source of effective aim, otherwise direction;
+  zero-opacity or overridden writes must not steal attribution. Keep global
+  patch/options/history failures unattributed. Track provenance at block and
+  geometric-target level, without copying source maps into pixel assignments.
 - Explicit fixture :footprint reserves the whole physical span, including gaps
   and universe crossings, and covers every coarse/fine offset. Use interval
   validation rather than allocating one entry per reserved channel.
