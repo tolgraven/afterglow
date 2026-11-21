@@ -45,3 +45,13 @@ an intentional, tested contract changes it.
 
 Nested source, effects, runtime, render, control/devices, controller, web,
 resources, development and test guidance supplies folder-specific rules.
+
+Expanded expressive work is specified in the companion
+[performance requirements](../tolglow/docs/product/expressive-performance.md).
+MPE, Push 3/Seaboard and X-Touch/extender profiles keep device/channel/note/instance
+identity and use verified message formats; support claims name the actual mode.
+Category colors/widgets and automapping consume shared metadata, never duplicate
+cue semantics. Waveform/modulation state, clocks and RNG remain explicit and
+deterministic across workers. Optional webview/Max hosts or Link/AbleSet adapters
+must not reintroduce a legacy effect compatibility layer or own a competing show
+clock. Preserve reference licenses and distinguish tested codecs from hardware.

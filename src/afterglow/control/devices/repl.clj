@@ -3,6 +3,8 @@
   synchronous command dispatcher and logical clock; importing does no I/O."
   (:require [afterglow.control.devices.session :as session]
             [afterglow.control.devices.push-2 :as push]
+            [afterglow.control.devices.push-3 :as push-3]
+            [afterglow.control.devices.seaboard :as seaboard]
             [afterglow.control.devices.generic :as generic]
             [afterglow.control.devices.transports :as transports]))
 
@@ -58,3 +60,16 @@
   (generic/connect-push-3-midi!
     (cond-> options
       (not (:transport options)) (assoc :transport (transports/midi-transport options)))))
+
+(defn open-push-3!
+  "Open the distinct Push 3 User Mode profile, including configured MPE axes.
+  Requires the captured layout/expression settings documented by its profile."
+  [options]
+  (push-3/connect! (cond-> options
+                    (not (:transport options)) (assoc :transport (transports/midi-transport options)))))
+
+(defn open-seaboard!
+  "Open a Seaboard M with its configured MPE zone and cue/axis mappings."
+  [options]
+  (seaboard/connect! (cond-> options
+                      (not (:transport options)) (assoc :transport (transports/midi-transport options)))))

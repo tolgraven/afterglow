@@ -3,9 +3,11 @@
 
 (def pure-tests
   '[afterglow.core-test afterglow.runtime-test afterglow.time-test afterglow.reactive-test
-    afterglow.runtime.engine-test afterglow.runtime.executor-test
+    afterglow.runtime.engine-test afterglow.runtime.executor-test afterglow.runtime.replay-test
     afterglow.control.model-test afterglow.control.clock-test afterglow.control.bindings-test afterglow.control.views-test
     afterglow.control.codecs.midi-test afterglow.control.codecs.osc-test afterglow.control.codecs.push-2-test
+    afterglow.control.codecs.push-3-test afterglow.control.codecs.mpe-test
+    afterglow.control.devices.push-3-test afterglow.control.devices.mpe-test
     afterglow.control.devices.session-test afterglow.control.devices.transports-test
     afterglow.render.frame-test afterglow.render.ir-test])
 
