@@ -178,18 +178,19 @@
 (defn- dispatch-next! [manager run periodic?]
   (let [queue ^ArrayBlockingQueue (:queue run)]
     (when-let [event (if periodic? (.poll queue 20 TimeUnit/MILLISECONDS) (.take queue))]
-    (when (= (::session/generation event) @(:binding-generation run))
-      (try
-        (binding [session/*input-generation* (::session/generation event)] (process! manager run event))
-        (catch Exception error
-          (let [details (error-data error)]
-            (swap! (:state manager) assoc :last-error details)
-            (emit! manager run {:type :sync/error :error details}))))))))
+      (when (= (::session/generation event) @(:binding-generation run))
+        (try
+          (binding [session/*input-generation* (::session/generation event)] (process! manager run event))
+          (catch Exception error
+            (let [details (error-data error)]
+              (swap! (:state manager) assoc :last-error details)
+              (emit! manager run {:type :sync/error :error details}))))))))
 
 (defn- pump! [manager run]
   (swap! (:state manager) assoc :status :running)
   (lifecycle! manager run :opened)
-  (let [ticks (keep :tick! (vals (:adapters manager)))]
+  (let [connected (select-keys (:adapters manager) (keys @(:resources run)))
+        ticks (keep :tick! (vals connected))]
     (while (not @(:cancelled? run))
       (let [now ((get-in manager [:options :now-ms]))]
         (doseq [tick! ticks] (tick! manager run now))
