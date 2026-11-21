@@ -31,6 +31,21 @@ instance disappears, a delayed strip input cannot edit the replacement instance.
 the Push profile supplies only MIDI addresses and local interaction state.
 Every write is a normal `:param/set` command carrying the exact instance ID.
 
+## Physical strip, master and tempo
+
+The strip receives source-derived mode and 14-bit value messages for the touched
+component. Level, centered, point and dark modes are diffed; an untouched strip
+is cleared. Handoff and orderly close restore Push's default point/return mode.
+Disconnect cleanup avoids writes to absent hardware.
+
+Touching the master encoder (note 8) assigns the strip to master level. Turning
+CC 79 adjusts master by 1% per tick, or 0.1% with Shift. Touching the tempo encoder
+(note 9) assigns the strip to BPM. CC 15 changes tempo by 0.1 BPM, or 1 BPM with
+Shift, using the original controller's 20–200 BPM range. Tempo edits use the
+existing shared `:transport/set` operation and are disabled when the snapshot
+identifies an external clock source. These global controls also work with no
+active cue. Releasing a newer touch restores the previous touch target.
+
 ## Pad expression
 
 Numeric parameter schemas can opt into pad velocity and polyphonic pressure
@@ -72,17 +87,22 @@ component selection. `:active-effects` is a bounded eight-instance window, with
 audio projection remain on the offscreen display worker, outside the show clock.
 `:preset` contains `:saved?`, `:changed?`, `:record?` and the intended `:action`
 (`:save` or `:clear`); it carries no source code or private controller state.
+`:touched-control` is nil or `{:target :master|:tempo :editable? boolean}` for
+global control emphasis and explicit sync-lock feedback.
 
 ## Remaining parity
 
-Tempo/beat controls, distinct stop/run semantics and linked viewports remain
+Tap/beat/bar/phrase alignment, distinct stop/run semantics and linked viewports remain
 separate acceptance work. Do not infer those interactions from display widgets.
+Phase changes require Tolglow's whole-model clock rebasing, including composition,
+auto, modulation, routing and sensor timing; device code must not mutate beat
+coordinates independently.
 The comprehensive cross-surface checklist lives in Tolglow's
 `docs/control-parity-audit.md`.
 
 ## Verification
 
-The complete `./bin/test parity` lane passes 285 tests / 3,143 assertions. The
+The complete `./bin/test parity` lane passes 290 tests / 3,188 assertions. The
 control cases exercise the actual MIDI decoder, composable session, parameter
 validation, versioned cue publication and shared command reducer with capture
 transports. No MIDI port, native display or physical lighting output is opened.

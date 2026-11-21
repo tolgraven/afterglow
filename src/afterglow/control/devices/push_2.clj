@@ -15,6 +15,7 @@
                         :encoder-touch :touch-strip :color-grid :enum-grid :shift-fine
                         :velocity-parameters :pad-pressure :shift-held-override
                         :cue-parameter-presets
+                        :touch-strip-feedback :master-touch :manual-tempo-encoder
                         :master-encoder :led-diff :palette-restore :display-view
                         :user-mode-handoff :reconnect}
          :hardware-verified? false))
@@ -48,7 +49,9 @@
   (if (get-in model [:instances (:selected-instance state)]) state
       (if-let [instance (last (views/active-instances model))]
         (select-instance state instance)
-        (assoc state :selected-instance nil :touches {} :touch-order []))))
+        (let [touches (into {} (filter (comp :target val)) (:touches state))]
+          (assoc state :selected-instance nil :touches touches
+                       :touch-order (filterv #(contains? touches %) (:touch-order state)))))))
 
 (defn- parameter-bank [state instance]
   (let [ids (parameter-edit/ordered-parameters (:definition instance))
@@ -70,6 +73,25 @@
     (when (and touch (= (:selected-instance state) (:instance-id touch))
                (get-in model [:instances (:instance-id touch) :definition :params (:param touch)])) touch)))
 
+(defn- system-touch [state]
+  (:target (get (:touches state) (peek (:touch-order state)))))
+
+(defn- manual-clock? [model]
+  (contains? #{nil :manual} (get-in model [:transport :source])))
+
+(defn- edit-system [state model target input mode]
+  (let [tempo? (= :tempo target)
+        current (if tempo? (get-in model [:transport :bpm]) (:master model))
+        bounds (if tempo? [20 200] [0 1])
+        step (if tempo? (if (:shift? state) 1.0 0.1) (if (:shift? state) 0.001 0.01))
+        next-value (bindings/clamp (if (= :absolute mode)
+                                    (+ (first bounds) (* input (- (second bounds) (first bounds))))
+                                    (+ current (* input step))) bounds)]
+    {:state state
+     :commands (if (or (= current next-value) (and tempo? (not (manual-clock? model)))) []
+                   [(if tempo? {:op :transport/set :transport {:bpm next-value}}
+                        {:op :master/set :value next-value})])}))
+
 (defn- edit-parameter [state model selection value mode]
   (let [{:keys [instance-id param component]} selection
         instance (get-in model [:instances instance-id])
@@ -83,7 +105,10 @@
       {:state state})))
 
 (defn- touch-encoder [state model note]
-  (if-let [selection (parameter-at state model note)]
+  (if-let [selection (case note
+                       8 {:target :master :encoder note}
+                       9 {:target :tempo :encoder note}
+                       (parameter-at state model note))]
     {:state (-> state (assoc-in [:touches note] selection)
                 (update :touch-order #(conj (vec (remove #{note} %)) note)))}
     {:state state}))
@@ -217,12 +242,14 @@
     {:state (assoc state :shift? (pos? (:raw-value event)))}
     (and (= :control-change (:type event)) (= 86 (:controller event)))
     {:state (assoc state :record? (pos? (:raw-value event)))}
-    (and (= :note-on (:type event)) (<= 0 (:note event) 7))
+    (and (= :note-on (:type event)) (<= 0 (:note event) 9))
     (touch-encoder state model (:note event))
-    (and (= :note-off (:type event)) (<= 0 (:note event) 7))
+    (and (= :note-off (:type event)) (<= 0 (:note event) 9))
     (release-encoder state (:note event))
     (= :pitch-bend (:type event))
-    (edit-parameter state model (touched state model) (:value event) :absolute)
+    (if-let [target (system-touch state)]
+      (edit-system state model target (:value event) :absolute)
+      (edit-parameter state model (touched state model) (:value event) :absolute))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (#{62 63} (:controller event)))
     (page-control state model (if (= 62 (:controller event)) -1 1))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (<= 20 (:controller event) 27))
@@ -235,9 +262,9 @@
     (and (= :control-change (:type event)) (<= 71 (:controller event) 78))
     (encoder state event model)
     (and (= :control-change (:type event)) (= 79 (:controller event)))
-    {:state state :commands [{:op :master/set
-                              :value (bindings/clamp (+ (:master model)
-                                                      (* 0.01 (codec/signed-encoder (:raw-value event)))) [0 1])}]}
+    (edit-system state model :master (codec/signed-encoder (:raw-value event)) :relative)
+    (and (= :control-change (:type event)) (= 15 (:controller event)))
+    (edit-system state model :tempo (codec/signed-encoder (:raw-value event)) :relative)
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (#{44 45 46 47} (:controller event)))
     (let [[x y] (:origin state)
           next-origin (case (:controller event) 44 [(max 0 (- x 8)) y]
@@ -278,6 +305,8 @@
      :instance-id (:id instance) :definition-version (:effect-version instance)
      :parameter-bank (dissoc bank :ids)
      :touched-parameter (touched state model)
+     :touched-control (when-let [target (system-touch state)]
+                        {:target target :editable? (or (= :master target) (manual-clock? model))})
      :fine? (boolean (:shift? state))
      :preset {:saved? (contains? cue :saved-params)
               :changed? (boolean (and instance (not= defaults (:params instance))))
@@ -300,6 +329,21 @@
                             (views/cue-view model (:id cue)))) (range 8))
      :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))}))
 
+(defn- strip-feedback [state model]
+  (if-let [target (system-touch state)]
+    (if (and (= :tempo target) (not (manual-clock? model))) {:mode :off}
+      {:mode :level :value (long (Math/round (* 16383.0
+                       (if (= :master target) (:master model)
+                         (bindings/clamp (/ (- (get-in model [:transport :bpm]) 20) 180.0) [0 1])))))})
+    (if-let [{:keys [instance-id param component]} (touched state model)]
+      (let [schema (get-in model [:instances instance-id :definition :params param])
+            value (get-in model [:instances instance-id :params param])
+            mode (cond (or (= :enum (:type schema)) (and (= :color (:type schema)) (zero? component))) :point
+                       (or (= :boolean (:type schema)) (:centered schema)) :centered
+                       :else :level)]
+        {:mode mode :value (long (Math/round (* 16383.0 (parameter-edit/position schema value {:component component}))))})
+      {:mode :off})))
+
 (defn- feedback [device-id timeout-ms batch-size state model envelope]
   (let [state (selected-state state model)
         alive (set (keys (:instances model)))
@@ -320,6 +364,10 @@
         display (display-view state model)
         display-changed? (not= display (:last-display state))
         state (assoc state :last-display display)
+        strip (strip-feedback state model)
+        strip-messages (when (and (:ready? state) (nil? (:fault state)))
+                         (codec/touch-strip-messages device-id (:last-touch-strip state) strip))
+        state (if (some? strip-messages) (assoc state :last-touch-strip strip) state)
         desired (into {} (for [y (range 8) x (range 8)]
                            (let [cue (cue-at state model (codec/pad-note x y))]
                              [[x y] (case (:type schema)
@@ -331,7 +379,7 @@
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
                   (take batch-size (filter (fn [[xy color]] (not= color (get-in state [:last-leds xy])))
                                            (sort-by key desired))))
-        messages (vec (mapcat (fn [[[x y] color]]
+        messages (into (vec strip-messages) (mapcat (fn [[[x y] color]]
                                (codec/pad-led-messages device-id x y color
                                  (last (get-in state [:palettes (codec/pad-note x y)])))) changes))
         keepalive? (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state))
@@ -346,11 +394,13 @@
 
 (defn- stop [device-id state _model _envelope disconnected?]
   {:state (assoc state :pads {} :holds {} :ready? false :last-leds {} :last-display nil
+                       :last-touch-strip nil
                        :touches {} :touch-order [] :shift? false :record? false :pressed-pads #{} :pad-instances {})
    :commands (mapv (fn [id] {:op :instance/end :instance-id id})
                    (keep :instance-id (vals (get-in state [:holds :gestures]))))
    :midi (if (or disconnected? (not (:ready? state))) []
-             (into (vec (for [note (range 36 100)] [0x80 note 0]))
+             (into (into [(codec/touch-strip-mode device-id :default)]
+                         (for [note (range 36 100)] [0x80 note 0]))
                    (map (fn [[index rgbw]] (codec/palette-write device-id index rgbw)))
                    (sort-by key (:palettes state))))})
 
@@ -377,7 +427,7 @@
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc % :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {}
+     :reset-model #(assoc % :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
                            :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]

@@ -41,3 +41,17 @@
              #(push/palette-reply 0 [0xf0 0 0x21 0x1d 0 1 4 1 0xf7])
              #(push/palette-reply 0 (assoc (assoc (push/palette-write 0 0 [1 2 3 4]) 6 4) 9 2))]]
     (is (thrown? clojure.lang.ExceptionInfo (f)))))
+
+(deftest touch-strip-modes-values-and-diff-match-existing-source-protocol
+  (is (= [104 65 81 73 67] (mapv push/touch-strip-modes [:default :level :centered :point :off])))
+  (is (= [[0xf0 0 0x21 0x1d 2 1 0x17 65 0xf7] [0xe0 127 127]]
+         (push/touch-strip-messages 2 nil {:mode :level :value 16383})))
+  (is (= [[0xe0 0 64]]
+         (push/touch-strip-messages 2 {:mode :level :value 0} {:mode :level :value 8192})))
+  (is (= [] (push/touch-strip-messages 2 {:mode :point :value 10} {:mode :point :value 10})))
+  (is (= [(push/touch-strip-mode 2 :off) (push/sysex 2 (into [0x19] (repeat 16 0)))]
+         (push/touch-strip-messages 2 nil {:mode :off})))
+  (is (= [(push/touch-strip-mode 2 :default)]
+         (push/touch-strip-messages 2 {:mode :level :value 10} {:mode :default})))
+  (doseq [after [{:mode :unknown} {:mode :level :value -1} {:mode :point :value 16384}]]
+    (is (thrown? clojure.lang.ExceptionInfo (push/touch-strip-messages 0 nil after)))))
