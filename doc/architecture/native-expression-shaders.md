@@ -95,3 +95,53 @@ waits up to 25 ms for cleanup and returns false if the worker is still releasing
 the context. Cleanup then completes independently. Driver calls and compilation
 can outlast the fence timeout. Cancelling a future never interrupts an executing
 native call. The show publisher controls whether to accept a completed frame.
+
+## One deadline for expressions and physical movement
+
+`afterglow.render.compute` owns native submission, the time budget, CPU fallback
+and physical rendering for a show. Set `:compute-backend` and `:movement-backend`
+independently to `:native-gpu` to opt in. Each defaults to `:cpu`. A CPU-only
+owner acquires no worker or graphics context. Choose a `:budget-ms` that leaves
+room for CPU packing and the output sink. The core default is 25 ms.
+
+```clojure
+(require '[afterglow.render.compute :as compute]
+         '[afterglow.render.frame :as frame]
+         '[afterglow.render.ir :as ir])
+
+(def patch (frame/compile-patch
+             [{:id :spot :universe 0 :address 1 :channels {:focus [1 2]}}]))
+(def fields {:focus {:op :param :key :focus}})
+(def group (compute/prepare-group fields [[0 2 0]] (ir/compile-batch fields)))
+
+(let [owner (compute/open! {:compute-backend :native-gpu :budget-ms 10})]
+  (try
+    (let [render (compute/frame-renderer owner (System/nanoTime))]
+      (render patch
+              [{:kind :batch :source :focus-sweep
+                :batch {:target-ids [:spot]
+                        :field-request {:group group :env {:params {:focus 0.35}}}}}]
+              {:compact-values? true}))
+    (finally (compute/close! owner))))
+```
+
+Keep the owner for the show's lifetime and the prepared group for the lifetime
+of that effect definition and ordered fixture selection. A group retains its
+float64 plan and a snapshot of the original xyz positions. The CPU can therefore
+evaluate a prepared request even when native libraries are unavailable or the
+host selects CPU rendering. `expressions-enabled?` lets a compiler decide
+whether to prepare future requests for native evaluation. Ordinary assignments
+and already evaluated numeric batches are accepted by the same renderer.
+
+Create a renderer for each frame when its clock is captured. Reuse that function
+only for fault-isolation retries of that frame. Completed requests reuse their
+owned arrays on a retry. A new frame captures new parameters, a fresh cache and
+a new deadline. Calibrated movement receives the same deadline after the field
+results are blended. A late result uses the float64 fallback and cannot update
+another frame. Pass the last accepted rich or compact state in the regular
+render options, and let the show's output owner decide when to publish.
+
+`(compute/status owner)` reports the configured and active expression backend,
+completed native batches, CPU fallbacks, deadline fallbacks and native session
+metrics. `(compute/movement-status owner output)` reports the movement decision
+and head counts for that output. Pass nil for a status before the first output.
