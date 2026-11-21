@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-legacy_deps=$(clojure -M dev/legacy_deps.clj project.clj .)
-revision=$(git rev-parse HEAD)
-exec clojure -J-Xms256m -J-Xmx1g -J-Djava.awt.headless=true \
-  "-J-Dafterglow.benchmark.revision=$revision" \
-  -Sdeps "$legacy_deps" -M -m afterglow.bench-render "$@"
+AFTERGLOW_BENCHMARK_REVISION=$(git rev-parse HEAD)
+export AFTERGLOW_BENCHMARK_REVISION
+exec lein with-profile +benchmark run -m afterglow.bench-render "$@"

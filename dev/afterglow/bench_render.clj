@@ -123,7 +123,8 @@
       (pprint/pprint
        {:benchmark :legacy-assignment-and-channel-packing
         :version 1
-        :source-revision (System/getProperty "afterglow.benchmark.revision" "unknown")
+        :source-revision (or (System/getenv "AFTERGLOW_BENCHMARK_REVISION")
+                             (System/getProperty "afterglow.benchmark.revision" "unknown"))
         :measured-at (str (java.time.Instant/now))
         :environment (environment)
         :timed [:clear-local-buffers :run-prebuilt-assigners :resolve-channel-assignments]

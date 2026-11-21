@@ -1,6 +1,2 @@
-;; Hardware-free test entry point. project.clj remains the application manifest.
-{:paths ["src" "resources"]
- :deps {org.clojure/clojure {:mvn/version "1.12.7"}}
- :aliases {:test {:extra-paths ["test" "dev"]
-                  :jvm-opts ["-Djava.awt.headless=true"]
-                  :main-opts ["-m" "afterglow.test-runner"]}}}
+;; Source paths for sibling local/root consumers. Leiningen owns dependencies and tasks.
+{:paths ["src" "resources"]}
