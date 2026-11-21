@@ -35,3 +35,17 @@ version directive with the desktop profile's directive. Results use float32.
 `evaluate-batch` returns the corresponding float64 CPU reference fields.
 Mechanical calibration, priority blending, fixture channel mapping and physical
 publication are later stages of the show renderer.
+
+## Evaluating outside effect middleware
+
+An effect may return a batch with a `:field-request` instead of allocating device
+resources in its step. The batch retains its normal target IDs, blend and opacity.
+The request captures an evaluator-specific immutable group, the current input
+environment, and optional per-field envelope gains.
+
+Create `afterglow.render.fields/frame-evaluator` once for each output frame,
+passing an evaluator with the call shape `(evaluate! group env)`. Apply its
+returned function to the ordered contributions, then pass the result to
+`frame/resolve-contributions`. Evaluate only on the frame owner. A successful
+group's detached buffers remain available if an unrelated effect fails and the
+owner retries that same frame. Discard this cache at the end of the frame.
