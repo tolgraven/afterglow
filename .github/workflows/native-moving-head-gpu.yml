@@ -1,0 +1,35 @@
+name: Native JVM moving-head shader
+on:
+  pull_request:
+    paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml']
+  push:
+    branches: [master]
+    paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml']
+jobs:
+  solve:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: .github/scripts/install-lein
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: afterglow-lein-${{ runner.os }}-${{ hashFiles('project.clj') }}
+          restore-keys: afterglow-lein-${{ runner.os }}-
+      - name: Exercise Mesa on an isolated Linux display
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a lein with-profile +native-gpu test afterglow.render.native-gpu-test
+      - name: Exercise macOS offscreen OpenGL
+        if: runner.os == 'macOS'
+        run: lein with-profile +native-gpu test afterglow.render.native-gpu-test

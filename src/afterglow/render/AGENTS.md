@@ -87,3 +87,7 @@ The calibrated shader, mount buffer layout and GPU readback live in this project
 `resources/gpu/`. Access the assets from the classpath through `afterglow.render.gpu`.
 Keep show choreography in the caller. Test wrap history and numbers against `frame/resolve-frame`
 and report float32 error and completed readback cost before enabling a physical-output path.
+
+The optional JVM moving-head solver uses a private desktop OpenGL context and the
+same packaged GLSL. Keep geometry out of the JOGL binding. Reuse the CPU frame
+history lookup for stable fixture IDs, and explicitly retire failed contexts.

@@ -1,5 +1,7 @@
 #version 300 es
+#ifdef GL_ES
 precision highp float;
+#endif
 
 // A world-space aim and the last accepted normalized pan (-1 on the first frame).
 layout(location = 0) in vec4 targetAndPrevious;

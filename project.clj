@@ -92,6 +92,9 @@
                        :jvm-opts     ["-XX:-OmitStackTraceInFastThrow" "-Dapple.awt.UIElement=true"]
                        :env          {:dev "true"}}
              :test {:jvm-opts ["-Djava.awt.headless=true"]}
+             :native-gpu {:dependencies [[org.jogamp.jogl/jogl-all-main "2.6.0"]
+                                         [org.jogamp.gluegen/gluegen-rt-main "2.6.0"]]
+                          :test-paths ["test-native"]}
              :benchmark {:jvm-opts ["-Xms256m" "-Xmx1g" "-Djava.awt.headless=true"]}
              :uberjar {:env        {:production "true"}
                        :prep-tasks ["javac"
