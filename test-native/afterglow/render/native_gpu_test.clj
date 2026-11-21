@@ -14,7 +14,9 @@
 
 (defn- cpu [patch targets options]
   (frame/resolve-frame patch
-                       (mapv (fn [[id target]] {:target-id id :attribute :aim :value target}) targets)
+                       (vec (for [[id input] targets
+                                  [attribute value] (if (map? input) input {:aim input})]
+                              {:target-id id :attribute attribute :value value}))
                        options))
 
 (defn- assert-axes [expected actual]
@@ -79,3 +81,17 @@
             (is (= n (count actual)))
             (assert-axes (:values expected) actual)
             (recur (inc i) {:previous-compact (:compact expected)})))))))
+
+(deftest one-native-draw-mixes-aims-and-world-directions
+  (let [patch (frame/compile-patch fixtures)
+        point {:back [3 1 -1] :wing {:aim [2 -2 -3]}}
+        mixed (assoc point :back {:direction [0 0 -8]})
+        both (assoc point :wing {:direction [1 7 0] :aim [2 -2 -3]})]
+    (with-open [solver (gpu/open! patch)]
+      (doseq [targets [mixed both point]]
+        (let [actual (gpu/solve! solver targets)]
+          (assert-axes (:values (cpu patch targets {})) actual)
+          (is (= (gpu/solve! solver point) actual))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (gpu/solve! solver (assoc mixed :back {:direction [0 0 0]}))))
+      (assert-axes (:values (cpu patch mixed {})) (gpu/solve! solver mixed)))))
