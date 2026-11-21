@@ -168,18 +168,64 @@ bins. Glide zero maps to the numeric midpoint. An explicit `:control/axis nil`
 opts out. Profile `:param-mappings` and per-cue `:cue-mappings` override metadata.
 Builtin recipes can carry annotations so the common path needs no manual mapping.
 
-Unannotated conventional names such as level, pan and focus produce suggestions
-with reasons and require selection before use. Unknown parameters, unsupported
-types, unknown axes and unavailable axes produce diagnostics. Color/vector/range
-parameters are not silently flattened to a scalar. Plans capture the cue's exact
-effect version when the note starts, including pinned registry versions. Relaunch
-to adopt changed mapping metadata. Parameter commands still pass the authoritative
-model's validation, including any schema changes introduced by hot reload.
+Unannotated semantic names now map automatically: level/dimmer/brightness/
+intensity use Pressure; velocity/strike use Strike; pan/azimuth/rotation use
+Glide; tilt/elevation/focus/zoom use Slide; lift uses Lift where available.
+`:control/semantic` and words in the schema's display `:name` can also express
+this intent. Automatic mapping is conservative: unrelated parameters remain
+unmapped, and compound values are never flattened implicitly.
+
+The portable policy lives at `[:settings :expressive :devices device-id]`:
+
+```clojure
+{:enabled? true
+ :auto? true
+ :disabled-axes #{:glide}
+ :params {:level {:axis :pressure :range [0.15 0.85]
+                  :input-range [0.1 0.9] :curve :smoothstep :inverted? false}
+          :pattern nil
+          :position [{:axis :glide :component 0}
+                     {:axis :slide :component 1}]}
+ :cues {:wash {:params {:level {:axis :slide :range [0.2 0.6]}}}
+        :sweep {:enabled? false}}}
+```
+
+The device ID is `:mapping-id` when supplied, otherwise the session ID. Profile
+`:mapping-policy`, `:param-mappings` and `:cue-mappings` provide defaults;
+persisted device settings and then cue settings override their parameter entries.
+Manual entries win over annotations and automatic matches. `nil` or
+`{:enabled? false}` disables a parameter. `:auto? false` disables inferred names
+while keeping manual and explicit schema annotations. `:enabled? false` disables
+expression, **not cue launch or note-off release**. A disabled device remains
+disabled even if a cue enables expression. Disabled axes combine across levels.
+
+Scalar mappings support output range, optional input dead-zone endpoints,
+inversion and linear/ease-in/ease-out/smoothstep curves. Out-of-range inputs clamp.
+Enum and boolean targets use bins/thresholds; custom numeric output ranges do not
+apply to them. Integer output ranges must contain an integer. Color, vector and
+ordered-range targets require explicit zero-based component mappings; untouched
+components keep their current values, and range endpoints cannot cross. Invalid
+schema/range/axis targets are withheld with diagnostics. At most 62 parameters
+are mapped per plan, leaving command-budget space for release plus a same-note
+retrigger. Component mappings are limited to 16 entries per parameter.
+
+`expressive/normalize-config` validates portable settings and normalizes JSON
+axis/curve strings. `expressive/policy` resolves precedence; `expressive/plan`
+returns actual mappings, schemas, diagnostics and disabled reasons;
+`expressive/values` maps one event using current parameter values. These are the
+same functions used by the Studio preview and device sessions.
+
+Policies are re-read for each expression event, so overrides and disable switches
+apply while a note is held. Active instances use their captured definition,
+including a successful hot reload; a registry edit alone cannot change an older
+instance's parameter bounds. Pending launches retain their captured schemas and
+expression values. Save/load restores policy data only; it does not open MIDI
+ports, recreate held fingers or restore transport resources.
 
 ## Verification
 
-The four new codec/device test namespaces contain 17 tests and 115 assertions at
-this checkpoint. They exercise real command admission, channel isolation, typed
+The shared parity suite passes 297 tests and 3,234 assertions at this checkpoint;
+the expressive device namespace covers 12 tests and 79 assertions. These exercise real command admission, channel isolation, typed
 mapping, pinned definitions, delayed acknowledgements, held cleanup, restarts,
 relative encoders and explicit capture validation. They use synthetic input
 captures and injected owned transports; the transports fail if these profiles
