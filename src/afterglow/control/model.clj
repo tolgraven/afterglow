@@ -1,7 +1,8 @@
 (ns afterglow.control.model
   "Immutable show commands. Time and identity enter through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
-  (:require [afterglow.control.params :as params]
+  (:require [afterglow.runtime.events :as events]
+            [afterglow.control.params :as params]
             [afterglow.time :as musical-time]
             [afterglow.control.categories :as categories]
             [afterglow.control.system :as system]))
@@ -381,7 +382,13 @@
               updated (cond-> (update next-model :revision inc)
                         (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
               ack (merge (receipt updated command :accepted) result)
-              remembered (remember updated command ack)]
+              remembered (remember updated command ack)
+              remembered (if (contains? model ::events/pending)
+                           (events/collect remembered :control
+                             {:kind :command :id (or (get-in command [:source :adapter])
+                                                     (get-in command [:source :type]) (:source command))}
+                             events)
+                           remembered)]
           {:model remembered :events (vec events) :ack ack})))
     (catch clojure.lang.ExceptionInfo e
       (if-let [code (:control/error (ex-data e))]
