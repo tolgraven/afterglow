@@ -271,6 +271,19 @@
       (is (= :invalid-params (get-in result [:ack :code])))
       (is (identical? invalid (:model result))))))
 
+(deftest launch-registered-effect-without-any-cue-or-grid-cell
+  (let [show (assoc-in (configured) [:registry :cues] {})
+        result (model/apply-command show (command show {:op :effect/launch :effect-id :wash
+                                                       :launch {:mode :one-shot :duration {:beats 1/2}}}))
+        id (get-in result [:ack :instance-id])
+        instance (get-in result [:model :instances id])]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (nil? (:cue-id instance)))
+    (is (= :wash (:effect-id instance)))
+    (is (= {:beats 1/2} (:duration instance)))
+    (is (= (:registry show) (get-in result [:model :registry])))
+    (is (= :unknown-effect (get-in (model/apply-command show (command show {:op :effect/launch :effect-id :absent})) [:ack :code])))))
+
 (deftest only-accepted-reducer-events-join-the-frame-batch
   (let [base (configured)
         cmd (command base {:op :cue/launch :cue-id :red})
