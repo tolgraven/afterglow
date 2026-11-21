@@ -175,12 +175,15 @@
                        [:registry :effects] {})]
     (is (= 1 (count (:assignments (engine/advance show {:time-ms 1} compiler)))))))
 
-(deftest incompatible-reload-parameters-reject-the-entire-frame
+(deftest incompatible-reload-parameters-retain-the-captured-revision
   (let [show (-> (model (instance "a" :reload-policy :preserve-state))
                  (assoc-in [:registry :effects :pulse]
                            (assoc definition :version 2
                                   :params {:level {:type :boolean :default false}})))]
-    (is (thrown? clojure.lang.ExceptionInfo (engine/advance show {:time-ms 10} compiler)))
+    (let [result (engine/advance show {:time-ms 10} compiler)]
+      (is (= 1 (get-in result [:model :instances "a" :effect-version])))
+      (is (= :reload (get-in result [:model :instances "a" :reload-fault :stage])))
+      (is (= 0.75 (-> result :assignments first :value))))
     (is (= 1 (get-in show [:instances "a" :effect-version])))))
 
 (deftest compile-shared-definitions-once-per-frame
@@ -190,17 +193,19 @@
                     (fn [definition] (swap! compiled conj definition) (compiler definition)))
     (is (= [definition] @compiled))))
 
-(deftest compilation-and-frame-failures-leave-the-model-unmodified
+(deftest effect-failures-preserve-input-and-isolate-attempts
   (let [show (model (instance "a") (instance "b" :order 1))]
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (engine/advance show {:time-ms 20} (fn [_] (throw (ex-info "Compile failed" {}))))))
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (engine/advance show {:time-ms 20}
+    (let [result (engine/advance show {:time-ms 20} (fn [_] (throw (ex-info "Compile failed" {}))))]
+      (is (empty? (:assignments result)))
+      (is (= [:compile :compile] (mapv #(get-in % [:fault :stage]) (sort-by :id (vals (get-in result [:model :instances])))))))
+    (let [result (engine/advance show {:time-ms 20}
                                  (fn [definition]
                                    (fn [context]
                                      (if (= "b" (get-in context [:instance :id]))
                                        (throw (ex-info "Step failed" {}))
-                                       ((compiler definition) context)))))))
+                                       ((compiler definition) context)))))]
+      (is (= ["a"] (mapv :source (:assignments result))))
+      (is (= {:frames 0} (get-in result [:model :instances "b" :state]))))
     (is (= [{:frames 0} {:frames 0}] (mapv :state (sort-by :id (vals (:instances show))))))
     (is (= 0 (:time-ms show)))))
 

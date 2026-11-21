@@ -78,7 +78,9 @@
                 {:type ::duplicate-effect-id})))
   context)
 
-(defn- evaluate-instance
+(defn evaluate-instance
+  "Evaluate one descriptor with strict result validation. The show coordinator
+  owns per-instance failure policy; executor and model failures remain distinct."
   [frame instance]
   (let [id (:id instance)
         input {:frame frame :effect-id id
@@ -115,6 +117,27 @@
                 {:type ::missing-executor-results
                  :missing-ids (vec (remove #(contains? indexed %) (map :id instances)))}))
     indexed))
+
+(defn merge-results
+  "Validate and deterministically merge already evaluated results. Used by the
+  show coordinator to isolate effect faults without evaluating healthy work twice."
+  [context evaluated]
+  (validate-context context)
+  (let [instances (:effects context)
+        results (index-results instances evaluated)
+        ordered (sort-by (fn [[position instance]]
+                           [(:priority instance) (:order instance) position])
+                         (map-indexed vector instances))
+        contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
+        blocks (into [] (mapcat :contributions) contributions)
+        batch? (some #(= :batch (:kind %)) blocks)]
+    (assoc context
+           :effects (into [] (keep (fn [instance]
+                                    (let [result (get results (:id instance))]
+                                      (when-not (:done? result) (assoc instance :state (:state result)))))) instances)
+           :contributions blocks
+           :assignments (when-not batch? (into [] (mapcat :assignments) blocks))
+           :intents (into [] (mapcat :intents) contributions))))
 
 (defn render-frame
   "Evaluate independent effects and return the next immutable context.
@@ -160,23 +183,4 @@
    (validate-context context)
    (when-not (ifn? map-work)
      (invalid! "Expected a callable map-work" {:type ::invalid-executor}))
-   (let [instances (:effects context)
-         results (index-results instances
-                                (map-work (partial evaluate-instance (:frame context))
-                                          instances))
-         ordered (sort-by (fn [[position instance]]
-                            [(:priority instance) (:order instance) position])
-                          (map-indexed vector instances))
-         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
-         blocks (into [] (mapcat :contributions) contributions)
-         batch? (some #(= :batch (:kind %)) blocks)]
-     (assoc context
-            :effects (into []
-                           (keep (fn [instance]
-                                   (let [result (get results (:id instance))]
-                                     (when-not (:done? result)
-                                       (assoc instance :state (:state result))))))
-                           instances)
-            :contributions blocks
-            :assignments (when-not batch? (into [] (mapcat :assignments) blocks))
-            :intents (into [] (mapcat :intents) contributions)))))
+   (merge-results context (map-work (partial evaluate-instance (:frame context)) (:effects context)))))
