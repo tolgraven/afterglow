@@ -436,6 +436,40 @@
     (is (= #{:head :other} (set (keys (:values (frame/portable-frame (assoc initial :values {:head {:pan 0.9}})))))))
     (is (thrown? clojure.lang.ExceptionInfo (frame/portable-frame (dissoc initial :compact))))))
 
+(deftest packed-axis-defaults-remain-movement-history-after-zero-opacity
+  (let [head {:id :head :position [0 0 0] :universe 1 :address 1
+              :calibration {:pan {:min-deg -270 :max-deg 270}}
+              :channels {:pan [1 2] :tilt [3 4]}}
+        other (assoc head :id :other :address 10)
+        aim [(assignment :head :aim [1.0 0.0 (- (Math/sqrt 3.0))])]
+        before (frame/resolve-frame [head other] aim {:compact-values? true})
+        off (frame/resolve-frame [head other]
+                                 (conj (mapv #(assoc % :opacity 0.0) aim) (assignment :other :pan 0.98))
+                                 {:previous-values (:values before) :compact-values? true})
+        assignments (conj aim (assignment :other :aim [1.0 0.0 (- (Math/sqrt 3.0))]))
+        rich (frame/resolve-frame [other head] assignments {:previous-values (:values off)})
+        compact (frame/resolve-frame [other head] assignments {:previous-compact (:compact off)})]
+    (is (not (contains? (get-in off [:values :head]) :pan)))
+    (is (= 0.0 (get-in off [:values :head :channels :pan])))
+    (is (= [0 0 0 0] (bytes-at off 1 1 2 3 4)))
+    (is (= (:values rich) (:values compact)))
+    (is (= (mapv vec (vals (:universes rich))) (mapv vec (vals (:universes compact)))))
+    (is (near? (/ 1.0 9.0) (get-in rich [:values :head :pan])))
+    (is (> (get-in rich [:values :other :pan]) 0.5))
+    (testing "explicit top-level movement overrides channel history and compact history"
+      (let [explicit (frame/resolve-frame [head] aim
+                       {:previous-values {:head {:pan 0.98 :channels {:pan 0.0 :tilt 0.0}}}
+                        :previous-compact (:compact off)})]
+        (is (> (get-in explicit [:values :head :pan]) 0.5))))
+    (testing "absent axis history retains the neutral default"
+      (let [absent (frame/resolve-frame [head] aim {:previous-values {:head {:channels {:dimmer 0.0}}}})
+            no-history (frame/resolve-frame [head] aim)]
+        (is (= (:values no-history) (:values absent)))
+        (is (> (get-in absent [:values :head :pan]) 0.5))))
+    (testing "defaulted channel history still validates before geometric use"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (frame/resolve-frame [head] aim {:previous-values {:head {:channels {:pan Double/NaN}}}}))))))
+
 (deftest mixed-pixel-and-moving-targets-preserve-all-contribution-orders
   (let [pixel (assoc rgb :id :pixel :address 30 :channels {:red 1 :green 2 :blue 3 :white 4}
                      :rgbw-policy :extract-min)

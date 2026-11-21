@@ -371,7 +371,13 @@
     options))
 
 (defn- previous-for-target [options fixture]
-  (let [id (:id fixture), previous (get (:previous-values options) id {})]
+  (let [id (:id fixture), history (get (:previous-values options) id {})
+        ;; Rich output omits unauthored top-level axes, but still packs their
+        ;; channel defaults. A new aim must choose its wrap from those physical
+        ;; values, just as compact history does after a zero-opacity frame.
+        previous (reduce (fn [values axis]
+                           (if (or (contains? values axis) (not (contains? (:channels history) axis))) values
+                               (assoc values axis (get-in history [:channels axis])))) history [:pan :tilt])]
     (if-let [compact (:previous-compact options)]
       (let [index (if-let [indices (::previous-indices options)] (get indices id) (::index fixture))]
         (if (nil? index) previous
