@@ -104,6 +104,26 @@
   (if (zero? y) (vec (repeat 3 (/ x 7.0)))
       (hsv->rgb [(/ x 8.0) (/ y 7.0) 1.0])))
 
+(defn position
+  "Project the selected typed component to the same normalized range used by
+  absolute editing. Used for control feedback, with no MIDI/device dependency."
+  [schema value {:keys [component]}]
+  (when-not (params/valid-value? schema value)
+    (throw (ex-info "Control feedback needs a valid parameter value" {})))
+  (let [component (component-index schema component)
+        normalized (fn [value [low high]]
+                     (if (= low high) 0.0 (bindings/clamp (/ (- value low) (- high low)) [0 1])))]
+    (case (:type schema)
+      (:number :integer) (normalized value (numeric-range schema value))
+      :boolean (if value 1.0 0.0)
+      :enum (let [values (or (:values schema) (:options schema))]
+              (if (= 1 (count values)) 0.0 (/ (discrete-index values value) (double (dec (count values))))))
+      :color (nth (rgb->hsv value) component)
+      :vector (normalized (nth value component) (numeric-range schema (nth value component)))
+      :range (let [[low high] (numeric-range schema (nth value component))]
+               (normalized (nth value component)
+                           (if (zero? component) [low (second value)] [(first value) high]))))))
+
 (defn velocity-values
   "Map a normalized velocity/pressure into explicitly enabled numeric params.
   Per-parameter velocity endpoints may reverse direction, but final values

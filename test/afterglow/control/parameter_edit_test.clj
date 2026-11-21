@@ -65,3 +65,18 @@
     (is (= {:fractional-bounds 2} (edit/velocity-values definition 0)))
     (is (= {:fractional-bounds 7} (edit/velocity-values definition 1))))
   (is (thrown? clojure.lang.ExceptionInfo (edit/velocity-values {} Double/NaN))))
+
+(deftest normalized-control-feedback-round-trips-typed-component-values
+  (doseq [[schema value component] [[{:type :number :bounds [-1 1]} 0.25 0]
+                                     [{:type :integer :bounds [0 16]} 11 0]
+                                     [{:type :boolean} true 0]
+                                     [{:type :boolean} false 0]
+                                     [{:type :enum :values [:one :two :three]} :two 0]
+                                     [{:type :enum :values [:one]} :one 0]
+                                     [{:type :vector :size 2 :bounds [-1 1]} [0.25 0.5] 1]
+                                     [{:type :range :bounds [0 10]} [2.0 7.0] 0]
+                                     [{:type :range :bounds [0 10]} [2.0 7.0] 1]]]
+    (is (= value (edit/edit schema value (edit/position schema value {:component component})
+                            {:component component :mode :absolute}))))
+  (is (= 0.5 (edit/position {:type :color} [0 1 1] {:component 0})))
+  (is (= 0.0 (edit/position {:type :number :bounds [4 4]} 4 {}))))

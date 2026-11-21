@@ -3,6 +3,7 @@
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.session-test :as fixture]
             [afterglow.control.devices.push-2 :as push]
+            [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.model :as model]))
 
 (def sine {:signal-id :sine :version 1})
@@ -216,4 +217,65 @@
           (is (nil? (get-in @(:show h) [:registry :cues :latched :saved-params])))
           (is (= 0.6 (:level (values h relaunched))))
           (is (= {:saved? false :changed? true :record? true :action :clear} (:preset (view h))))))
+      (finally (finish! h)))))
+
+(deftest touch-strip-feedback-follows-components-and-restores-on-user-handoff
+  (let [h (harness)]
+    (try
+      (launch! h 37)
+      (receive! h [0x90 1 127])
+      (is (= {:mode :level :value 8192} (:last-touch-strip (local h))))
+      (is (some #{[:midi/send (codec/touch-strip-mode 0 :level)]} @(:log h)))
+      (receive! h [0xb0 72 10])
+      (is (= {:mode :level :value 9830} (:last-touch-strip (local h))))
+      (receive! h [0x90 4 127])
+      (is (= :point (get-in (local h) [:last-touch-strip :mode])))
+      (receive! h [0xb0 24 127])
+      (is (= {:mode :level :value 8192} (:last-touch-strip (local h))))
+      (receive! h [0x80 4 0])
+      (is (= {:mode :level :value 9830} (:last-touch-strip (local h))))
+      (receive! h [0x80 1 0])
+      (is (= {:mode :off} (:last-touch-strip (local h))))
+      (is (some #{[:midi/send (codec/sysex 0 (into [0x19] (repeat 16 0)))]} @(:log h)))
+      (receive! h [0xb0 59 127])
+      (is (= :suspended (:status (session/snapshot (:session h)))))
+      (is (some #{[:midi/send (codec/touch-strip-mode 0 :default)]} @(:log h)))
+      (finally (finish! h)))))
+
+(deftest master-and-manual-tempo-touch-work-without-running-effects
+  (let [h (harness)]
+    (try
+      (receive! h [0x90 8 127])
+      (receive! h [0xe0 0 0])
+      (is (= 0.0 (:master @(:show h))))
+      (is (= {:target :master :editable? true} (:touched-control (view h))))
+      (receive! h [0xb0 49 127])
+      (receive! h [0xb0 79 10])
+      (is (= 0.01 (:master @(:show h))))
+      (receive! h [0xb0 49 0])
+      (receive! h [0x90 9 127])
+      (receive! h [0xb0 15 10])
+      (is (= 121.0 (get-in @(:show h) [:transport :bpm])))
+      (receive! h [0xb0 49 127])
+      (receive! h [0xb0 15 2])
+      (is (= 123.0 (get-in @(:show h) [:transport :bpm])))
+      (receive! h [0xe0 127 127])
+      (is (= 200.0 (get-in @(:show h) [:transport :bpm])))
+      (receive! h [0x80 9 0])
+      (is (= {:target :master :editable? true} (:touched-control (view h))))
+      (receive! h [0xe0 127 127])
+      (is (= 1.0 (:master @(:show h))))
+      (finally (finish! h)))))
+
+(deftest external-clock-locks-tempo-input-with-explicit-display-feedback
+  (let [h (harness)]
+    (try
+      (swap! (:show h) assoc-in [:transport :source] :beat-link-player-1)
+      (receive! h [0x90 9 127])
+      (receive! h [0xb0 15 20])
+      (receive! h [0xe0 0 0])
+      (is (= 120 (get-in @(:show h) [:transport :bpm])))
+      (is (= {:target :tempo :editable? false} (:touched-control (view h))))
+      (is (= {:mode :off} (:last-touch-strip (local h))))
+      (is (empty? (filter #(and (= :command (first %)) (= :transport/set (:op (second %)))) @(:log h))))
       (finally (finish! h)))))

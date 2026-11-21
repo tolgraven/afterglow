@@ -46,6 +46,32 @@
 (defn palette-request [device-id index]
   (sysex device-id [0x04 (bounded! index 0 127 :index)]))
 
+(def touch-strip-modes
+  "Source-derived modes: host feedback, pitch-bend input, no automatic return.
+  :default restores Push's point display and automatic center return."
+  {:default 104 :level 65 :centered 81 :point 73 :off 67})
+
+(defn touch-strip-mode [device-id mode]
+  (let [value (get touch-strip-modes mode)]
+    (when-not value
+      (throw (ex-info "Unknown Push touch-strip mode" {:type ::invalid-message :mode mode})))
+    (sysex device-id [0x17 value])))
+
+(defn touch-strip-messages
+  "Diff a source-derived strip feedback map {:mode keyword :value raw14}.
+  :off explicitly clears the sixteen LED payload bytes; :default restores
+  hardware control. Mode changes and pitch values are separate MIDI messages."
+  [device-id before {:keys [mode value] :as after}]
+  (let [mode-message (touch-strip-mode device-id mode)]
+    (when-not (#{:off :default} mode) (bounded! value 0 16383 :value))
+    (cond
+      (= before after) []
+      (= :default mode) [mode-message]
+      (= :off mode) [mode-message (sysex device-id (into [0x19] (repeat 16 0)))]
+      :else (cond-> []
+              (not= (:mode before) mode) (conj mode-message)
+              true (conj [0xe0 (bit-and value 0x7f) (bit-shift-right value 7)])))))
+
 (defn palette-write
   "Encode palette RGBW as four integer 8-bit components, split low7/high1."
   [device-id index rgbw]
