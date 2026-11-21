@@ -59,8 +59,8 @@
   (:require [afterglow.channels :as chan]
             [clojure.math.numeric-tower :as math]
             [taoensso.timbre :as timbre :refer [debug]])
-  (:import [javax.media.j3d Transform3D]
-           [javax.vecmath Point3d Vector3d]))
+  (:import [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Point3d Vector3d]))
 
 (defn inches
   "Converts a number of inches to the corresponding number of meters."
@@ -179,7 +179,7 @@
   position of the fixture's origin point with respect to the show's
   origin.
 
-  The fixture rotation is expressed as a `javax.media.j3d.Transform3D`
+  The fixture rotation is expressed as a `org.jogamp.java3d.Transform3D`
   matrix containing only rotational components which represents the
   transformation needed to get the fixture from its reference
   orientation to the orientation at which it was actually hung.

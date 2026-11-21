@@ -1194,7 +1194,7 @@
   Euler angles within the fixed frame of reference of show space, as
   implemented by [[transform-fixture-euler]], which uses the
   `setEuler` method of the
-  Java3D [Transform3D](https://docs.oracle.com/cd/E17802_01/j2se/javase/technologies/desktop/java3d/forDevelopers/J3D_1_3_API/j3dapi/javax/media/j3d/Transform3D.html)
+  Java3D [Transform3D](https://javadoc.io/doc/org.jogamp.java3d/java3d-core/1.7.2/org/jogamp/java3d/Transform3D.html)
   object. It can sometimes be very challenging, when looking at a
   fixture, to figure out how to calculate the Euler angles
   representing how it was hung. In those situations, you can use an
@@ -1223,7 +1223,7 @@
   {:pre [(some? *show*) (some? fixture) (some? universe) (integer? start-address) (<= 1 start-address 512)]}
   (when-not (contains? (:universes *show*) universe)
     (throw (IllegalArgumentException. (str "Show does not contain universe " universe))))
-  (let [positioned (cond (= (type rotation-matrix) javax.media.j3d.Transform3D)
+  (let [positioned (cond (= (type rotation-matrix) org.jogamp.java3d.Transform3D)
                          (transform/transform-fixture-rotation-matrix fixture x y z rotation-matrix)
 
                          (seq relative-rotations)

@@ -9,7 +9,7 @@
             [afterglow.transform :as tf]
             [afterglow.util :as util]
             [thi.ng.color.core :as colors])
-  (:import [javax.vecmath Point3d Vector3d]
+  (:import [org.jogamp.vecmath Point3d Vector3d]
            [afterglow.rhythm MetronomeSnapshot]))
 
 (defonce test-show (atom nil))

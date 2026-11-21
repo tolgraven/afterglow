@@ -4,8 +4,8 @@
             [afterglow.show :as show]
             [afterglow.web.layout :as layout]
             [com.evocomputing.colors :as colors])
-  (:import [javax.media.j3d Transform3D]
-           [javax.vecmath Matrix3d Vector3d]))
+  (:import [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Matrix3d Vector3d]))
 
 (def max-lights
   "The maximum number of lights that the visualizer will attempt to

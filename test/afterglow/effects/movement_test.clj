@@ -2,8 +2,8 @@
   (:require [clojure.test :refer :all]
             [afterglow.effects.movement :as movement]
             [afterglow.transform :as transform])
-  (:import [javax.media.j3d Transform3D]
-           [javax.vecmath Vector3d]))
+  (:import [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Vector3d]))
 
 (def head {:rotation (Transform3D.) :pan-center 127.5 :pan-half-circle 85.0
            :tilt-center 127.5 :tilt-half-circle 85.0})

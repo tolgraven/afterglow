@@ -16,8 +16,8 @@
             [thi.ng.math.core :as cmath]
             [taoensso.timbre :as timbre :refer [error]])
   (:import [afterglow.rhythm MetronomeSnapshot]
-           [javax.media.j3d Transform3D]
-           [javax.vecmath Point3d Vector3d Vector2d]))
+           [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Point3d Vector3d Vector2d]))
 
 (defonce
   ^{:private true
