@@ -97,27 +97,40 @@
      (doseq [^MidiDevice device owned-devices] (.close device)))})
 
 (defn osc-transport
-  "Own an OSC listener using the existing overtone.osc dependency. Requires the
-  application/legacy classpath only when opened; disables Zeroconf registration.
-  Incoming decoded messages become {:path :args}. No output peer is created."
-  [{:keys [port]}]
-  (when-not (and (integer? port) (<= 0 port 65535))
-    (throw (ex-info "OSC port must be an integer in [0,65535]" {})))
-  {:open!
-   (fn [receive!]
-     (let [server! (requiring-resolve 'overtone.osc/osc-server)
-           listen! (requiring-resolve 'overtone.osc/osc-listen)
-           remove! (requiring-resolve 'overtone.osc/osc-rm-listener)
-           close! (requiring-resolve 'overtone.osc/osc-close)
-           peer (server! port nil)
-           key (Object.)]
-       (try
-         (listen! peer #(receive! {:path (:path %) :args (vec (:args %))}) key)
-         {:peer peer :key key :remove! remove! :close! close!}
-         (catch Exception error (close! peer) (throw error)))))
-   :send! (fn [_ _] nil)
-   :close! (fn [{:keys [peer key remove! close!]}]
-             (try (remove! peer key) (finally (close! peer))))})
+  "Open an OSC command listener without advertising it over Zeroconf. :port-in
+  (or :port) may be zero. Optional :address and :port-out configure feedback."
+  [{:keys [port port-in port-out address bind-host] :or {address "127.0.0.1"}}]
+  (let [port (or port-in port)]
+    (when-not (and (integer? port) (<= 0 port 65535)
+                   (or (nil? port-out) (and (integer? port-out) (<= 1 port-out 65535))))
+      (throw (ex-info "Invalid OSC input or output port" {})))
+    {:open!
+     (fn [receive!]
+       (let [new-peer (requiring-resolve 'overtone.osc/osc-peer)
+             listen! (requiring-resolve 'overtone.osc/osc-listen)
+             close! (requiring-resolve 'overtone.osc/osc-close)
+             send! (requiring-resolve 'overtone.osc/osc-send)
+             destination (when port-out (java.net.InetSocketAddress. ^String address (int port-out)))
+             local (if bind-host (java.net.InetSocketAddress. ^String bind-host (int port))
+                       (java.net.InetSocketAddress. (int port)))
+             peer (cond-> (new-peer true true) destination (assoc :addr (ref destination)))
+             socket (.socket ^java.nio.channels.DatagramChannel (:chan peer))]
+         (try
+           ;; osc-server requires a service name. A bound generic peer uses the
+           ;; same bundle-aware decoder without registering a discovery service.
+           (listen! peer #(receive! {:path (:path %) :args (vec (:args %))}) ::controller)
+           (.bind socket local)
+           {:port (.getLocalPort socket) :peer peer :close! close!
+            :feedback! (when destination (fn [path args] (apply send! peer path args)))}
+           (catch Throwable failure
+             ;; The library listener waits for a successful bind before reading.
+             (when-not (.isBound socket) (.interrupt ^Thread (:listen-thread peer)))
+             (close! peer)
+             (throw failure)))))
+     :send! (fn [handle messages]
+              (when-let [feedback! (:feedback! handle)]
+                (doseq [{:keys [path args]} messages] (feedback! path args))))
+     :close! (fn [{:keys [peer close!]}] (close! peer))}))
 
 (defn render-view!
   "Render a shared Push display view into an owned BufferedImage. This AWT
