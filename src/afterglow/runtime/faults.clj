@@ -2,6 +2,13 @@
   "Portable, bounded effect diagnostics. No clock, logging or mutable ownership."
   (:import [java.util.concurrent CancellationException]))
 
+(defn attributed-error
+  "Attach an effect source to a render exception while preserving its data and cause."
+  [^Exception error source]
+  (if (and (some? source) (not (contains? (ex-data error) :effect-source)))
+    (ex-info (.getMessage error) (assoc (ex-data error) :effect-source source) error)
+    error))
+
 (defn recoverable?
   "User exceptions, assertions and linkage failures can be isolated. Cancellation,
   interruption and VM failures (including wrapped causes) remain owner failures."
