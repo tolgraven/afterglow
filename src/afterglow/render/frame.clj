@@ -4,7 +4,8 @@
   Inputs use linear RGB and normalized scalar attributes [0,1]. Geometry uses
   metres, +Y up, a local forward direction of +Z, positive yaw toward +X and
   positive elevation toward +Y. This is a new explicit fixture contract, not
-  an implementation of all legacy fixture function ranges/optics.")
+  an implementation of all legacy fixture function ranges/optics."
+  (:require [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes #{:red :green :blue :white :amber :uv})
 (def ^:private geometric-attributes #{:aim :direction})
@@ -25,14 +26,9 @@
 (defn- fail! [message data]
   (throw (ex-info message (assoc data :type ::invalid-frame))))
 
-(defn- attributed-error [error source]
-  (if (and (some? source) (not (contains? (ex-data error) :effect-source)))
-    (ex-info (.getMessage ^Exception error) (assoc (ex-data error) :effect-source source) error)
-    error))
-
 (defmacro ^:private with-effect-source [source & body]
   `(try ~@body
-        (catch Exception error# (throw (attributed-error error# ~source)))))
+        (catch Exception error# (throw (faults/attributed-error error# ~source)))))
 
 (defn- finite? [x]
   (and (number? x) (Double/isFinite (double x))))

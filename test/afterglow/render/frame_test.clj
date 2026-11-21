@@ -1,6 +1,7 @@
 (ns afterglow.render.frame-test
   (:require [clojure.test :refer [deftest is testing]]
             [afterglow.render.ir :as ir]
+            [afterglow.render.fields :as fields]
             [afterglow.render.frame :as frame]))
 
 (def rgb {:id :rgb :position [1 2 3] :universe 1 :address 1
@@ -678,3 +679,46 @@
     (is (near? 190.0 (:pan-deg pose)))
     (is (every? true? (map near? aim (:direction pose))))
     (is (near? -180.0 (:tilt-deg (frame/fixture-pose fixture {:pan 0.5 :tilt 1.0}))))))
+
+(deftest numeric-work-is-owned-by-the-frame-and-preserved-on-effect-isolation
+  (let [calls (atom [])
+        good-plan (ir/compile-batch {:color {:op :param :key :wash :type :vec3}})
+        evaluate (fn [group env]
+                   (swap! calls conj group)
+                   (if (= group :wash)
+                     (ir/evaluate-batch good-plan env [[1 2 3]])
+                     (throw (ex-info "Numeric dispatch failed" {:detail :test}))))
+        realize (fields/frame-evaluator evaluate)
+        request {:group :wash :env {:params {:wash [0.8 0.4 0.2]}} :scales {:color 0.5}}
+        good {:kind :batch :source :wash-effect :batch {:target-ids [:rgb] :field-request request :opacity 0.5}}
+        bad {:kind :batch :source :faulty-effect :batch {:target-ids [:rgb] :field-request {:group :bad :env {}}}}
+        base {:kind :assignments :assignments [(assignment :rgb :color [0.0 0.0 1.0])]}
+        retry-blocks [base good]]
+    (is (empty? @calls))
+    (try
+      (realize [base good bad])
+      (is false "Expected failure from the second effect")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= {:detail :test :effect-source :faulty-effect} (ex-data e)))
+        (is (= "Numeric dispatch failed" (.getMessage (.getCause e))))))
+    (let [[unchanged materialized :as blocks] (realize retry-blocks)
+          values (get-in materialized [:batch :outputs :color :values])]
+      (is (identical? base unchanged))
+      (is (= {:source :wash-effect :kind :batch} (select-keys materialized [:kind :source])))
+      (is (= [0.4 0.2 0.1] (vec values)))
+      (is (nil? (get-in materialized [:batch :field-request])))
+      (is (= [51 26 140] (bytes-at (frame/resolve-contributions [rgb] blocks) 1 1 2 3)))
+      (is (= [:wash :bad] @calls))
+      (let [next-blocks ((fields/frame-evaluator evaluate) retry-blocks)]
+        (is (not (identical? values (get-in next-blocks [1 :batch :outputs :color :values]))))
+        (is (= [:wash :bad :wash] @calls))))
+    (is (= request (get-in good [:batch :field-request])))))
+
+(deftest bad-field-envelopes-and-mismatched-rigs-are-attributed
+  (doseq [[ids scales] [[[:rgb] {:color Double/NaN}] [[:rgb] {:missing 0.5}] [[:rgb :extra] {}]]]
+    (let [compute (fields/frame-evaluator
+                   (fn [_ _] {:count 1 :outputs {:color {:type :vec3 :components 3 :values (double-array 3)}}}))
+          block {:kind :batch :source :instance :batch {:target-ids ids
+                                                       :field-request {:group :x :env {} :scales scales}}}]
+      (try (compute [block]) (is false "Expected an attributed field error")
+           (catch clojure.lang.ExceptionInfo e (is (= :instance (:effect-source (ex-data e)))))))))
