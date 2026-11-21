@@ -46,7 +46,10 @@ installed for software execution. On macOS, JOGL uses the system OpenGL context.
 ```
 
 Create the solver once for a compiled patch. Each request includes a world-space
-aim for every pan/tilt fixture. Other fixtures in the patch take no GPU slots.
+aim or direction for every pan/tilt fixture, for example
+`{:spot {:direction [0 -1 0]} :wash {:aim [-2 0 4]}}`. The short vector
+form specifies an aim. An explicit `:aim` takes precedence over `:direction`
+on the same fixture. Other fixtures in the patch take no GPU slots.
 The caller can supply the last accepted CPU frame’s `:values` as
 `:previous-values`, or its `:compact` as `:previous-compact`. Target IDs
 remain stable across patch reordering. The result is an immutable map by ID
