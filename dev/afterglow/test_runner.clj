@@ -18,6 +18,7 @@
   {"pure" pure-tests
    "parity" (into pure-tests '[
                afterglow.channels-test afterglow.rhythm-test
+               afterglow.controllers.ableton-push-2-test
                afterglow.effects-test afterglow.effects.color-test
                afterglow.effects.pipeline-test afterglow.effects.channel-test
                afterglow.effects.oscillators-test afterglow.effects.movement-test
