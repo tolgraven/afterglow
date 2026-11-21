@@ -10,6 +10,19 @@
 (def ^:dynamic ^:private *transaction* nil)
 (def ^:dynamic ^:private *dependencies* nil)
 (def ^:dynamic ^:private *stack* [])
+(def ^:dynamic ^:private *delivery-trace* nil)
+
+(defn- node-name [[kind id]]
+  (if (= kind :subscription) (first id) id))
+
+(defn- delivered! [type kind id subscriber data]
+  (let [trace *delivery-trace*]
+    (if (< (count (:events @trace)) 256)
+      (vswap! trace update :events conj {:type type :category :reactive
+                                         :emitter {:kind kind :id id}
+                                         :subscribers [subscriber] :data data})
+      (vswap! trace update :skipped inc))))
+
 (defrecord ReactiveSystem [lock state sources])
 (defprotocol Handle
   (-system [handle]) (-id [handle]) (-kind [handle]))
@@ -69,7 +82,13 @@
   (when *transaction*
     (when-not (same-transaction? system)
       (fail! "A reaction cannot read a different reactive system" {:type ::cross-system}))
-    (when *dependencies* (vswap! *dependencies* conj dependency))))
+    (when *dependencies*
+      (vswap! *dependencies* conj dependency)
+      (when (and *delivery-trace* (seq *stack*))
+        (let [[kind id] dependency]
+          (delivered! :reactive/read (if (= kind :node) (first id) kind)
+                      (if (= kind :node) (node-name id) id)
+                      (node-name (peek *stack*)) {}))))))
 (defn- transact! [system f]
   (locking (:lock system)
     (ensure-open! system)
@@ -157,7 +176,14 @@
   (when-let [validator (:validator (options handle))]
     (when-not (validator value) (fail! "Validator rejects reactive value" {:type ::invalid-value :id (-id handle)}))))
 (defn- notify-watches! [handle old new]
-  (doseq [[key f] (sort-by (comp pr-str key) (:watches (options handle)))] (f key handle old new)))
+  (doseq [[key f] (sort-by (comp pr-str key) (:watches (options handle)))]
+    (f key handle old new)
+    (when *delivery-trace*
+      (let [kind (-kind handle) id (-id handle)]
+        ;; Watch keys may be arbitrary JVM objects. Only named keys cross the wire.
+        (delivered! :reactive/watch (if (= kind :node) (first id) kind)
+                    (if (= kind :node) (node-name id) id)
+                    (when (or (keyword? key) (string? key)) key) {})))))
 
 (defn change-cell! [cell f]
   (let [system (-system cell) id (-id cell)]
@@ -336,6 +362,9 @@
             (map? actions) (queue-action! system actions)
             (vector? actions) (doseq [action actions] (queue-action! system action))
             :else (fail! "Reactive effect handler must return action data or nil" {:type ::invalid-action :effect-id effect-id}))
+          (when *delivery-trace*
+            (delivered! :reactive/dispatch :subscription (first query) id
+                        {:watcher-id id :registration-id effect-id}))
           (write-state! system (update-in (state-of system) [:watchers id] assoc :initialized? true :value new)))))))
 
 (defn publish!
@@ -367,6 +396,14 @@
        (notify-watches! (get-in @(:state system) [:handles id]) old (:value node)))
      result)))
   ([system db] (locking (:lock system) (reset! (db-signal system) db) (publish! system))))
+
+(defn publish-traced!
+  "Publish normally and return named reads and completed watcher deliveries from
+  this publication under :delivery-trace. Failed batches throw as in publish!.
+  Values, query arguments and handler closures never enter the trace."
+  [system db]
+  (binding [*delivery-trace* (volatile! {:events [] :skipped 0})]
+    (assoc (publish! system db) :delivery-trace @*delivery-trace*)))
 
 (defn dispose!
   "Dispose a shared cached reaction. Existing holders become invalid; a future

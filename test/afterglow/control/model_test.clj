@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.model :as model]
             [afterglow.control.params :as params]
-            [afterglow.control.views :as views]))
+            [afterglow.control.views :as views]
+            [afterglow.runtime.events :as events]))
 
 (def effect
   {:id :wash :version 1 :duration-ms 500 :envelope {:release-ms 100}
@@ -282,3 +283,14 @@
     (is (= {:beats 1/2} (:duration instance)))
     (is (= (:registry show) (get-in result [:model :registry])))
     (is (= :unknown-effect (get-in (model/apply-command show (command show {:op :effect/launch :effect-id :absent})) [:ack :code])))))
+
+(deftest only-accepted-reducer-events-join-the-frame-batch
+  (let [base (configured)
+        cmd (command base {:op :cue/launch :cue-id :red})
+        first-result (model/apply-command (events/begin base) cmd)
+        repeated (model/apply-command (:model first-result) cmd)
+        bad (model/apply-command (:model repeated) (command base {:op :cue/launch :cue-id :missing}))]
+    (is (= (map :event (events/pending (:model bad))) (:events first-result)))
+    (is (seq (:events first-result)))
+    (is (= (events/finish (:model bad)) (:model (model/apply-command base cmd))))
+    (is (empty? (events/pending base)))))
