@@ -109,7 +109,8 @@
       (require! effect :unknown-effect "Cue refers to an unknown effect or version")
       (require! (params/finite-number? (get definition :priority 0))
                 :invalid-definition "Priority must be finite")
-      (check-params! (get effect :params {}) (get definition :params {})))
+      (check-params! (get effect :params {}) (get definition :params {}))
+      (check-params! (get effect :params {}) (get definition :saved-params {})))
     :fixtures nil)
   definition)
 
@@ -154,7 +155,7 @@
             (if (contains? duration-option :duration) (check-duration! musical-duration true)
                 (require! (duration? duration) :invalid-duration "Timed/one-shot cues need a positive duration")))
         _ (require! (map? (get launch :params {})) :invalid-params "Launch params must be a map")
-        overrides (merge (get cue :params {}) (get launch :params {}))
+        overrides (merge (get cue :params {}) (get cue :saved-params {}) (get launch :params {}))
         _ (check-params! (get effect :params {}) overrides)
         values (try (params/resolve-values (get effect :params {}) overrides)
                     (catch clojure.lang.ExceptionInfo e
@@ -209,6 +210,23 @@
       (publish-definition model :cues (assoc cue :version
                                             (or (:version cue)
                                                 (inc (latest-version model :cues (:id cue)))))))
+    (:cue/save-params :cue/clear-saved-params)
+    (let [cue-id (:cue-id command)
+          cue (get-in model [:registry :cues cue-id])
+          _ (require! cue :unknown-cue "Cue does not exist")
+          _ (when (contains? command :expected-version)
+              (require! (= (:expected-version command) (:version cue))
+                        :stale-definition-version "Cue version changed"))
+          save? (= op :cue/save-params)
+          instance (when save? (instance! model (:instance-id command)))
+          _ (when save?
+              (require! (and (= cue-id (:cue-id instance)) (= (:effect-id cue) (:effect-id instance)))
+                        :wrong-cue-instance "Only this cue's active instance can supply saved parameters"))
+          next-cue (-> (if save? (assoc cue :saved-params (:params instance)) (dissoc cue :saved-params))
+                       (assoc :version (inc (latest-version model :cues cue-id))))
+          result (publish-definition model :cues next-cue)]
+      (update result :events conj {:type (if save? :cue/params-saved :cue/saved-params-cleared)
+                                  :cue-id cue-id :version (:version next-cue)}))
     :cue/delete
     (let [id (:cue-id command)]
       (require! (get-in model [:registry :cues id]) :unknown-cue "Cue does not exist")

@@ -9,16 +9,18 @@
 (defn cue-view [model cue-id]
   (when-let [cue (get-in model [:registry :cues cue-id])]
     (let [instances (filterv #(= cue-id (:cue-id %)) (active-instances model))
-          active (last instances)]
+          active (last instances)
+          values (or (:params active) (merge (:params cue) (:saved-params cue)) {})]
       {:id cue-id :name (or (:name cue) (str cue-id)) :version (:version cue)
        :effect-id (:effect-id cue)
        :categories (categories/definition-categories (or (:definition active) (get-in model [:registry :effects (:effect-id cue)])))
        :priority (get cue :priority 0)
-       :color (or (get-in active [:params :color]) (:color cue) [0.35 0.35 0.35])
+       :color (or (:color values) (:color cue) [0.35 0.35 0.35])
+       :saved? (contains? cue :saved-params)
        :active? (boolean (seq instances))
        :releasing? (boolean (and (seq instances) (every? #(= :releasing (:phase %)) instances)))
        :instances (mapv :id instances)
-       :params (or (:params active) (:params cue) {})})))
+       :params values})))
 
 (defn page-view [model page-id]
   (when-let [page (get-in model [:pages page-id])]

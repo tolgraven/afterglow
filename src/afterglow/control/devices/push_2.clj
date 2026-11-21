@@ -13,6 +13,8 @@
          :implemented #{:pad-cues :held-release :page-scroll :parameter-encoders
                         :parameter-banks :typed-parameters :effect-selection
                         :encoder-touch :touch-strip :color-grid :enum-grid :shift-fine
+                        :velocity-parameters :pad-pressure :shift-held-override
+                        :cue-parameter-presets
                         :master-encoder :led-diff :palette-restore :display-view
                         :user-mode-handoff :reconnect}
          :hardware-verified? false))
@@ -119,6 +121,15 @@
                                                                  (assoc touch :component next-component) touch)])) touches))))})))
     {:state state}))
 
+(defn- preset-command [state model]
+  (let [instance (get-in model [:instances (:selected-instance state)])
+        cue (get-in model [:registry :cues (:cue-id instance)])]
+    {:state state
+     :commands (if cue
+                 [(cond-> {:op (if (:shift? state) :cue/clear-saved-params :cue/save-params)
+                           :cue-id (:id cue) :expected-version (:version cue)}
+                    (not (:shift? state)) (assoc :instance-id (:id instance)))] [])}))
+
 (defn- picker-pad [state model note]
   (when-let [{:keys [instance-id param]} (touched state model)]
     (let [schema (get-in model [:instances instance-id :definition :params param])
@@ -134,30 +145,51 @@
 (defn- press-pad [state event model envelope]
   (if-let [cue (cue-at state model (:note event))]
     (let [mode (or (:launch-mode cue) (when (:held cue) :held) :persistent)
+          mode (if (and (= :held mode) (:shift? state)) :persistent mode)
+          effect (if-let [version (:effect-version cue)]
+                   (or (get-in model [:registry :versions [:effects (:effect-id cue) version]])
+                       (let [current (get-in model [:registry :effects (:effect-id cue)])]
+                         (when (= version (:version current)) current)))
+                   (get-in model [:registry :effects (:effect-id cue)]))
+          launch-params (parameter-edit/velocity-values effect (:value event))
+          note (:note event)
+          launch-data {:mode mode :velocity (:value event) :params launch-params}
           active (active-for-cue model (:id cue))]
       (cond
         (get-in state [:pads (:note event)]) {:state state}
         (= mode :held)
         (let [hold (bindings/begin-hold (:holds state) (:id cue) envelope)]
           {:state (-> state (assoc :holds (:state hold) :selected-cue (:id cue))
-                      (assoc-in [:pads (:note event)] (:gesture-id hold)))
-           :commands (:commands hold)})
+                      (update :pressed-pads conj note)
+                      (assoc-in [:pads note] (:gesture-id hold)))
+           :commands (mapv #(assoc % :launch launch-data :pad-note note) (:commands hold))})
         (and (= mode :persistent) active)
-        {:state (assoc state :selected-cue (:id cue) :selected-instance (:id active))
+        {:state (-> state (assoc :selected-cue (:id cue) :selected-instance (:id active))
+                    (update :pressed-pads disj note) (update :pad-instances dissoc note))
          :commands [{:op :instance/end :instance-id (:id active)
                      :force? (= :releasing (:phase active))}]}
         :else
-        {:state (assoc state :selected-cue (:id cue))
+        {:state (-> state (assoc :selected-cue (:id cue)) (update :pressed-pads conj note))
          :commands [{:op :cue/launch :cue-id (:id cue)
-                     :launch {:mode mode :velocity (:value event)}}]}))
+                     :pad-note note :launch launch-data}]}))
     {:state state}))
 
 (defn- release-pad [state note envelope]
-  (if-let [gesture (get-in state [:pads note])]
+  (let [state (-> state (update :pressed-pads disj note) (update :pad-instances dissoc note))]
+   (if-let [gesture (get-in state [:pads note])]
     (let [release (bindings/end-hold (:holds state) gesture envelope)]
       {:state (-> state (assoc :holds (:state release)) (update :pads dissoc note))
        :commands (:commands release)})
-    {:state state}))
+    {:state state})))
+
+(defn- pressure-pad [state event model]
+  (let [id (get-in state [:pad-instances (:note event)])
+        instance (get-in model [:instances id])]
+    {:state state
+     :commands (if (and instance (contains? (:pressed-pads state) (:note event))
+                         (= :running (:phase instance)))
+                 (mapv (fn [[param value]] {:op :param/set :instance-id id :param param :value value})
+                       (parameter-edit/velocity-values (:definition instance) (:value event))) [])}))
 
 (defn- encoder [state event model]
   (edit-parameter state model (parameter-at state model (- (:controller event) 71))
@@ -183,6 +215,8 @@
     (not (:ready? state)) {:state state}
     (and (= :control-change (:type event)) (= 49 (:controller event)))
     {:state (assoc state :shift? (pos? (:raw-value event)))}
+    (and (= :control-change (:type event)) (= 86 (:controller event)))
+    {:state (assoc state :record? (pos? (:raw-value event)))}
     (and (= :note-on (:type event)) (<= 0 (:note event) 7))
     (touch-encoder state model (:note event))
     (and (= :note-off (:type event)) (<= 0 (:note event) 7))
@@ -192,10 +226,12 @@
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (#{62 63} (:controller event)))
     (page-control state model (if (= 62 (:controller event)) -1 1))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (<= 20 (:controller event) 27))
-    (component-button state model (- (:controller event) 20))
+    (if (:record? state) (preset-command state model)
+        (component-button state model (- (:controller event) 20)))
     (and (= :note-on (:type event)) (codec/pad-coordinates (:note event)))
     (or (picker-pad state model (:note event)) (press-pad state event model envelope))
     (= :note-off (:type event)) (release-pad state (:note event) envelope)
+    (= :poly-pressure (:type event)) (pressure-pad state event model)
     (and (= :control-change (:type event)) (<= 71 (:controller event) 78))
     (encoder state event model)
     (and (= :control-change (:type event)) (= 79 (:controller event)))
@@ -230,6 +266,8 @@
         active-offset (* 8 (quot active-index 8))
         cue (get-in model [:registry :cues (:selected-cue state)])
         effect (or (:definition instance) (get-in model [:registry :effects (:effect-id cue)]))
+        defaults (merge (into {} (map (fn [[k schema]] [k (:default schema)]) (:params effect)))
+                        (:params cue) (:saved-params cue))
         cue-view (when cue (views/cue-view model (:id cue)))]
     {:title "Tolglow" :page (:page-id state) :origin (:origin state)
      :status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
@@ -241,6 +279,10 @@
      :parameter-bank (dissoc bank :ids)
      :touched-parameter (touched state model)
      :fine? (boolean (:shift? state))
+     :preset {:saved? (contains? cue :saved-params)
+              :changed? (boolean (and instance (not= defaults (:params instance))))
+              :record? (boolean (:record? state))
+              :action (if (:shift? state) :clear :save)}
      :active-effect-navigation {:index active-index :count (count active) :offset active-offset}
      :active-effects (mapv #(select-keys % [:id :cue-id :effect-id :order :phase])
                            (take 8 (drop active-offset active)))
@@ -304,7 +346,7 @@
 
 (defn- stop [device-id state _model _envelope disconnected?]
   {:state (assoc state :pads {} :holds {} :ready? false :last-leds {} :last-display nil
-                       :touches {} :touch-order [] :shift? false)
+                       :touches {} :touch-order [] :shift? false :record? false :pressed-pads #{} :pad-instances {})
    :commands (mapv (fn [id] {:op :instance/end :instance-id id})
                    (keep :instance-id (vals (get-in state [:holds :gestures]))))
    :midi (if (or disconnected? (not (:ready? state))) []
@@ -324,7 +366,8 @@
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
   (let [initial {:page-id page-id :origin [0 0] :palettes {} :next-palette 0
                  :ready? false :pads {} :holds {} :last-leds {} :led-retries 0
-                 :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false}]
+                 :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
+                 :pressed-pads #{} :pad-instances {}}]
     {:id :push-2 :capabilities capabilities :initial-state initial
      :decode (partial decode device-id)
      :start (fn [state _model envelope]
@@ -335,14 +378,18 @@
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
      :reset-model #(assoc % :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {}
-                           :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false)
+                           :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
+                           :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]
             (let [hold (when-let [gesture (:gesture-id command)]
                          (bindings/acknowledge-hold (:holds state) gesture ack))]
               {:state (cond-> state
                         hold (assoc :holds (:state hold))
                         (and (= :cue/launch (:op command)) (= :accepted (:status ack)))
-                        (assoc :selected-instance (:instance-id ack)))
+                        (assoc :selected-instance (:instance-id ack))
+                        (and (= :cue/launch (:op command)) (= :accepted (:status ack))
+                             (contains? (:pressed-pads state) (:pad-note command)))
+                        (assoc-in [:pad-instances (:pad-note command)] (:instance-id ack)))
                :commands (:commands hold)}))}))
 
 (defn connect!

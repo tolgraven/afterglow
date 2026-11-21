@@ -19,11 +19,13 @@
    :ninth {:type :number :default 0 :bounds [0 1]}
    :tenth {:type :number :default 0 :bounds [0 1]}})
 (def order [:enabled :level :count :wave :color :position :span :last :ninth :tenth])
-(defn harness []
-  (let [h (fixture/harness)]
-    (swap! (:show h) assoc-in [:registry :effects :wash :params] schemas)
+(defn harness
+  ([] (harness schemas))
+  ([parameter-schemas]
+   (let [h (fixture/harness)]
+    (swap! (:show h) assoc-in [:registry :effects :wash :params] parameter-schemas)
     (swap! (:show h) assoc-in [:registry :effects :wash :param-order] order)
-    (fixture/ready! h)))
+    (fixture/ready! h))))
 (defn local [h] (:local (session/snapshot (:session h))))
 (defn view [h] (push/display-view (local h) @(:show h)))
 (defn receive! [h bytes] ((last @(:callbacks h)) bytes))
@@ -120,4 +122,98 @@
         (is (= first-id (:instance-id (view h))))
         (is (nil? (:touched-parameter (view h))))
         (is (= 0.5 (:level (values h first-id)))))
+      (finally (finish! h)))))
+
+(def pressure-schemas
+  (-> schemas
+      (update :level assoc :velocity true :velocity-min 0.2 :velocity-max 0.7)
+      (update :count assoc :velocity true :velocity-min 16 :velocity-max 0)))
+
+(deftest velocity-and-pressure-target-the-pressed-instance-and-stop-on-release
+  (let [h (harness pressure-schemas)]
+    (try
+      (let [held-id (launch! h 36) latched-id (launch! h 37)]
+        (is (< (Math/abs (- 0.7 (:level (values h held-id)))) 1.0e-9))
+        (is (= 0 (:count (values h held-id))))
+        (receive! h [0xa0 36 0])
+        (is (= 0.2 (:level (values h held-id))))
+        (is (= 16 (:count (values h held-id))))
+        (is (= 0 (:count (values h latched-id))))
+        (is (false? (:enabled (values h held-id))))
+        (receive! h [0x80 37 0])
+        (receive! h [0xa0 37 0])
+        (is (= 0 (:count (values h latched-id))))
+        (receive! h [0x80 36 0])
+        (receive! h [0xa0 36 127])
+        (is (= :releasing (get-in @(:show h) [:instances held-id :phase])))
+        (is (= 16 (:count (values h held-id)))))
+      (finally (finish! h)))))
+
+(deftest shift-can-latch-a-held-cue-without-release-ending-it
+  (let [h (harness pressure-schemas)]
+    (try
+      (receive! h [0xb0 49 127])
+      (let [id (launch! h 36)]
+        (is (= :persistent (get-in @(:show h) [:instances id :launch-mode])))
+        (receive! h [0xb0 49 0])
+        (receive! h [0x80 36 0])
+        (is (= :running (get-in @(:show h) [:instances id :phase])))
+        (is (= {} (:pads (local h))))
+        (receive! h [0xb0 49 127])
+        (receive! h [0x90 36 127])
+        (is (= :releasing (get-in @(:show h) [:instances id :phase]))))
+      (finally (finish! h)))))
+
+(deftest pressure-never-follows-an-external-replacement-or-new-definition
+  (let [h (harness pressure-schemas)]
+    (try
+      (let [id (launch! h 37)
+            show @(:show h)
+            updated (model/apply-command show {:command-id "replace-definition" :show-id (:show-id show)
+                                               :epoch (:epoch show) :time-ms 0 :source :test
+                                               :op :registry/publish :kind :effects
+                                               :definition (-> (get-in show [:registry :effects :wash])
+                                                               (assoc :version 2)
+                                                               (assoc-in [:params :count :velocity-max] 16))})]
+        (reset! (:show h) (:model updated))
+        (receive! h [0xa0 37 0])
+        (receive! h [0xa0 37 127])
+        (is (= 0 (:count (values h id))) "pressure uses the captured definition")
+        (let [removed (model/apply-command @(:show h) {:command-id "remove" :show-id (:show-id show)
+                                                      :epoch 0 :time-ms 0 :source :test
+                                                      :op :instance/remove :instance-id id})
+              replacement (model/apply-command (:model removed) {:command-id "replace" :show-id (:show-id show)
+                                                                 :epoch 0 :time-ms 0 :source :test
+                                                                 :op :cue/launch :cue-id :latched})
+              replacement-id (get-in replacement [:ack :instance-id])]
+          (reset! (:show h) (:model replacement))
+          (receive! h [0xa0 37 127])
+          (is (= 2 (:count (values h replacement-id))))))
+      (finally (finish! h)))))
+
+(deftest record-saves-selected-parameters-and-shift-record-clears-future-defaults
+  (let [h (harness)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 72 10])
+        (is (= {:saved? false :changed? true :record? false :action :save} (:preset (view h))))
+        (receive! h [0xb0 86 127])
+        (receive! h [0xb0 20 127])
+        (is (= 0.6 (get-in @(:show h) [:registry :cues :latched :saved-params :level])))
+        (is (false? (:enabled (values h id))) "Record does not also toggle the top button's boolean")
+        (is (= {:saved? true :changed? false :record? true :action :save} (:preset (view h))))
+        (receive! h [0xb0 86 0])
+        (receive! h [0x80 37 0])
+        (receive! h [0x90 37 127])
+        (receive! h [0x90 37 127])
+        (let [relaunched (launch! h 37)]
+          (is (not= id relaunched))
+          (is (= 0.6 (:level (values h relaunched))))
+          (receive! h [0xb0 49 127])
+          (receive! h [0xb0 86 127])
+          (receive! h [0xb0 20 127])
+          (is (= 3 (get-in @(:show h) [:registry :cues :latched :version])))
+          (is (nil? (get-in @(:show h) [:registry :cues :latched :saved-params])))
+          (is (= 0.6 (:level (values h relaunched))))
+          (is (= {:saved? false :changed? true :record? true :action :clear} (:preset (view h))))))
       (finally (finish! h)))))
