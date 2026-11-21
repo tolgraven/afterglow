@@ -1,0 +1,137 @@
+(ns afterglow.runtime
+  "Experimental, immutable effect evaluation kernel.
+
+  This namespace is not connected to afterglow.show or its legacy effect
+  protocols. It establishes a small contract for testing a functional runtime,
+  not a replacement renderer or a claim of legacy behavior parity.
+
+  Effects are pure functions of a supplied frame snapshot and their own state.
+  They describe assignments and external work as data; the owner of the show
+  performs that work only after accepting a complete frame. Callers supply time,
+  randomness and any parallel executor explicitly.")
+
+(defn- invalid!
+  [message data]
+  (throw (ex-info message data)))
+
+(defn- finite-number?
+  [value]
+  (and (number? value) (Double/isFinite (double value))))
+
+(defn- result-shape?
+  [result]
+  (and (map? result) (contains? result :state)
+       (vector? (:assignments result))
+       (vector? (:intents result))
+       (instance? Boolean (:done? result))))
+
+(defn- validate-context
+  [context]
+  (when-not (and (map? context) (map? (:frame context))
+                 (vector? (:effects context)))
+    (invalid! "Expected a context with a :frame map and an :effects vector"
+              {:type ::invalid-context}))
+  (doseq [instance (:effects context)]
+    (when-not (and (map? instance)
+                   (some? (:id instance))
+                   (finite-number? (:priority instance))
+                   (integer? (:order instance))
+                   (not (neg? (:order instance)))
+                   (contains? instance :state)
+                   (ifn? (:step instance)))
+      (invalid! "Expected an effect instance with :id, finite :priority, nonnegative integer :order, :state and callable :step"
+                {:type ::invalid-instance :effect-id (:id instance)})))
+  (let [ids (mapv :id (:effects context))]
+    (when-not (= (count ids) (count (set ids)))
+      (invalid! "Effect instance ids must be unique"
+                {:type ::duplicate-effect-id})))
+  context)
+
+(defn- evaluate-instance
+  [frame instance]
+  (let [id (:id instance)
+        input {:frame frame :effect-id id :state (:state instance)
+               :assignments [] :intents [] :done? false}
+        result (try
+                 ((:step instance) input)
+                 (catch Exception cause
+                   (throw (ex-info "Effect step failed"
+                                   {:type ::step-failed :effect-id id} cause))))]
+    (when-not (result-shape? result)
+      (invalid! "Effect step must return :state, vector :assignments, vector :intents and boolean :done?"
+                {:type ::invalid-result :effect-id id}))
+    ;; Identity comes from the instance, never from the effect's return value.
+    {:id id :state (:state result) :assignments (:assignments result)
+     :intents (:intents result) :done? (:done? result)}))
+
+(defn- index-results
+  [instances results]
+  (let [expected (set (map :id instances))
+        indexed (reduce
+                 (fn [acc result]
+                   (let [id (:id result)]
+                     (when-not (and (result-shape? result) (contains? expected id)
+                                    (not (contains? acc id)))
+                       (invalid! "Executor must return each evaluation exactly once"
+                                 {:type ::invalid-executor-result :effect-id id}))
+                     (assoc acc id result)))
+                 {} results)]
+    (when-not (= expected (set (keys indexed)))
+      (invalid! "Executor omitted effect evaluations"
+                {:type ::missing-executor-results
+                 :missing-ids (vec (remove #(contains? indexed %) (map :id instances)))}))
+    indexed))
+
+(defn render-frame
+  "Evaluate independent effects and return the next immutable context.
+
+  Context contains a :frame map (the immutable show/time/input snapshot) and an
+  :effects vector. Each instance requires :id, numeric finite :priority,
+  nonnegative integer :order (launch order), :state, and a pure :step function.
+
+  A step takes a map with :frame, :effect-id, :state, :assignments [], :intents []
+  and :done? false. It returns that map with updated :state, assignment/intent
+  vectors, and a boolean :done?. Compose steps with ordinary functions such as
+  comp or ->. Only these four output fields are consumed; the frame and identity
+  remain owned by the caller. All inputs/state/output data must be immutable.
+  The kernel validates shape, but cannot prove that arbitrary user functions
+  are pure or that data contains no mutable Java objects.
+
+  Optional map-work is a blocking mapping function of [f instances]. It must
+  invoke f once per instance and return the unmodified results, in any order.
+  Use it to inject a bounded executor; its lifecycle and cancellation belong to
+  the caller. No global pool, atom, clock, randomness, IO or output publication
+  is used here. The default mapv evaluates serially.
+
+  Assignment and intent vectors are concatenated by ascending priority, then
+  launch order, then original vector position. Per-effect vector order is kept.
+  These are ordered contributions; target blending/DMX packing is a later stage.
+  A completed effect's final contributions are included, then it is removed.
+  Remaining instances keep their original vector order with updated state.
+
+  A failed step or incomplete/duplicate executor result throws before a new
+  context is returned. The caller must commit/publicize only a successful return.
+  This does not roll back side effects in a step that violates the pure contract."
+  ([context]
+   (render-frame context mapv))
+  ([context map-work]
+   (validate-context context)
+   (when-not (ifn? map-work)
+     (invalid! "Expected a callable map-work" {:type ::invalid-executor}))
+   (let [instances (:effects context)
+         results (index-results instances
+                                (map-work (partial evaluate-instance (:frame context))
+                                          instances))
+         ordered (sort-by (fn [[position instance]]
+                            [(:priority instance) (:order instance) position])
+                          (map-indexed vector instances))
+         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)]
+     (assoc context
+            :effects (into []
+                           (keep (fn [instance]
+                                   (let [result (get results (:id instance))]
+                                     (when-not (:done? result)
+                                       (assoc instance :state (:state result))))))
+                           instances)
+            :assignments (into [] (mapcat :assignments) contributions)
+            :intents (into [] (mapcat :intents) contributions)))))

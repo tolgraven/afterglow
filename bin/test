@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+suite="${1:-pure}"
+if (( $# > 1 )) || [[ "$suite" != pure && "$suite" != legacy ]]; then
+  echo 'Usage: bin/test [pure|legacy]' >&2
+  exit 2
+fi
+if [[ "$suite" == legacy ]]; then
+  legacy_deps=$(clojure -M dev/legacy_deps.clj project.clj)
+  exec clojure -Sdeps "$legacy_deps" -M:test legacy
+fi
+exec clojure -M:test pure
