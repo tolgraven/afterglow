@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'project.clj'
+      - '.github/scripts/install-lein'
       - 'package*.json'
       - '.github/workflows/project-package.yml'
 permissions:
@@ -19,9 +20,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: DeLaGuardo/setup-clojure@13.7.0
-        with:
-          lein: 2.13.1
+      - name: Install Leiningen
+        run: .github/scripts/install-lein
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '26'

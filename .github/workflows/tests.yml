@@ -13,9 +13,8 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
-      - uses: DeLaGuardo/setup-clojure@13.7.0
-        with:
-          lein: 2.13.1
+      - name: Install Leiningen
+        run: .github/scripts/install-lein
       - uses: actions/cache@v6.1.0
         with:
           path: ~/.m2/repository
