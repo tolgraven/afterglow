@@ -36,6 +36,11 @@
                  [camel-snake-kebab "0.4.3"]
                  [com.taoensso/timbre "6.8.0"]
                  [com.taoensso/tufte "3.1.0"]
+                 ;; Keep Leiningen's nearest-first resolver aligned with the
+                 ;; current APIs required by Tufte, Ring and the SLF4J bridge.
+                 [com.taoensso/encore "3.172.1"]
+                 [org.slf4j/slf4j-api "2.0.20"]
+                 [commons-codec "1.23.0"]
                  [com.fzakaria/slf4j-timbre "0.4.1"]
                  [com.taoensso/tower "3.0.2"]
                  [com.taoensso/truss "2.5.1"]
@@ -55,7 +60,8 @@
                                                               com.fasterxml.jackson.core/jackson-core]]
                  [metosin/ring-http-response "0.9.5"]
                  [prone "2021-04-23"]
-                 [buddy "2.0.0"]
+                 [buddy/buddy-auth "3.0.323"]
+                 [buddy/buddy-core "1.12.0-430"]
                  [instaparse "1.5.0"]
                  [http-kit "2.8.1"]]
   :repositories {"sonatype-snapshots" "https://oss.sonatype.org/content/repositories/snapshots"}
