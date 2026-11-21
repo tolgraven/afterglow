@@ -303,6 +303,11 @@
         (reify ScalarExpression
           (evalDouble [_ env] (finite-result (.evalDouble ^ScalarExpression operation env) path)))))))
 
+(defn- validate-outputs! [outputs]
+  (when-not (and (map? outputs) (seq outputs) (<= (count outputs) 64)
+                 (every? keyword? (keys outputs)))
+    (invalid! [] "Batch outputs must contain 1–64 named keyword expressions")))
+
 (defn compile-batch
   "Compile named expressions to a reusable float64 CPU batch plan.
 
@@ -312,9 +317,7 @@
   float64; compare against the scalar oracle with the required application
   tolerance for exact-number inputs. This is not SIMD or GPU execution."
   [outputs]
-  (when-not (and (map? outputs) (seq outputs) (<= (count outputs) 64)
-                 (every? keyword? (keys outputs)))
-    (invalid! [] "Batch outputs must contain 1–64 named keyword expressions"))
+  (validate-outputs! outputs)
   (let [nodes (mapv (fn [[attribute expression]]
                       (let [node (compile-node expression)]
                         {:attribute attribute :type (:type node) :components (width (:type node))
@@ -391,33 +394,56 @@
       {:count count
        :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))})))
 
+(def ^:private time-inputs {:time-ms "u_time_ms" :elapsed-ms "u_elapsed_ms"})
+(def ^:private numeric-contract
+  {:cpu :float64 :gpu :float32 :requirements [:finite-float32-inputs :valid-operator-domains]})
+
+(defn- shader-inputs [expressions]
+  (reduce
+   (fn [inputs {:keys [op clock value]}]
+     (let [absolute? (= clock :absolute)]
+       (case op
+         :const (do (doseq [n (if (vector? value) value [value])]
+                      (when (> (Math/abs (double n)) (double Float/MAX_VALUE))
+                        (invalid! [] "Shader constants must fit finite float32 values" {:value n})))
+                    inputs)
+         :time (let [key (if absolute? :time-ms :elapsed-ms)]
+                 (assoc inputs key (time-inputs key)))
+         (:beat :bar :phrase)
+         (cond-> (assoc inputs (if absolute? :beat :elapsed-beats)
+                        (if absolute? "u_beat" "u_elapsed_beats"))
+           (#{:bar :phrase} op) (assoc :beats-per-bar "u_beats_per_bar")
+           (= op :phrase) (assoc :bars-per-phrase "u_bars_per_phrase"))
+         :position (assoc inputs :position "v_position")
+         inputs)))
+   (sorted-map)
+   (mapcat #(tree-seq (comp vector? :args) :args %) expressions)))
+
+(defn- shader-uniforms [nodes]
+  (into (sorted-map)
+        (map-indexed (fn [index [key type]]
+                       [key {:name (str "u_param_" index) :type type}]))
+        (sort-by (comp str key) (collected nodes))))
+
+(defn- bind-expression [node uniforms]
+  (reduce-kv (fn [source key binding]
+               (str/replace source (str "{{" (pr-str key) "}}") (:name binding)))
+             (:glsl node) uniforms))
+
+(defn- uniform-declarations [clock-inputs params]
+  (str (apply str (for [[_ uniform] clock-inputs] (str "uniform float " uniform ";\n")))
+       (apply str (for [[_ {:keys [name type]}] params]
+                    (str "uniform " (glsl-type type) " " name ";\n")))))
+
 (defn emit-glsl
   "Generate a complete GLSL ES 3 fragment shader and binding metadata.
-  Inputs use float32 on GPU; CPU doubles are the reference, subject to declared
-  numerical tolerances. Domains (nonzero divisors, sqrt/pow/clamp validity) must
-  hold on GPU too. This function does not compile or execute on a GPU."
+  CPU doubles are the reference. Inputs and valid operator domains must also
+  be representable on a float32 GPU."
   [expression]
   (let [node (compile-node expression)
-        _ (doseq [expr (tree-seq #(and (map? %) (vector? (:args %))) :args expression)
-                  :when (= :const (:op expr))
-                  value (let [v (:value expr)] (if (vector? v) v [v]))]
-            (when-not (<= (- (double Float/MAX_VALUE)) (double value) (double Float/MAX_VALUE))
-              (invalid! [] "Shader constants must fit finite float32 values" {:value value})))
-        musical-ops (filter #(#{:beat :bar :phrase} (:op %))
-                            (tree-seq #(and (map? %) (vector? (:args %))) :args expression))
-        musical-inputs (reduce (fn [inputs node]
-                                 (cond-> (assoc inputs (if (= :absolute (:clock node :elapsed)) :beat :elapsed-beats)
-                                                (if (= :absolute (:clock node :elapsed)) "u_beat" "u_elapsed_beats"))
-                                   (#{:bar :phrase} (:op node)) (assoc :beats-per-bar "u_beats_per_bar")
-                                   (= :phrase (:op node)) (assoc :bars-per-phrase "u_bars_per_phrase")))
-                               (sorted-map) musical-ops)
-        uniforms (into (sorted-map)
-                       (map-indexed (fn [index [key type]]
-                                      [key {:name (str "u_param_" index) :type type}])
-                                    (sort-by (comp str key) (:params node))))
-        source-expression (reduce-kv (fn [s key binding]
-                                       (str/replace s (str "{{" (pr-str key) "}}") (:name binding)))
-                                     (:glsl node) uniforms)
+        uniforms (shader-uniforms [node])
+        inputs (merge (shader-inputs [expression]) time-inputs {:position "v_position"})
+        source-expression (bind-expression node uniforms)
         result-type (:type node)
         result (case result-type
                  :number "vec4(vec3(value), 1.0)"
@@ -425,13 +451,38 @@
                  :vec3 "vec4(value, 1.0)"
                  :vec4 "value")]
     {:type result-type :expression source-expression :uniforms uniforms
-     :inputs (merge {:time-ms "u_time_ms" :elapsed-ms "u_elapsed_ms" :position "v_position"} musical-inputs)
-     :numeric-contract {:cpu :float64 :gpu :float32
-                        :requirements [:finite-float32-inputs :valid-operator-domains]}
+     :inputs inputs :numeric-contract numeric-contract
      :source (str "#version 300 es\nprecision highp float;\n"
                   "uniform float u_time_ms;\nuniform float u_elapsed_ms;\nin vec3 v_position;\n"
-                  (apply str (for [[_ uniform] musical-inputs] (str "uniform float " uniform ";\n")))
-                  (apply str (for [[_ {:keys [name type]}] uniforms]
-                               (str "uniform " (glsl-type type) " " name ";\n")))
+                  (uniform-declarations (dissoc inputs :position :elapsed-ms :time-ms) uniforms)
                   "out vec4 fragColor;\nvoid main() {\n  " (glsl-type result-type)
                   " value = " source-expression ";\n  fragColor = " result ";\n}\n")}))
+
+(defn emit-glsl-batch
+  "Compile named fixture expressions to a vertex shader for interleaved transform
+  feedback. Offsets and stride count floats. Each point is one fixture, with its
+  world position at location 0. Bind the returned varying names in output order
+  before linking. Compare stride to the device's interleaved component limit."
+  [outputs]
+  (validate-outputs! outputs)
+  (let [ordered (sort-by (comp str key) outputs)
+        nodes (mapv (comp compile-node val) ordered)
+        inputs (shader-inputs (map val ordered))
+        uniforms (shader-uniforms nodes)
+        fields (mapv (fn [index [attribute _] {:keys [type]}]
+                       {:attribute attribute :type type :components (width type)
+                        :varying (str "out_" index)})
+                     (range) ordered nodes)
+        offsets (reductions + 0 (map :components fields))
+        declarations (map (fn [{:keys [type varying]}]
+                            (str "out " (glsl-type type) " " varying ";\n")) fields)
+        assignments (map (fn [{:keys [varying]} node]
+                           (str "  " varying " = " (bind-expression node uniforms) ";\n"))
+                         fields nodes)]
+    {:outputs (mapv #(assoc %1 :offset %2) fields offsets)
+     :stride (last offsets) :inputs inputs :uniforms uniforms :numeric-contract numeric-contract
+     :source (str "#version 300 es\n#ifdef GL_ES\nprecision highp float;\n#endif\n"
+                  "layout(location = 0) in vec3 v_position;\n"
+                  (uniform-declarations (dissoc inputs :position) uniforms)
+                  (apply str declarations) "void main() {\n" (apply str assignments)
+                  "  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n")}))

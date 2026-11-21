@@ -161,3 +161,29 @@
                         {:op :clamp :args [position (c 2) (c 1)]}]]
       (is (thrown? clojure.lang.ExceptionInfo
                    (ir/evaluate-batch (ir/compile-batch {:value expression}) env positions))))))
+
+(deftest vertex-shader-packs-named-fields-in-deterministic-order
+  (let [outputs {:motion/focus {:op :multiply :args [{:op :param :key :gain} {:op :phrase}]}
+                 :aim {:op :vec2 :args [{:op :position :axis :x} {:op :time :clock :absolute}]}
+                 :color {:op :multiply :args [{:op :param :key :palette/red :type :vec3}
+                                             {:op :param :key :gain}]}}
+        {:keys [stride source inputs uniforms] fields :outputs :as shader} (ir/emit-glsl-batch outputs)
+        plan (ir/compile-batch outputs)]
+    (is (= [[:aim :vec2 2 0 "out_0"] [:color :vec3 3 2 "out_1"] [:motion/focus :number 1 5 "out_2"]]
+           (mapv (juxt :attribute :type :components :offset :varying) fields)))
+    (is (= 6 stride))
+    (is (= (mapv :attribute fields) (mapv :attribute (:outputs plan))))
+    (is (= {:time-ms "u_time_ms" :position "v_position" :elapsed-beats "u_elapsed_beats"
+            :beats-per-bar "u_beats_per_bar" :bars-per-phrase "u_bars_per_phrase"} inputs))
+    (is (= {:gain {:name "u_param_0" :type :number} :palette/red {:name "u_param_1" :type :vec3}} uniforms))
+    (is (str/includes? source "layout(location = 0) in vec3 v_position"))
+    (is (str/includes? source "out vec3 out_1;"))
+    (is (not (re-find #"\{\{|palette/red|u_elapsed_ms" source)))
+    (is (= shader (ir/emit-glsl-batch (into (array-map) (reverse (seq outputs))))))
+    (is (empty? (:inputs (ir/emit-glsl-batch {:level (c 0.5)}))))))
+
+(deftest vertex-shader-rejects-invalid-batches-before-linking
+  (doseq [outputs [{} {"x" (c 0)} {:color (c [0 Double/MAX_VALUE 0])}
+                   {:a {:op :param :key :p :type :vec2} :b {:op :param :key :p}}
+                   (into {} (map (fn [i] [(keyword (str "field" i)) (c i)]) (range 65)))]]
+    (is (thrown? clojure.lang.ExceptionInfo (ir/emit-glsl-batch outputs)))))

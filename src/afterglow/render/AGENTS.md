@@ -88,6 +88,11 @@ The calibrated shader, mount buffer layout and GPU readback live in this project
 Keep show choreography in the caller. Test wrap history and numbers against `frame/resolve-frame`
 and report float32 error and completed readback cost before enabling a physical-output path.
 
+`ir/emit-glsl-batch` and the CPU batch compiler accept the same map of named
+expressions. Bind varying names in returned order. Offsets and stride measure
+float32 components per fixture. Validate the device's interleaved component
+limit and use the declared clock and parameter bindings before a draw.
+
 The optional JVM moving-head solver uses a private desktop OpenGL context and the
 same packaged GLSL. Keep geometry out of the JOGL binding. Reuse the CPU frame
 history lookup for stable fixture IDs, and explicitly retire failed contexts.
