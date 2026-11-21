@@ -1,6 +1,7 @@
 # CI
 
-The architecture test workflow is separate from existing release/doc packaging.
-Do not claim release builds pass because plugin-free test lanes pass. Preserve
-nonzero failures and Java 17/21 coverage. Coordinate test manifest or dependency
-changes with the companion Tolglow CI pin and legacy dependency reader.
+Use project.clj and Leiningen across the JVM matrix. Run the complete suite with
+`lein test`, and keep the explicit pure namespace lane for focused diagnosis.
+The project-package workflow qualifies changes to the release build with a real
+überjar, embedded documentation and a launch of its help entry point.
+The release workflow separately handles publication.

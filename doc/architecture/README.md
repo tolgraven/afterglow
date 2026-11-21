@@ -19,8 +19,10 @@ does not replace the live engine or device drivers. The old `IEffect` API, show
 atoms and render loop remain. The new kernel requires callers to supply pure
 steps and any worker mapper, and returns data without publishing a frame.
 
-Run `./bin/test pure` or `./bin/test legacy` with Clojure CLI and Java 17 or 21.
-The legacy lane reads dependencies from `project.clj`, skipping build plugins,
-documentation generation and app startup. It uses released Beat Link 8.0.0
-because the historical 8.0.0-SNAPSHOT no longer resolves. That exception is
-test-only and must be addressed separately when restoring full application builds.
+Run `lein test` from the project root. CI runs on Java 17, 21 and 25.
+`lein test-pure` and `lein test-parity` select the namespaces in
+`dev/afterglow/test_runner.clj`. The same `project.clj` supplies both classpaths.
+`bin/bench` uses the benchmark profile and records the current Git revision.
+
+Run `lein run` to start Afterglow. Packaging with `npm ci` and `lein uberjar`
+builds the embedded Antora guide, API docs and Git version resources.

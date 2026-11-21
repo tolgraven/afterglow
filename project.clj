@@ -64,7 +64,8 @@
                  [buddy/buddy-core "1.12.0-430"]
                  [instaparse "1.5.0"]
                  [http-kit "2.8.1"]]
-  :repositories {"sonatype-snapshots" "https://oss.sonatype.org/content/repositories/snapshots"}
+  :repositories {"central" "https://repo.maven.apache.org/maven2/"
+                 "sonatype-snapshots" "https://oss.sonatype.org/content/repositories/snapshots"}
   :main afterglow.core
   :uberjar-name "afterglow.jar"
 
@@ -80,12 +81,18 @@
   ;; enable to start the nREPL server when the application launches
   ;; :env {:repl-port 16002}
 
-  :profiles {:dev     {:dependencies [[ring/ring-mock "0.6.2" :exclusions [ring/ring-codec]]
+  :aliases {"test-pure" ["with-profile" "+test" "run" "-m" "afterglow.test-runner" "pure"]
+            "test-parity" ["with-profile" "+test" "run" "-m" "afterglow.test-runner" "parity"]}
+  :profiles {:dev     {:source-paths ["dev"]
+                       :prep-tasks ^:replace ["javac" "compile"]
+                       :dependencies [[ring/ring-mock "0.6.2" :exclusions [ring/ring-codec]]
                                       [ring/ring-devel "1.15.6"]]
                        :repl-options {:init-ns afterglow.examples
                                       :welcome (println "afterglow loaded.")}
                        :jvm-opts     ["-XX:-OmitStackTraceInFastThrow" "-Dapple.awt.UIElement=true"]
                        :env          {:dev "true"}}
+             :test {:jvm-opts ["-Djava.awt.headless=true"]}
+             :benchmark {:jvm-opts ["-Xms256m" "-Xmx1g" "-Djava.awt.headless=true"]}
              :uberjar {:env        {:production "true"}
                        :prep-tasks ["javac"
                                     "compile"]
@@ -111,8 +118,7 @@
                                {:target-path  "doc/build/site/api" ; For hosting on the web
                                 :extra-values {:guide-url "https://afterglow-guide.deepsymmetry.org/afterglow/"}}]]}
 
-  ;; Perform the tasks which embed the developer guide and api docs before compilation,
-  ;; so they will be available both in development, and in the distributed archive.
+  ;; Build the embedded guide, API docs and Git version when packaging the distribution.
   :prep-tasks [["shell" "npm" "run" "local-docs" ]
                "codox"
                "resource"

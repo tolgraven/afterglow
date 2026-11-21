@@ -4,7 +4,8 @@
   "devDependencies": {
     "@antora/cli": "3.2.3",
     "@antora/lunr-extension": "1.0.0-alpha.13",
-    "@antora/site-generator": "3.2.3"
+    "@antora/site-generator": "3.2.3",
+    "playwright-core": "1.65.1"
   },
   "scripts": {
     "local-docs": "npx antora --fetch doc/embedded.yml",

@@ -82,3 +82,8 @@ These namespaces are independent of the legacy show scheduler and perform no I/O
   channel values when an axis was not authored (for example all opacity zero).
   Missing axes may fall back to compact history or the neutral calibration
   default. Keep this consistent across reordered rigs and rich/compact output.
+
+The calibrated shader, mount buffer layout and GPU readback live in this project at
+`resources/gpu/`. Access the assets from the classpath through `afterglow.render.gpu`.
+Keep show choreography in the caller. Test wrap history and numbers against `frame/resolve-frame`
+and report float32 error and completed readback cost before enabling a physical-output path.

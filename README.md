@@ -18,6 +18,13 @@
 
 [![License](https://img.shields.io/badge/License-Eclipse%20Public%20License%202.0-blue.svg)](#license)
 
+### Running from a checkout
+
+Use Leiningen with the root `project.clj`. Run `lein test` for the full suite,
+`lein test afterglow.render.frame-test` for a single namespace, or `lein run`
+to launch the application. The [architecture index](doc/architecture/README.md)
+describes the focused regression lanes and release build.
+
 ### Documentation Overview
 
 This page provides an introduction in how to install and use
