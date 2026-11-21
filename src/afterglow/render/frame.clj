@@ -392,6 +392,8 @@
   order. Accepts the same :previous-values and :previous-compact as resolve-frame.
   A nil entry directs a solver to use the fixture's neutral calibration."
   [patch target-ids options]
+  (when-not (map? (:previous-values options {}))
+    (fail! "Previous values must be a map keyed by fixture ID" {}))
   (let [history (prepare-previous-compact patch options)]
     (mapv (fn [id]
             (let [fixture (or (get (:by-id patch) id) (fail! "Unknown movement target" {:fixture-id id}))

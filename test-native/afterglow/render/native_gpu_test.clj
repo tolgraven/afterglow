@@ -30,7 +30,9 @@
         targets {:back [3 1 -1] :wing [2 -2 -3]}
         previous (frame/resolve-frame reordered [{:target-id :back :attribute :pan :value 0.0}]
                                       {:compact-values? true})
+        unlit (frame/resolve-frame patch [])
         histories [{} {:previous-values (:values previous)}
+                   {:previous-values (:values unlit)}
                    {:previous-compact (:compact previous)}
                    {:previous-values {:back {:pan 0.86}} :previous-compact (:compact previous)}]
         solver (gpu/open! patch)]
@@ -50,6 +52,7 @@
                      (assoc targets :wing [0 ##Inf 1]) (assoc targets :wing [1.0e100 0 1])
                      (assoc targets :wing [-1 0 0])]]
           (is (thrown? clojure.lang.ExceptionInfo (gpu/solve! solver bad))))
+        (is (thrown? clojure.lang.ExceptionInfo (gpu/solve! solver targets {:previous-values []})))
         (is (thrown? clojure.lang.ExceptionInfo (gpu/solve! solver targets {:previous-values {:back {:pan -0.1}}})))
         (assert-axes (:values (cpu patch targets {})) (gpu/solve! solver targets)))
       (finally (.close solver)))

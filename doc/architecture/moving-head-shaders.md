@@ -59,6 +59,8 @@ input and zero-distance targets reject that frame and leave the solver usable.
 Closing the owner releases the context and its buffers.
 
 Run `lein with-profile +native-gpu test afterglow.render.native-gpu-test` to
-exercise the real shader against the CPU fixture model. Linux Mesa llvmpipe
-exercises execution and readback on a software driver. Float32 precision and
-end-to-end physical DMX equivalence remain separate from the CPU rendering path.
+exercise the actual shader against the CPU fixture model. The 64-head scene has
+differently mounted fixtures and carries committed CPU history through twelve
+successive frames. CI exercised native execution and readback on Mesa llvmpipe
+OpenGL 4.5 on Ubuntu and Apple Software Renderer OpenGL 4.1 on macOS 15.
+Performance on physical Mac GPUs and byte-equivalence for DMX remain unverified.
