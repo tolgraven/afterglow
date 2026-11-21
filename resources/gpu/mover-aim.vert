@@ -8,6 +8,9 @@ layout(location = 2) in vec3 mountCos;
 layout(location = 3) in vec3 mountSin;
 // Offset and scale convert degrees to calibrated unit values, for pan then tilt.
 layout(location = 4) in vec4 axisCalibration;
+// Disabled (the default) selects a world-space target. A value of one selects
+// a world-space direction, which is independent of the mount position.
+layout(location = 5) in float directionInput;
 out vec4 axes;
 
 bool legal(float x) { return x >= 0.0 && x <= 1.0; }
@@ -15,7 +18,7 @@ bool legal(float x) { return x >= 0.0 && x <= 1.0; }
 void main() {
   // Inverse of the X, Y, Z mounting rotations. Sines and cosines of the negative
   // Euler angles are uploaded once per rig. Each invocation owns one fixture.
-  vec3 d = targetAndPrevious.xyz - mountPosition;
+  vec3 d = directionInput > 0.5 ? targetAndPrevious.xyz : targetAndPrevious.xyz - mountPosition;
   vec2 xy = vec2(mountCos.z*d.x - mountSin.z*d.y, mountSin.z*d.x + mountCos.z*d.y);
   vec2 xz = vec2(mountCos.y*xy.x + mountSin.y*d.z, mountCos.y*d.z - mountSin.y*xy.x);
   vec3 local = vec3(xz.x, mountCos.x*xy.y - mountSin.x*xz.y, mountSin.x*xy.y + mountCos.x*xz.y);
