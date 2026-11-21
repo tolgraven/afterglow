@@ -46,6 +46,20 @@
   (generic/connect-osc! (cond-> options
                          (not (:transport options)) (assoc :transport (transports/osc-transport options)))))
 
+(defn osc-port
+  "Return the bound UDP port for an open OSC controller."
+  [session]
+  (get-in @(:resources session) [:midi :port]))
+
+(defn send-osc!
+  "Send OSC feedback to the destination configured on this controller."
+  [session path & args]
+  (locking (:lock session)
+    (when-not (and (= :osc (get-in session [:options :profile :id]))
+                   (= :active (:status (session/snapshot session))))
+      (throw (ex-info "An open OSC session is required" {})))
+    ((get-in session [:options :midi :send!]) (:midi @(:resources session)) [{:path path :args args}])))
+
 (defn open-sensor!
   "Connect any sensor providing an explicit {:open! :send! :close!} transport.
   Normalized input maps go through the same binding and command model."
