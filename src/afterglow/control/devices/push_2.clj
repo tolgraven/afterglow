@@ -133,6 +133,8 @@
      :master (:master model) :blackout? (:blackout? model)
      :bpm (get-in model [:transport :bpm])
      :selected (:selected-cue state)
+     :epoch (:epoch model) :frame-number (:frame-number model)
+     :instance-id (:id instance) :definition-version (:effect-version instance)
      :cue (when cue (select-keys cue-view [:id :name :color :active? :releasing?]))
      :effect (when effect (select-keys effect [:id :name :categories :modifiers :envelope]))
      :swatch (:color cue-view)
