@@ -47,3 +47,21 @@
     (is (= [1.0 1.0 1.0] (edit/color-grid-value 7 0)))
     (doseq [x (range 8) y (range 8)]
       (is (params/valid-value? schema (edit/color-grid-value x y))))))
+
+(deftest velocity-maps-only-opted-in-numeric-parameters-with-valid-endpoints
+  (let [definition {:params {:level {:type :number :default 0 :bounds [0 1] :velocity true
+                                     :velocity-min 0.2 :velocity-max 0.8}
+                             :count {:type :integer :default 2 :bounds [1 8] :velocity true
+                                     :velocity-min 8 :velocity-max 1}
+                             :free {:type :integer :default 50 :velocity true
+                                    :velocity-min 40 :velocity-max 80}
+                             :static {:type :number :default 0 :bounds [0 1]}
+                             :flag {:type :boolean :default true :velocity true}}}]
+    (is (= {:level 0.2 :count 8 :free 40} (edit/velocity-values definition 0)))
+    (is (= {:level 0.5 :count 5 :free 60} (edit/velocity-values definition 0.5)))
+    (is (= 1 (:count (edit/velocity-values definition 1))))
+    (is (= (edit/velocity-values definition 1) (edit/velocity-values definition 9))))
+  (let [definition {:params {:fractional-bounds {:type :integer :default 2 :bounds [1.2 7.8] :velocity true}}}]
+    (is (= {:fractional-bounds 2} (edit/velocity-values definition 0)))
+    (is (= {:fractional-bounds 7} (edit/velocity-values definition 1))))
+  (is (thrown? clojure.lang.ExceptionInfo (edit/velocity-values {} Double/NaN))))

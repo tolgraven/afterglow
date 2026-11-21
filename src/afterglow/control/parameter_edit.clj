@@ -103,3 +103,29 @@
   [x y]
   (if (zero? y) (vec (repeat 3 (/ x 7.0)))
       (hsv->rgb [(/ x 8.0) (/ y 7.0) 1.0])))
+
+(defn velocity-values
+  "Map a normalized velocity/pressure into explicitly enabled numeric params.
+  Per-parameter velocity endpoints may reverse direction, but final values
+  remain inside the declared schema bounds. Integer parameters stay integers."
+  [definition input]
+  (when-not (params/finite-number? input)
+    (throw (ex-info "Velocity must be finite" {})))
+  (let [fraction (bindings/clamp input [0 1])]
+    (into {}
+          (for [[id schema] (:params definition)
+                :when (and (:velocity schema) (#{:number :integer} (:type schema)))
+                :let [[low high] (:bounds schema [0 1])
+                      from (:velocity-min schema low) to (:velocity-max schema high)
+                      _ (when-not (every? params/finite-number? [from to])
+                          (throw (ex-info "Velocity endpoints must be finite" {:param id})))
+                      value (+ from (* fraction (- to from)))
+                      value (if (:bounds schema) (bindings/clamp value (:bounds schema)) value)
+                      value (if (= :integer (:type schema))
+                              (let [rounded (Math/round (double value))]
+                                (if (:bounds schema)
+                                  (long (bindings/clamp rounded
+                                          [(Math/ceil (double low)) (Math/floor (double high))])) rounded)) value)
+                      _ (when-not (params/valid-value? schema value)
+                          (throw (ex-info "Velocity result must satisfy parameter schema" {:param id})))]]
+            [id value]))))
