@@ -34,20 +34,25 @@
   healthy effects retain their results if another effect is isolated. Release
   the function with the frame. A new frame evaluates its own captured inputs."
   [evaluate!]
-  (let [completed (IdentityHashMap.)]
+  (let [completed (volatile! nil)]
     (fn [contributions]
-      (mapv (fn [{:keys [kind batch source] :as block}]
-              (if (and (= :batch kind) (contains? batch :field-request))
-                (try
-                  (let [request (:field-request batch)
-                        result (or (.get completed request)
-                                   (let [result (evaluate-request! evaluate! request)]
-                                     (.put completed request result)
-                                     result))]
-                    (when-not (= (count (:target-ids batch)) (:count result))
-                      (throw (ex-info "Evaluated field count differs from selected fixture count"
-                                      {:count (:count result) :targets (count (:target-ids batch))})))
-                    (assoc block :batch (merge (dissoc batch :field-request) result)))
-                  (catch Exception e (throw (faults/attributed-error e source))))
-                block))
-            contributions))))
+      ;; Keep ordinary streams on the existing dense path without copying every
+      ;; block. Only requests need a replacement block and owned output arrays.
+      (let [blocks (if (vector? contributions) contributions (vec contributions))]
+        (reduce-kv
+         (fn [resolved index {:keys [kind batch source] :as block}]
+           (if (and (= :batch kind) (contains? batch :field-request))
+             (try
+               (let [request (:field-request batch)
+                     ^IdentityHashMap cache (or @completed (vreset! completed (IdentityHashMap.)))
+                     result (or (.get cache request)
+                                (let [result (evaluate-request! evaluate! request)]
+                                  (.put cache request result)
+                                  result))]
+                 (when-not (= (count (:target-ids batch)) (:count result))
+                   (throw (ex-info "Evaluated field count differs from selected fixture count"
+                                   {:count (:count result) :targets (count (:target-ids batch))})))
+                 (assoc resolved index (assoc block :batch (merge (dissoc batch :field-request) result))))
+               (catch Exception error (throw (faults/attributed-error error source))))
+             resolved))
+         blocks blocks)))))
