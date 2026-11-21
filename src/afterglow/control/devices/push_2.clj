@@ -2,6 +2,7 @@
   "Composable Push 2 profile over the common command model. MIDI protocol comes
   from Afterglow's existing adapter; this module has no port or native UI access."
   (:require [afterglow.control.bindings :as bindings]
+            [afterglow.control.parameter-edit :as parameter-edit]
             [afterglow.control.codecs.midi :as midi]
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.views :as views]
@@ -10,6 +11,8 @@
 (def capabilities
   (assoc codec/capabilities :adapter :composable-session
          :implemented #{:pad-cues :held-release :page-scroll :parameter-encoders
+                        :parameter-banks :typed-parameters :effect-selection
+                        :encoder-touch :touch-strip :color-grid :enum-grid :shift-fine
                         :master-encoder :led-diff :palette-restore :display-view
                         :user-mode-handoff :reconnect}
          :hardware-verified? false))
@@ -33,6 +36,100 @@
 
 (defn- active-for-cue [model cue-id]
   (last (filter #(= cue-id (:cue-id %)) (views/active-instances model))))
+
+(defn- select-instance [state instance]
+  (if (= (:selected-instance state) (:id instance)) state
+      (assoc state :selected-instance (:id instance) :selected-cue (:cue-id instance)
+                   :touches {} :touch-order [])))
+
+(defn- selected-state [state model]
+  (if (get-in model [:instances (:selected-instance state)]) state
+      (if-let [instance (last (views/active-instances model))]
+        (select-instance state instance)
+        (assoc state :selected-instance nil :touches {} :touch-order []))))
+
+(defn- parameter-bank [state instance]
+  (let [ids (parameter-edit/ordered-parameters (:definition instance))
+        banks (max 1 (long (Math/ceil (/ (count ids) 8.0))))
+        index (int (bindings/clamp (get-in state [:parameter-banks (:id instance)] 0) [0 (dec banks)]))
+        offset (* 8 index)]
+    {:index index :count banks :total (count ids) :offset offset
+     :ids (subvec ids (min offset (count ids)) (min (+ offset 8) (count ids)))}))
+
+(defn- parameter-at [state model encoder-index]
+  (let [instance (get-in model [:instances (:selected-instance state)])
+        id (nth (:ids (parameter-bank state instance)) encoder-index nil)]
+    (when id
+      {:instance-id (:id instance) :param id :encoder encoder-index
+       :component (get-in state [:components [(:id instance) id]] 0)})))
+
+(defn- touched [state model]
+  (let [touch (get (:touches state) (peek (:touch-order state)))]
+    (when (and touch (= (:selected-instance state) (:instance-id touch))
+               (get-in model [:instances (:instance-id touch) :definition :params (:param touch)])) touch)))
+
+(defn- edit-parameter [state model selection value mode]
+  (let [{:keys [instance-id param component]} selection
+        instance (get-in model [:instances instance-id])
+        schema (get-in instance [:definition :params param])
+        current (get-in instance [:params param])]
+    (if (and schema (or (= mode :absolute) (not (zero? value))))
+      (let [next-value (parameter-edit/edit schema current value
+                                            {:mode mode :component component :fine? (:shift? state)})]
+        {:state state :commands (if (= current next-value) []
+                                    [{:op :param/set :instance-id instance-id :param param :value next-value}])})
+      {:state state})))
+
+(defn- touch-encoder [state model note]
+  (if-let [selection (parameter-at state model note)]
+    {:state (-> state (assoc-in [:touches note] selection)
+                (update :touch-order #(conj (vec (remove #{note} %)) note)))}
+    {:state state}))
+
+(defn- release-encoder [state note]
+  {:state (-> state (update :touches dissoc note)
+              (update :touch-order #(vec (remove #{note} %))))})
+
+(defn- page-control [state model direction]
+  (if (:shift? state)
+    (let [instance (get-in model [:instances (:selected-instance state)])
+          bank (parameter-bank state instance)
+          next-bank (int (bindings/clamp (+ (:index bank) direction) [0 (dec (:count bank))]))]
+      {:state (-> state (assoc-in [:parameter-banks (:id instance)] next-bank)
+                  (assoc :touches {} :touch-order []))})
+    (let [instances (views/active-instances model)
+          index (or (first (keep-indexed #(when (= (:id %2) (:selected-instance state)) %1) instances))
+                    (dec (count instances)))
+          next-index (int (bindings/clamp (+ index direction) [0 (max 0 (dec (count instances)))]))]
+      {:state (if-let [instance (nth instances next-index nil)] (select-instance state instance) state)})))
+
+(defn- component-button [state model encoder-index]
+  (if-let [{:keys [instance-id param component] :as selection} (parameter-at state model encoder-index)]
+    (let [instance (get-in model [:instances instance-id])
+          schema (get-in instance [:definition :params param])]
+      (if (= :boolean (:type schema))
+        {:state state :commands [{:op :param/set :instance-id instance-id :param param
+                                  :value (not (get-in instance [:params param]))}]}
+        (let [next-component (mod (inc component) (count (parameter-edit/components schema)))]
+          {:state (-> state (assoc-in [:components [instance-id param]] next-component)
+                      (update :touches (fn [touches]
+                                         (into {} (map (fn [[note touch]]
+                                                         [note (if (= (select-keys touch [:instance-id :param])
+                                                                      (select-keys selection [:instance-id :param]))
+                                                                 (assoc touch :component next-component) touch)])) touches))))})))
+    {:state state}))
+
+(defn- picker-pad [state model note]
+  (when-let [{:keys [instance-id param]} (touched state model)]
+    (let [schema (get-in model [:instances instance-id :definition :params param])
+          [x y] (codec/pad-coordinates note)
+          value (case (:type schema)
+                  :color (parameter-edit/color-grid-value x y)
+                  :enum (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
+                  ::missing)]
+      (when (#{:color :enum} (:type schema))
+        {:state state :commands (if (= ::missing value) []
+                                    [{:op :param/set :instance-id instance-id :param param :value value}])}))))
 
 (defn- press-pad [state event model envelope]
   (if-let [cue (cue-at state model (:note event))]
@@ -63,23 +160,12 @@
     {:state state}))
 
 (defn- encoder [state event model]
-  (let [delta (codec/signed-encoder (:raw-value event))
-        instance (get-in model [:instances (:selected-instance state)])
-        parameter (nth (sort-by str (keys (get-in instance [:definition :params])))
-                       (- (:controller event) 71) nil)
-        schema (get-in instance [:definition :params parameter])
-        value (get-in instance [:params parameter])]
-    (if (and instance (#{:number :integer} (:type schema))
-             (number? value) (:bounds schema))
-      (let [[low high] (:bounds schema)
-            step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0))
-            next-value (bindings/clamp (+ value (* delta step)) [low high])]
-        {:state state :commands [{:op :param/set :instance-id (:id instance)
-                                  :param parameter :value next-value}]})
-      {:state state})))
+  (edit-parameter state model (parameter-at state model (- (:controller event) 71))
+                  (codec/signed-encoder (:raw-value event)) :relative))
 
 (defn- input [device-id state event model envelope]
-  (cond
+  (let [state (selected-state state model)]
+   (cond
     (= :palette (:type event))
     (if (and (not (:ready? state)) (= (:index event) (:next-palette state)))
       (let [index (:index event)
@@ -95,8 +181,20 @@
     (and (= :control-change (:type event)) (= 59 (:controller event)) (pos? (:raw-value event)))
     {:state state :lifecycle :suspend}
     (not (:ready? state)) {:state state}
+    (and (= :control-change (:type event)) (= 49 (:controller event)))
+    {:state (assoc state :shift? (pos? (:raw-value event)))}
+    (and (= :note-on (:type event)) (<= 0 (:note event) 7))
+    (touch-encoder state model (:note event))
+    (and (= :note-off (:type event)) (<= 0 (:note event) 7))
+    (release-encoder state (:note event))
+    (= :pitch-bend (:type event))
+    (edit-parameter state model (touched state model) (:value event) :absolute)
+    (and (= :control-change (:type event)) (pos? (:raw-value event)) (#{62 63} (:controller event)))
+    (page-control state model (if (= 62 (:controller event)) -1 1))
+    (and (= :control-change (:type event)) (pos? (:raw-value event)) (<= 20 (:controller event) 27))
+    (component-button state model (- (:controller event) 20))
     (and (= :note-on (:type event)) (codec/pad-coordinates (:note event)))
-    (press-pad state event model envelope)
+    (or (picker-pad state model (:note event)) (press-pad state event model envelope))
     (= :note-off (:type event)) (release-pad state (:note event) envelope)
     (and (= :control-change (:type event)) (<= 71 (:controller event) 78))
     (encoder state event model)
@@ -111,7 +209,7 @@
       {:state (assoc state :origin next-origin :last-leds {})})
     (and (= :control-change (:type event)) (= 85 (:controller event)) (pos? (:raw-value event)))
     {:state state :commands [{:op :blackout/set :value (not (:blackout? model))}]}
-    :else {:state state}))
+    :else {:state state})))
 
 (defn- rgb [cue]
   (let [candidate (:color cue)
@@ -124,7 +222,12 @@
 (defn display-view
   "Device-independent labels/values. A display transport draws this map."
   [state model]
-  (let [instance (get-in model [:instances (:selected-instance state)])
+  (let [state (selected-state state model)
+        instance (get-in model [:instances (:selected-instance state)])
+        bank (parameter-bank state instance)
+        active (views/active-instances model)
+        active-index (or (first (keep-indexed #(when (= (:id instance) (:id %2)) %1) active)) 0)
+        active-offset (* 8 (quot active-index 8))
         cue (get-in model [:registry :cues (:selected-cue state)])
         effect (or (:definition instance) (get-in model [:registry :effects (:effect-id cue)]))
         cue-view (when cue (views/cue-view model (:id cue)))]
@@ -133,19 +236,36 @@
      :master (:master model) :blackout? (:blackout? model)
      :bpm (get-in model [:transport :bpm])
      :selected (:selected-cue state)
+     :epoch (:epoch model) :frame-number (:frame-number model)
+     :instance-id (:id instance) :definition-version (:effect-version instance)
+     :parameter-bank (dissoc bank :ids)
+     :touched-parameter (touched state model)
+     :fine? (boolean (:shift? state))
+     :active-effect-navigation {:index active-index :count (count active) :offset active-offset}
+     :active-effects (mapv #(select-keys % [:id :cue-id :effect-id :order :phase])
+                           (take 8 (drop active-offset active)))
      :cue (when cue (select-keys cue-view [:id :name :color :active? :releasing?]))
      :effect (when effect (select-keys effect [:id :name :categories :modifiers :envelope]))
      :swatch (:color cue-view)
-     :parameters (mapv (fn [[k v]] {:id k :param k :name (or (get-in effect [:params k :name]) (name k))
-                                   :value v :schema (get-in effect [:params k])
-                                   :preview-samples (get-in effect [:params k :preview-samples])})
-                       (sort-by (comp str key) (:params instance)))
+     :parameters (mapv (fn [k]
+                         (let [schema (get-in effect [:params k])
+                               component (get-in state [:components [(:id instance) k]] 0)]
+                           {:id k :param k :name (or (:name schema) (name k))
+                            :value (get-in instance [:params k]) :schema schema
+                            :component component :component-label (nth (parameter-edit/components schema) component)
+                            :preview-samples (:preview-samples schema)})) (:ids bank))
      :cells (mapv (fn [x] (when-let [cue (cue-at state model (codec/pad-note x 0))]
                             (views/cue-view model (:id cue)))) (range 8))
      :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))}))
 
 (defn- feedback [device-id timeout-ms batch-size state model envelope]
-  (let [time (:time-ms envelope)
+  (let [state (selected-state state model)
+        alive (set (keys (:instances model)))
+        state (-> state (update :parameter-banks #(select-keys % alive))
+                  (update :components #(into {} (filter (fn [[[id _] _]] (alive id))) %)))
+        touch (touched state model)
+        schema (get-in model [:instances (:instance-id touch) :definition :params (:param touch)])
+        time (:time-ms envelope)
         waiting? (:awaiting-led-ack? state)
         timed-out? (and waiting? (>= (- time (:last-led-at-ms state time)) timeout-ms))
         state (cond
@@ -160,7 +280,12 @@
         state (assoc state :last-display display)
         desired (into {} (for [y (range 8) x (range 8)]
                            (let [cue (cue-at state model (codec/pad-note x y))]
-                             [[x y] (if cue (rgb (views/cue-view model (:id cue))) [0 0 0])])))
+                             [[x y] (case (:type schema)
+                                      :color (mapv #(int (Math/round (* 255.0 %))) (parameter-edit/color-grid-value x y))
+                                      :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
+                                                  selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
+                                              (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
+                                      (if cue (rgb (views/cue-view model (:id cue))) [0 0 0]))])))
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
                   (take batch-size (filter (fn [[xy color]] (not= color (get-in state [:last-leds xy])))
                                            (sort-by key desired))))
@@ -178,7 +303,8 @@
       (:fault state) (assoc :lifecycle :disconnect))))
 
 (defn- stop [device-id state _model _envelope disconnected?]
-  {:state (assoc state :pads {} :holds {} :ready? false :last-leds {} :last-display nil)
+  {:state (assoc state :pads {} :holds {} :ready? false :last-leds {} :last-display nil
+                       :touches {} :touch-order [] :shift? false)
    :commands (mapv (fn [id] {:op :instance/end :instance-id id})
                    (keep :instance-id (vals (get-in state [:holds :gestures]))))
    :midi (if (or disconnected? (not (:ready? state))) []
@@ -197,7 +323,8 @@
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
   (let [initial {:page-id page-id :origin [0 0] :palettes {} :next-palette 0
-                 :ready? false :pads {} :holds {} :last-leds {} :led-retries 0}]
+                 :ready? false :pads {} :holds {} :last-leds {} :led-retries 0
+                 :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false}]
     {:id :push-2 :capabilities capabilities :initial-state initial
      :decode (partial decode device-id)
      :start (fn [state _model envelope]
@@ -207,7 +334,8 @@
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc % :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {})
+     :reset-model #(assoc % :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {}
+                           :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false)
      :ack (fn [state command ack]
             (let [hold (when-let [gesture (:gesture-id command)]
                          (bindings/acknowledge-hold (:holds state) gesture ack))]

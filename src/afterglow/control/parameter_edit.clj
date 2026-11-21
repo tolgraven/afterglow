@@ -1,0 +1,105 @@
+(ns afterglow.control.parameter-edit
+  "Pure typed editing for encoders, touch strips and other normalized controls.
+  No device addresses, mutable state, clocks or command admission live here."
+  (:require [afterglow.control.bindings :as bindings]
+            [afterglow.control.params :as params]))
+
+(defn ordered-parameters
+  "Explicit :param-order wins; schema :order and stable key order fill the rest."
+  [definition]
+  (let [schemas (:params definition)
+        explicit (distinct (filter #(contains? schemas %) (:param-order definition)))
+        remaining (remove (set explicit) (keys schemas))]
+    (vec (concat explicit (sort-by (fn [id] [(let [order (get-in schemas [id :order])]
+                                             (if (params/finite-number? order) order Double/POSITIVE_INFINITY))
+                                           (str id)]) remaining)))))
+
+(defn components [schema]
+  (case (:type schema)
+    :color [:hue :saturation :brightness]
+    :range [:lower :upper]
+    :vector (mapv #(keyword (str "component-" (inc %))) (range (:size schema)))
+    [:value]))
+
+(defn rgb->hsv [[r g b]]
+  (let [hi (max r g b) lo (min r g b) delta (- hi lo)
+        h (cond (zero? delta) 0.0
+                (= hi r) (mod (/ (- g b) delta) 6.0)
+                (= hi g) (+ 2.0 (/ (- b r) delta))
+                :else (+ 4.0 (/ (- r g) delta)))]
+    [(/ h 6.0) (if (zero? hi) 0.0 (/ delta hi)) hi]))
+
+(defn hsv->rgb [[h s v]]
+  (let [h (* (mod h 1.0) 6.0) chroma (* v s)
+        x (* chroma (- 1.0 (Math/abs (- (mod h 2.0) 1.0))))
+        base (- v chroma)
+        rgb (case (int (Math/floor h))
+              0 [chroma x 0] 1 [x chroma 0] 2 [0 chroma x]
+              3 [0 x chroma] 4 [x 0 chroma] [chroma 0 x])]
+    (mapv #(double (bindings/clamp (+ base %) [0 1])) rgb)))
+
+(defn- numeric-range [schema value]
+  (or (:bounds schema) [(- (double value) 1.0) (+ (double value) 1.0)]))
+
+(defn- step [schema bounds fine?]
+  (let [declared (:step schema)
+        base (cond (= :integer (:type schema)) (if (and (integer? declared) (pos? declared)) declared 1)
+                   (and (params/finite-number? declared) (pos? declared)) declared
+                   :else (/ (- (second bounds) (first bounds)) 100.0))]
+    (if (and fine? (not= :integer (:type schema))) (/ base 10.0) base)))
+
+(defn- discrete-index [values value]
+  (or (first (keep-indexed #(when (= %2 value) %1) values)) 0))
+
+(defn- component-index [schema component]
+  (min (dec (count (components schema))) (max 0 (long (or component 0)))))
+
+(defn edit
+  "Return a schema-valid value for relative delta or absolute normalized input.
+  Options: :mode :relative|:absolute, :component index and :fine?. Enum values
+  (including waveform selections) are returned unchanged. Range endpoints never
+  cross. Color components are HSV editing over the model's linear RGB values."
+  [schema value input {:keys [mode component fine?] :or {mode :relative} :as options}]
+  (when-not (and (params/valid-value? schema value) (params/finite-number? input)
+                 (#{:relative :absolute} mode))
+    (throw (ex-info "Typed editing needs a valid value, finite input and supported mode" {})))
+  (let [component (component-index schema component)
+        absolute? (= :absolute mode)
+        fraction (when absolute? (bindings/clamp input [0 1]))
+        number-edit (fn [current bounds]
+                      (let [result (if absolute?
+                                     (+ (first bounds) (* fraction (- (second bounds) (first bounds))))
+                                     (+ current (* input (step schema (or (:bounds schema) bounds) fine?))))]
+                        (bindings/clamp result bounds)))
+        result
+        (case (:type schema)
+          (:number :integer)
+          (let [bounds (numeric-range schema value) result (number-edit value bounds)]
+            (if (= :integer (:type schema))
+              (long (bindings/clamp (Math/round (double result))
+                                    [(Math/ceil (double (first bounds))) (Math/floor (double (second bounds)))])) result))
+          :boolean (if absolute? (>= fraction 0.5) (cond (pos? input) true (neg? input) false :else value))
+          :enum (let [values (or (:values schema) (:options schema))
+                      index (if absolute? (min (dec (count values)) (long (* fraction (count values))))
+                                (+ (discrete-index values value) (long input)))]
+                  (nth values (int (bindings/clamp index [0 (dec (count values))]))))
+          :color (let [hsv (rgb->hsv value)
+                       changed (if (and (zero? component) (not absolute?))
+                                 (mod (+ (nth hsv component) (* input (if fine? 0.001 0.01))) 1.0)
+                                 (if absolute? fraction
+                                     (bindings/clamp (+ (nth hsv component) (* input (if fine? 0.001 0.01))) [0 1])))]
+                   (hsv->rgb (assoc hsv component changed)))
+          (:vector :range)
+          (let [bounds (numeric-range schema (nth value component))
+                bounds (if (= :range (:type schema))
+                         (if (zero? component) [(first bounds) (second value)] [(first value) (second bounds)]) bounds)]
+            (assoc value component (number-edit (nth value component) bounds))))]
+    (when-not (params/valid-value? schema result)
+      (throw (ex-info "Typed edit did not satisfy its parameter schema" {:type (:type schema)})))
+    result))
+
+(defn color-grid-value
+  "Eight grayscale choices on the first row, then hue/saturation choices."
+  [x y]
+  (if (zero? y) (vec (repeat 3 (/ x 7.0)))
+      (hsv->rgb [(/ x 8.0) (/ y 7.0) 1.0])))
