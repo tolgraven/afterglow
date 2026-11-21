@@ -2406,7 +2406,7 @@
            (handle-note-on [_this _message])
            (handle-note-off [_this _message])
            (handle-aftertouch [_this _message])
-           (handle-pitch-bend [_this _message])))))))
+           (handle-pitch-bend [_this _message]))))))))
 
 (defn- note-to-cue-coordinates
   "Translate the MIDI note associated with an incoming message to its

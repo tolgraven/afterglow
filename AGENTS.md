@@ -6,15 +6,11 @@ applicable nested AGENTS.md before changing behavior. Existing `tolmaster`
 parameter/color/buffer/timing/rotation work has been merged; preserve it unless
 an intentional, tested contract changes it.
 
-- `project.clj` is the legacy application manifest. It now declares stable
-  Beat Link 8.0.0 and required thi.ng dependencies. The original test-only
-  snapshot override is historical; real DJ Link behavior remains unverified.
-  `deps.edn` and `bin/test` provide plugin-free headless test entry points.
-- `./bin/test pure` includes the functional model/runtime/control/render and
-  injected device boundaries. `./bin/test parity` additionally exercises real
-  old-source parity oracles. Neither lane activates
-  physical DMX, Art-Net, MIDI, OSC or Push output. Loopback transport tests are
-  allowed only with owned startup/cleanup.
+- `project.clj` owns application dependencies, test profiles and packaging.
+  Use `lein test` for all discovered tests and `lein run` to launch.
+  `lein test-pure` runs the explicit hardware-free core and transport suite.
+  `lein test-parity` adds the source-parity regression namespaces.
+  Use owned loopback services and capture sinks when testing.
 - `runtime.clj` is the pure frame kernel; `runtime/engine.clj` advances the shared
   model and `executor.clj` owns bounded workers. The new runtime must not execute
   old effect closures through a compatibility adapter. Old source exists only
