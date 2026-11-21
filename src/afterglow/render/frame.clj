@@ -269,10 +269,43 @@
         (rotate :y (Math/toRadians (- (double y))))
         (rotate :x (Math/toRadians (- (double x)))))))
 
+(defn- axis-calibration [fixture axis]
+  (or (get-in fixture [:calibration axis])
+      (if (= axis :pan) {:min-deg -180 :max-deg 180} {:min-deg -90 :max-deg 90})))
+
+(defn- mechanical-degrees [fixture axis value]
+  (let [calibration (axis-calibration fixture axis)]
+    (if (vector? calibration)
+      (let [[center half-circle] calibration]
+        (* 180.0 (/ (- (* 255.0 value) center) half-circle)))
+      (let [{:keys [min-deg max-deg]} calibration]
+        (+ min-deg (* (double value) (- max-deg min-deg)))))))
+
+(defn fixture-pose
+  "Project the committed normalized pan/tilt command through the fixture's
+  calibration and mount rotation. Works on rich or projected compact target
+  values. Degrees retain mechanical travel through wraps. The unit direction
+  is in world space. Returns nil when either channel value is unavailable.
+  An aimed point and its requested angles remain separate in the original
+  output. Call on selected heads when their pose is needed."
+  [fixture output]
+  (let [pan (get output :pan (get-in output [:channels :pan]))
+        tilt (get output :tilt (get-in output [:channels :tilt]))]
+    (when (and (unit? pan) (unit? tilt))
+      (let [yaw (mechanical-degrees fixture :pan pan)
+            elevation (mechanical-degrees fixture :tilt tilt)
+            p (Math/toRadians yaw)
+            t (Math/toRadians elevation)
+            horizontal (Math/cos t)
+            [x y z] (:rotation-deg fixture [0 0 0])]
+        {:pan-deg yaw :tilt-deg elevation
+         :direction (-> [(* (Math/sin p) horizontal) (Math/sin t) (* (Math/cos p) horizontal)]
+                        (rotate :x (Math/toRadians (double x)))
+                        (rotate :y (Math/toRadians (double y)))
+                        (rotate :z (Math/toRadians (double z))))}))))
+
 (defn- normalized-angle [fixture axis degrees previous]
-  (let [calibration (get-in fixture [:calibration axis]
-                            (if (= axis :pan) {:min-deg -180 :max-deg 180}
-                                {:min-deg -90 :max-deg 90}))
+  (let [calibration (axis-calibration fixture axis)
         convert (if (vector? calibration)
                   (fn [angle] (/ (+ (first calibration) (* (/ angle 180.0) (second calibration))) 255.0))
                   (fn [angle] (/ (- angle (:min-deg calibration))
