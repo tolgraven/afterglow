@@ -27,8 +27,7 @@
         (sort-by (comp str key) values)))
 
 (defn- mapping-plan [options model device-id cue-id schemas]
-  (let [defaults (update (:mapping-policy options {}) :params #(merge {} %1 %2 %3)
-                         (:param-mappings options) (get-in options [:cue-mappings cue-id]))
+  (let [defaults (expressive/profile-defaults options cue-id)
         policy (expressive/policy model device-id cue-id defaults)]
     (expressive/plan schemas (:axes options) (:params policy) (dissoc policy :params))))
 

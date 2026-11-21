@@ -92,6 +92,12 @@
       (when (identifier? id)
         (get entries (if (keyword? id) (subs (str id) 1) (keyword id))))))
 
+(defn profile-defaults
+  "Shared profile-option defaults for a cue, before persisted show policy."
+  [options cue-id]
+  (update (:mapping-policy options {}) :params
+          #(merge {} % (:param-mappings options) (lookup (:cue-mappings options) cue-id))))
+
 (defn policy
   "Resolve captured profile defaults, device settings and cue overrides. Device
   disable is a master expression switch; it never prevents note-off cleanup."
