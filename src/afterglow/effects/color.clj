@@ -48,8 +48,8 @@
      (fn [show snapshot target previous-assignment]
        (if (some? previous-assignment)
          (apply htp-merge (map #(params/resolve-param % show snapshot head)
-                               [previous-assignment resolved])))
-       resolved))))
+                              [previous-assignment resolved]))
+         resolved)))))
 
 (defn build-htp-color-assigners
   "Returns a list of assigners which apply highest-takes-precedence

@@ -8,7 +8,7 @@
             [afterglow.rhythm :as rhythm]
             [afterglow.transform :as tf]
             [afterglow.util :as util]
-            [com.evocomputing.colors :as colors])
+            [thi.ng.color.core :as colors])
   (:import [javax.vecmath Point3d Vector3d]
            [afterglow.rhythm MetronomeSnapshot]))
 
@@ -102,24 +102,52 @@
 
 (deftest test-fade-color
   (testing "Fading a color assigner blends the colors"
-    (let [red (->Assignment :color :i42 {:some "target values"} (colors/create-color :red))
-          green (->Assignment :color :i42 {:some "target values"} (colors/create-color :green))
-          white (->Assignment :color :i42 {:some "target values"} (colors/create-color :white))]
+    (let [red (->Assignment :color :i42 {:some "target values"} (colors/hsla 0.0 1.0 0.5))
+          green (->Assignment :color :i42 {:some "target values"} (colors/hsla (/ 1.0 3) 1.0 0.5))
+          white (->Assignment :color :i42 {:some "target values"} (colors/hsla 0.0 0.0 1.0))]
       (is (= red (fade-assignment red green 0 @test-show @test-snapshot)))
       (is (= green (fade-assignment red green 1 @test-show @test-snapshot)))
       (is (= red (fade-assignment red green -1 @test-show @test-snapshot)))
       (is (= green (fade-assignment red green 10 @test-show @test-snapshot)))
-      (is (util/float= 60.0 (colors/hue (:value (fade-assignment red green 0.5 @test-show @test-snapshot)))))
-      (is (util/float= 50 (colors/lightness (:value (fade-assignment red green 0.5 @test-show @test-snapshot)))))
-      (is (util/float= 100 (colors/saturation (:value (fade-assignment red green 0.5 @test-show @test-snapshot)))))
-      (is (util/float= 30.0 (colors/hue (:value (fade-assignment red green 0.25 @test-show @test-snapshot)))))
-      (is (util/float= 90 (colors/hue (:value (fade-assignment red green 0.75 @test-show @test-snapshot)))))
+      (is (util/float= (/ 1.0 6) (colors/hue (:value (fade-assignment red green 0.5 @test-show @test-snapshot)))))
+      (is (util/float= 0.5 (colors/luminance (:value (fade-assignment red green 0.5 @test-show @test-snapshot)))))
+      (is (util/float= 1.0 (colors/saturation (:value (fade-assignment red green 0.5 @test-show @test-snapshot)))))
+      (is (util/float= (/ 1.0 12) (colors/hue (:value (fade-assignment red green 0.25 @test-show @test-snapshot)))))
+      (is (util/float= 0.25 (colors/hue (:value (fade-assignment red green 0.75 @test-show @test-snapshot)))))
       (is (util/float= 0.0 (colors/hue (:value (fade-assignment red white 0.5 @test-show @test-snapshot)))))
-      (is (util/float= 75.0 (colors/lightness (:value (fade-assignment red white 0.5 @test-show @test-snapshot)))))
+      (is (util/float= 0.75 (colors/luminance (:value (fade-assignment red white 0.5 @test-show @test-snapshot)))))
       (is (util/float= 0.0 (colors/hue (:value (fade-assignment red nil 0.9 @test-show @test-snapshot)))))
-      (is (util/float= 5.0 (colors/lightness (:value (fade-assignment red nil 0.9 @test-show @test-snapshot)))))
-      (is (util/float= 120 (colors/hue (:value (fade-assignment nil green 0.02 @test-show @test-snapshot)))))
-      (is (util/float= 1.0 (colors/lightness (:value (fade-assignment nil green 0.02 @test-show @test-snapshot))))))))
+      (is (util/float= 0.05 (colors/luminance (:value (fade-assignment red nil 0.9 @test-show @test-snapshot)))))
+      (is (util/float= (/ 1.0 3) (colors/hue (:value (fade-assignment nil green 0.02 @test-show @test-snapshot)))))
+      (is (util/float= 0.01 (colors/luminance (:value (fade-assignment nil green 0.02 @test-show @test-snapshot))))))))
+
+(defn zero-dmx-direction
+  "Independent trigonometric oracle for the calibrated pan/tilt zero position."
+  [head]
+  (let [pan (* Math/PI (/ (- (:pan-center head)) (:pan-half-circle head)))
+        tilt (* Math/PI (/ (- (:tilt-center head)) (:tilt-half-circle head)))
+        v (Vector3d. (* (Math/sin pan) (Math/cos tilt))
+                     (- (Math/sin tilt)) (* (Math/cos pan) (Math/cos tilt)))]
+    (.transform (:rotation head) v)
+    v))
+
+(defn expected-direction-fade [head from to fraction]
+  (let [a (Vector3d. (or from (zero-dmx-direction head)))
+        b (Vector3d. (or to (zero-dmx-direction head)))]
+    (.scale a (- 1.0 fraction))
+    (.scale b fraction)
+    (.add a b)
+    (.normalize a)
+    a))
+
+(defn expected-aim-fade [head from to fraction]
+  (let [v (zero-dmx-direction head)
+        default (Point3d. (+ (:x head) (.x v)) (+ (:y head) (.y v)) (+ (:z head) (.z v)))
+        a (Point3d. (or from default)) b (Point3d. (or to default))]
+    (.scale a (- 1.0 fraction))
+    (.scale b fraction)
+    (.add a b)
+    a))
 
 (deftest test-fade-direction
   (testing "Fading a direction assigner moves between the directions"
@@ -136,14 +164,14 @@
              (:value (fade-assignment from to 0.6 @test-show @test-snapshot))))
       (is (= (Vector3d. 0.0, 1.0, 0.0)
              (:value (fade-assignment from to 0.5 @test-show @test-snapshot))))
-      (is (= (Vector3d. -0.679071744760261, 0.6739354942419622, -0.2909854207157071)
+      (is (= (expected-direction-fade fixture (:value from) nil 0.3)
              (:value (fade-assignment from nil 0.3 @test-show @test-snapshot))))
-      (is (= (Vector3d. 0.679071744760261, 0.6739354942419622, -0.29098542071570715)
+      (is (= (expected-direction-fade fixture nil (:value to) 0.7)
              (:value (fade-assignment nil to 0.7 @test-show @test-snapshot))))
-      (is (= (Vector3d. -0.10997491972977708, 0.09250690755105184, -0.9896201236261165)
+      (is (= (expected-direction-fade fixture (:value from) nil 0.9)
              (:value (fade-assignment from nil 0.9 @test-show @test-snapshot))))
       (is (= :direction (:kind (fade-assignment from nil 0.9 @test-show @test-snapshot))))
-      (is (= (Vector3d. 0.020407013973550377, 0.002759527209833684, -0.9997879469118747)
+      (is (= (expected-direction-fade fixture nil (:value to) 0.02)
              (:value (fade-assignment nil to 0.02 @test-show @test-snapshot))))
       (is (= :direction (:kind (fade-assignment nil to 0.02 @test-show @test-snapshot)))))))
 
@@ -162,14 +190,14 @@
              (:value (fade-assignment from to 0.6 @test-show @test-snapshot))))
       (is (= (Point3d. 0.0, 3.0, 1.5)
              (:value (fade-assignment from to 0.5 @test-show @test-snapshot))))
-      (is (= (Point3d. -0.36471999999999993, 3.1890404558070613, 0.36385172396890036)
+      (is (= (expected-aim-fade fixture (:value from) nil 0.3)
              (:value (fade-assignment from nil 0.3 @test-show @test-snapshot))))
-      (is (= (Point3d. 1.03528, 1.7890404558070614, 1.0638517239689003)
+      (is (= (expected-aim-fade fixture nil (:value to) 0.7)
              (:value (fade-assignment nil to 0.7 @test-show @test-snapshot))))
-      (is (= (Point3d. 0.9058400000000001, 1.5671213674211841, -0.9084448280932987)
+      (is (= (expected-aim-fade fixture (:value from) nil 0.9)
              (:value (fade-assignment from nil 0.9 @test-show @test-snapshot))))
       (is (= :aim (:kind (fade-assignment from nil 0.9 @test-show @test-snapshot))))
-      (is (= (Point3d. 1.1152480000000002, 1.310865488969734, -1.0580843683682586)
+      (is (= (expected-aim-fade fixture nil (:value to) 0.02)
              (:value (fade-assignment nil to 0.02 @test-show @test-snapshot))))
       (is (= :aim (:kind (fade-assignment nil to 0.02 @test-show @test-snapshot)))))))
 

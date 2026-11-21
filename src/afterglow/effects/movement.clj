@@ -65,12 +65,12 @@
     (when-let [pan-scale (:pan-half-circle head)]
       (let [pan-half-rotations (/ (- pan (:pan-center head)) pan-scale)
             adjust (Transform3D.)]
-        (.rotY adjust (* Math/PI 0.5 pan-half-rotations))
+        (.rotY adjust (* Math/PI pan-half-rotations))
         (.mul rotation adjust)))
     (when-let [tilt-scale (:tilt-half-circle head)]
       (let [tilt-half-rotations (/ (- tilt (:tilt-center head)) tilt-scale)
             adjust (Transform3D.)]
-        (.rotX adjust (* Math/PI 0.5 tilt-half-rotations))
+        (.rotX adjust (* Math/PI tilt-half-rotations))
         (.mul rotation adjust)))
     rotation))
 

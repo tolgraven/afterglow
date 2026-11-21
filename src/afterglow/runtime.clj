@@ -50,7 +50,9 @@
 (defn- evaluate-instance
   [frame instance]
   (let [id (:id instance)
-        input {:frame frame :effect-id id :state (:state instance)
+        input {:frame frame :effect-id id
+               :instance (or (:instance instance) (dissoc instance :step))
+               :state (:state instance)
                :assignments [] :intents [] :done? false}
         result (try
                  ((:step instance) input)
@@ -89,11 +91,13 @@
   :effects vector. Each instance requires :id, numeric finite :priority,
   nonnegative integer :order (launch order), :state, and a pure :step function.
 
-  A step takes a map with :frame, :effect-id, :state, :assignments [], :intents []
+  A step takes a map with :frame, :effect-id, :instance, :state, :assignments [], :intents []
   and :done? false. It returns that map with updated :state, assignment/intent
   vectors, and a boolean :done?. Compose steps with ordinary functions such as
   comp or ->. Only these four output fields are consumed; the frame and identity
-  remain owned by the caller. All inputs/state/output data must be immutable.
+  remain owned by the caller. :instance is the descriptor's explicit :instance
+  data when present, otherwise the descriptor without its step function.
+  All inputs/state/output data must be immutable.
   The kernel validates shape, but cannot prove that arbitrary user functions
   are pure or that data contains no mutable Java objects.
 

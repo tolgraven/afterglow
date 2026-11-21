@@ -17,9 +17,8 @@
                              (:exclusions options)
                              (assoc :exclusions (mapv qualified-lib (:exclusions options))))])))
                  (:dependencies project))]
-  ;; The historical Sonatype 8.0.0-SNAPSHOT is no longer resolvable. Tests
-  ;; use its stable release; application project.clj is deliberately unchanged.
-  (prn (cond-> {:deps (assoc-in deps ['org.deepsymmetry/beat-link :mvn/version] "8.0.0")
+  ;; The application manifest pins the released Beat Link dependency.
+  (prn (cond-> {:deps deps
                 :mvn/repos (into {} (map (fn [[id url]] [id {:url url}]))
                                  (:repositories project))}
          source-root (assoc :paths ["." "test" "dev"
