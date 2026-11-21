@@ -268,6 +268,89 @@
 
 (defn field [type components values] {:type type :components components :values (double-array values)})
 
+(defn caught-exception [f]
+  (try (f) nil (catch Exception error error)))
+
+(def source-a {:instance-id "a" :effect-id :color :effect-version 1 :cue-id :left})
+(def source-b {:instance-id "b" :effect-id :movement :effect-version 2 :cue-id :right})
+(defn sourced [source & assignments]
+  {:kind :assignments :source source :assignments (vec assignments)})
+
+(deftest contribution-failures-identify-the-current-source-and-retain-cause
+  (let [good (sourced source-a (assignment :rgb :red 0.75))]
+    (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]
+            bad [(sourced source-b (assignment :rgb :red 0.5 :add))
+                 (sourced source-b (assignment :missing :red 0.1))
+                 (sourced source-b (assignment :rgb :red 1.1))
+                 {:kind :assignments :source source-b :assignments nil}
+                 {:kind :unknown :source source-b}
+                 {:kind :batch :source source-b
+                  :batch {:target-ids [:rgb] :outputs {:red (field :number 1 [Double/NaN])}}}
+                 {:kind :batch :source source-b
+                  :batch {:target-ids [:rgb] :outputs {:red (field :number 1 [0.1 0.2])}}}
+                 {:kind :batch :source source-b
+                  :batch {:target-ids [:rgb] :blend :add :outputs {:red (field :number 1 [0.5])}}}]]
+      (let [error (caught-exception #(frame/resolve-contributions [rgb] [good bad] options))
+            cause (ex-cause error)]
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (identical? source-b (:effect-source (ex-data error))))
+        (is (= :afterglow.render.frame/invalid-frame (:type (ex-data error))))
+        (is (= (dissoc (ex-data error) :effect-source) (ex-data cause)))
+        (is (= (ex-message cause) (ex-message error)))))))
+
+(deftest exact-arithmetic-failure-retains-source-and-original-exception
+  (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]]
+    (let [blocks [(sourced source-a (assignment :moving :focus 1/3))
+                  (sourced source-b (assignment :moving :focus 0.1M :add))]
+          error (caught-exception #(frame/resolve-contributions [moving] blocks options))]
+      (is (instance? clojure.lang.ExceptionInfo error))
+      (is (instance? ArithmeticException (ex-cause error)))
+      (is (= source-b (:effect-source (ex-data error))))
+      (is (= (ex-data (ex-cause error)) (not-empty (dissoc (ex-data error) :effect-source)))))))
+
+(deftest geometric-failure-follows-effective-positive-opacity-source
+  (let [good-aim (assignment :moving :aim [1.0 2.0 4.0])
+        bad-aim (assignment :moving :aim [1.0 2.0 3.0])
+        direction (assignment :moving :direction [1.0 0.0 0.0])
+        cases [[[(sourced source-a good-aim) (sourced source-b bad-aim)] source-b]
+               [[(sourced source-a bad-aim) (sourced source-b direction)] source-a]
+               [[(sourced source-a bad-aim) (sourced source-b (assoc good-aim :opacity 0))] source-a]
+               [[(sourced source-a good-aim)
+                 (sourced source-b (assoc (assignment :moving :aim [1.0 2.0 2.0]) :opacity 0.5))] source-b]
+               [[(sourced source-a direction)
+                 (sourced source-b (assoc (assignment :moving :direction [-1.0 0.0 0.0]) :opacity 0.5))] source-b]
+               [[(sourced source-a good-aim)
+                 {:kind :batch :source source-b
+                  :batch {:target-ids [:moving] :outputs {:aim (field :vec3 3 [1.0 2.0 3.0])}}}] source-b]
+               [[(sourced source-a good-aim) (sourced nil bad-aim)] nil]]]
+    (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]
+            [blocks expected-source] cases]
+      (let [error (caught-exception #(frame/resolve-contributions [moving] blocks options))]
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (= expected-source (:effect-source (ex-data error))))
+        (is (= :afterglow.render.frame/invalid-frame (:type (ex-data error))))
+        (is (re-find #"finite nonzero distance" (ex-message error)))))
+    (doseq [options [{} {:include-values? false :compact-values? true}]
+            blocks [[(sourced source-a bad-aim) (sourced source-b good-aim)]
+                    [(sourced source-a (assoc bad-aim :opacity 0))]
+                    [(sourced source-a good-aim) (sourced source-b (assignment :moving :direction [0 0 0]))]]]
+      (let [with-source (frame/resolve-contributions [moving] blocks options)
+            without-source (frame/resolve-contributions [moving] (mapv #(dissoc % :source) blocks) options)]
+        (is (= (buffer-values without-source) (buffer-values with-source)))
+        (is (= (:values without-source) (:values with-source)))
+        (when (:compact with-source)
+          (is (= (frame/project-compact (:compact without-source)) (frame/project-compact (:compact with-source)))))))))
+
+(deftest global-render-errors-do-not-blame-effect-provenance
+  (let [blocks [(sourced source-a (assignment :moving :aim [1 2 4]))]]
+    (doseq [fixtures [[moving] [(assoc moving :address 0)]]
+            options [{:master 2} {:previous-values {:moving {:pan Double/NaN}}}
+                     {:previous-compact {:count 1 :target-order [:moving] :fields {}}}]
+            mode [{} {:include-values? false :compact-values? true}]]
+      (let [error (caught-exception #(frame/resolve-contributions fixtures blocks (merge options mode)))]
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (not (contains? (ex-data error) :effect-source)))))))
+
 (deftest typed-batches-preserve-layering-target-order-and-preview
   (let [b (assoc rgb :id :b :address 10)
         patch (frame/compile-patch [rgb b])
