@@ -29,7 +29,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
-        run: xvfb-run -a lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test
+        run: xvfb-run -a lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test afterglow.render.gpu-session-test
       - name: Exercise macOS offscreen OpenGL
         if: runner.os == 'macOS'
-        run: lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test
+        run: lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test afterglow.render.gpu-session-test
