@@ -32,8 +32,8 @@
             [overtone.osc :as osc]
             [taoensso.timbre :as timbre])
   (:import [afterglow.effects Effect]
-           [javax.media.j3d Transform3D]
-           [javax.vecmath Point3d Vector3d]))
+           [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Point3d Vector3d]))
 
 (defonce ^{:doc "Allows commands to be sent to the instance of
   Pangolin Beyond running alongside this light show, in order to
@@ -1103,7 +1103,7 @@
   below and in front of another."
   [move-key reference-key color]
   (fx/scene "Cross scene"
-            (move/aim-effect "Cross" (javax.vecmath.Point3d. (:x (first (show/fixtures-named reference-key))) 0.0 0.2)
+            (move/aim-effect "Cross" (org.jogamp.vecmath.Point3d. (:x (first (show/fixtures-named reference-key))) 0.0 0.2)
                              (show/fixtures-named move-key))
             (color-fx/color-effect "Cross color" color (show/fixtures-named move-key) :include-color-wheels? true)))
 

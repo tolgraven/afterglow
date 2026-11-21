@@ -9,13 +9,13 @@
             [afterglow.web.session :as session]
             [clojure.java.browse :as browse]
             [clojure.tools.cli :refer [parse-opts]]
-            [clojure.tools.nrepl.server :as nrepl]
+            [nrepl.server :as nrepl]
             [environ.core :refer [env]]
             [ola-clojure.ola-client :as ola-client]
             [org.httpkit.server :as http-kit]
             [overtone.osc :as osc]
             [selmer.parser :as parser]
-            [taoensso.timbre.appenders.3rd-party.rotor :as rotor]
+            [taoensso.timbre.appenders.community.rotor :as rotor]
             [taoensso.timbre :as timbre])
   (:import [java.net InetAddress]
            [org.deepsymmetry.beatlink DeviceFinder])

@@ -21,8 +21,8 @@
   (:import (afterglow.effects Effect)
            (afterglow.effects.dimmer Master)
            (afterglow.rhythm Metronome)
-           (javax.vecmath Point3d Vector3d)
-           (javax.media.j3d Transform3D)))
+           (org.jogamp.vecmath Point3d Vector3d)
+           (org.jogamp.java3d Transform3D)))
 
 (def default-down-beat-color
   "The default color for [[metronome-effect]] to flash on the down

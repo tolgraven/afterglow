@@ -5,16 +5,16 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        java: ['17', '21']
+        java: ['17', '21', '25']
         suite: [pure, parity]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
-      - uses: DeLaGuardo/setup-clojure@13.0
+      - uses: DeLaGuardo/setup-clojure@13.7.0
         with:
-          cli: 1.11.1.1435
+          cli: 1.12.7.1681
       - name: Run explicit test lane
         run: ./bin/test "${{ matrix.suite }}"

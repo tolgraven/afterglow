@@ -13,8 +13,8 @@
             [com.evocomputing.colors :as colors]
             [taoensso.timbre :as timbre :refer [debug]])
   (:import [afterglow.effects Assigner Effect]
-           [javax.media.j3d Transform3D]
-           [javax.vecmath Point3d Vector3d Vector2d]))
+           [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Point3d Vector3d Vector2d]))
 
 (defn find-moving-heads
   "Returns all heads of the supplied fixtures which are capable of

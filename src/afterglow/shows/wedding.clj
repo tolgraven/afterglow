@@ -30,8 +30,8 @@
             [com.evocomputing.colors :as colors :refer [color-name create-color hue adjust-hue]]
             [taoensso.timbre :as timbre])
   (:import [afterglow.effects Effect]
-           [javax.media.j3d Transform3D]
-           [javax.vecmath Point3d Vector3d]))
+           [org.jogamp.java3d Transform3D]
+           [org.jogamp.vecmath Point3d Vector3d]))
 
 (defonce ^{:doc "Allows effects to set variables in the running show."}
   var-binder
