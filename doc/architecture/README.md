@@ -1,8 +1,11 @@
 # Architecture migration
 
-The cross-repository program lives in the sibling tolglow checkout:
+Afterglow owns the rendering path from ordered effect contributions to physical
+fixture channels. Tolglow supplies show configuration and authored effects.
 
-* [Named GPU fixture fields](numeric-shader-fields.md)
+* [Calibrated moving-head rotation after effect blending](moving-head-shaders.md#render-movement-after-effect-blending)
+* [Named fixture field expressions and their GLSL layout](numeric-shader-fields.md)
+* [Native execution and GPU readback for fixture fields](native-expression-shaders.md)
 * [Physical output and RDM](physical-output.md)
 * [Documentation index](../../../tolglow/docs/README.md)
 * [Current code survey](../../../tolglow/docs/codebase-survey.md)
