@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+suite="${1:-pure}"
+if (( $# > 1 )) || [[ "$suite" != pure && "$suite" != parity ]]; then
+  echo 'Usage: bin/test [pure|parity]' >&2
+  exit 2
+fi
+if [[ "$suite" == parity ]]; then
+  parity_deps=$(clojure -M dev/parity_deps.clj project.clj)
+  exec clojure -Sdeps "$parity_deps" -M:test parity
+fi
+exec clojure -M:test pure

@@ -37,7 +37,7 @@
   "Create a set of appenders which rotate the file at the specified path."
   [path]
   {:rotor (rotor/rotor-appender {:path path
-                                 :max-size 100000
+                                 :max-size 10000000 ;was set to just 100kb... thats like 10 stacktraces lol
                                  :backlog 5})})
 
 (defonce ^{:private true

@@ -36,9 +36,9 @@
                            value)]
       (if-let [fine-index (:fine-index channel)]
         (do
-          (aset levels (:index channel) (ubyte adjusted-value))
-          (aset levels fine-index (ubyte (math/round (* 255 (- adjusted-value (int adjusted-value)))))))
-        (aset levels (:index channel) (ubyte (math/round adjusted-value)))))))
+          (aset-byte levels (:index channel) (ubyte adjusted-value))
+          (aset-byte levels fine-index (ubyte (math/round (* 255 (- adjusted-value (int adjusted-value)))))))
+        (aset-byte levels (:index channel) (ubyte (math/round adjusted-value)))))))
 
 (defn build-channel-assigner
   "Returns an assigner which applies the specified assignment function to the supplied channel."
@@ -227,12 +227,13 @@
     (math/round (+ (:start function-spec) (* (/ percent 100) range)))))
 
 ;; Resolves the assignment of a level to a named function on a head or fixture.
-(defmethod fx/resolve-assignment :function [assignment show snapshot buffers]
+(defmethod fx/resolve-assignment :function [{:keys [target target-id value]} show snapshot buffers]
   ;; Resolve in case it is frame dynamic
-  (let [target (:target assignment)
-        resolved (params/resolve-param (:value assignment) show snapshot target)
-        [_ function-key] (:target-id assignment)
+  (let [resolved (params/resolve-param value show snapshot target)
+        [_ function-key] target-id
+        id-key (keyword (str (name function-key) "-" (:id target)))
         [channel function-spec] (function-key (:function-map target))]
+    (swap! (:movement *show*) #(assoc-in % [:current id-key] resolved))
     (apply-channel-value buffers channel (function-percentage-to-dmx resolved function-spec))))
 
 ;; Fades between two assignments to a function. Because different functions often share the same channel,

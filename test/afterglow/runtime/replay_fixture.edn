@@ -1,0 +1,1918 @@
+{:recording
+ {:schema-version 1,
+  :metadata
+  {:compiler :test-ir-program-v1,
+   :renderer :mixed-cpu-compact-v1,
+   :purpose
+   "Deterministic seeded new-runtime lifecycle; no legacy or hardware claim"},
+  :initial
+  {:model
+   {:transport
+    {:bpm 120,
+     :playing? true,
+     :beat 0.0,
+     :meter {:beats-per-bar 4, :bars-per-phrase 4}},
+    :epoch 0,
+    :revision 0,
+    :registry {:effects {}, :cues {}, :fixtures {}, :versions {}},
+    :variables {},
+    :pages {},
+    :instances {},
+    :control
+    {:next-instance 0,
+     :next-order 0,
+     :history-limit 1024,
+     :history {},
+     :history-order []},
+    :show-id :recorded,
+    :master 1.0,
+    :time-ms 0,
+    :rig
+    {:fixtures
+     [{:id :left,
+       :position [0.0 1.0 0.0],
+       :universe 1,
+       :address 511,
+       :channels {:red 1, :green 2, :blue 3, :white 4},
+       :rgbw-policy :none}
+      {:id :right,
+       :position [1.0 1.0 0.0],
+       :universe 2,
+       :address 10,
+       :channels {:red 1, :green 2, :blue 3, :white 4},
+       :rgbw-policy :none}]},
+    :blackout? false},
+   :output nil},
+  :initial-digest
+  "6dd4990e9e7f344d9e01645f90d087ad04db4f9627f74ba9284c5250191ae0fa",
+  :steps
+  [{:kind :command,
+    :command
+    {:command-id :base,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :registry/publish,
+     :kind :effects,
+     :definition {:id :base, :version 1, :program :solid}},
+    :expected
+    {:model-digest
+     "beb811c7db0fcb81212c8cfdeb653d075013436df07def2ad1c30381ecaeae0f",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances {},
+     :ack
+     {:command-id :base,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 1,
+      :status :accepted,
+      :id :base,
+      :version 1},
+     :events
+     [{:type :registry/published,
+       :kind :effects,
+       :id :base,
+       :version 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :noise,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :registry/publish,
+     :kind :effects,
+     :definition
+     {:id :noise,
+      :version 1,
+      :program :seeded,
+      :seed 42,
+      :initial-state {:frames 0, :rng 42},
+      :gain 1.0,
+      :params
+      {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+      :release-duration-ms 50}},
+    :expected
+    {:model-digest
+     "d16a903b29bb2c8089a2efee80f2ba20ae372ab668feb79e688bc04942c523d4",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances {},
+     :ack
+     {:command-id :noise,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 2,
+      :status :accepted,
+      :id :noise,
+      :version 1},
+     :events
+     [{:type :registry/published,
+       :kind :effects,
+       :id :noise,
+       :version 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :cue-base,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/put,
+     :cue {:id :base, :effect-id :base, :priority 0}},
+    :expected
+    {:model-digest
+     "85db6a5df2a656816b128e47cee6aafa8294027875ba3037df706d6ddadef177",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances {},
+     :ack
+     {:command-id :cue-base,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 3,
+      :status :accepted,
+      :id :base,
+      :version 1},
+     :events
+     [{:type :registry/published,
+       :kind :cues,
+       :id :base,
+       :version 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :cue-preserve,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/put,
+     :cue
+     {:id :preserve,
+      :effect-id :noise,
+      :priority 5,
+      :reload-policy :preserve-state}},
+    :expected
+    {:model-digest
+     "c20724b84e449a70ea06310865f54c5f9ec3a17b3f58433ceded14968c057a8d",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances {},
+     :ack
+     {:command-id :cue-preserve,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 4,
+      :status :accepted,
+      :id :preserve,
+      :version 1},
+     :events
+     [{:type :registry/published,
+       :kind :cues,
+       :id :preserve,
+       :version 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :cue-pinned,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/put,
+     :cue {:id :pinned, :effect-id :noise, :priority 5}},
+    :expected
+    {:model-digest
+     "f88d05a2fdd7601428f02a28de9446b7b831a6435d937543250791509673faa9",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances {},
+     :ack
+     {:command-id :cue-pinned,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 5,
+      :status :accepted,
+      :id :pinned,
+      :version 1},
+     :events
+     [{:type :registry/published,
+       :kind :cues,
+       :id :pinned,
+       :version 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :cue-restart,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/put,
+     :cue
+     {:id :restart,
+      :effect-id :noise,
+      :priority 9,
+      :reload-policy :restart}},
+    :expected
+    {:model-digest
+     "b631fd9f5119eaaff4fefe68692dfc52e9cc67afa0c310c69b72f0308b51891d",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances {},
+     :ack
+     {:command-id :cue-restart,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 6,
+      :status :accepted,
+      :id :restart,
+      :version 1},
+     :events
+     [{:type :registry/published,
+       :kind :cues,
+       :id :restart,
+       :version 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :launch-base,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :base,
+     :time-ms 0.0},
+    :expected
+    {:model-digest
+     "d6c84dccebe655ce15dcb504de513c4a6b601e3f59dad8bf60205a6ee0dd82df",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :launch-base,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 7,
+      :status :accepted,
+      :instance-id "0:1"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition {:id :base, :version 1, :program :solid},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :pinned,
+        :cue-id :base,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :launch-mode :persistent,
+        :started-at-ms 0.0,
+        :effect-version 1,
+        :priority 0,
+        :id "0:1",
+        :release-duration-ms 0,
+        :order 0,
+        :effect-id :base,
+        :started-at-beat 0.0}}]}}
+   {:kind :command,
+    :command
+    {:command-id :launch-preserve,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :preserve,
+     :time-ms 0.0},
+    :expected
+    {:model-digest
+     "8f326fe0513a57a000463cbfdaca5c15268fdc252e4bc272550449d9546ef6ec",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :launch-preserve,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 8,
+      :status :accepted,
+      :instance-id "0:2"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition
+        {:id :noise,
+         :version 1,
+         :program :seeded,
+         :seed 42,
+         :initial-state {:frames 0, :rng 42},
+         :gain 1.0,
+         :params
+         {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+         :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {:level 0.8},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :preserve-state,
+        :cue-id :preserve,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :launch-mode :persistent,
+        :started-at-ms 0.0,
+        :effect-version 1,
+        :priority 5,
+        :id "0:2",
+        :release-duration-ms 50,
+        :order 1,
+        :effect-id :noise,
+        :started-at-beat 0.0}}]}}
+   {:kind :command,
+    :command
+    {:command-id :launch-pinned,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :pinned,
+     :time-ms 0.0},
+    :expected
+    {:model-digest
+     "d76e81f5d13026eed67d596dc8fc0059eac3ed53ac5a281a369db1ab1d02b35c",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :launch-pinned,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 9,
+      :status :accepted,
+      :instance-id "0:3"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition
+        {:id :noise,
+         :version 1,
+         :program :seeded,
+         :seed 42,
+         :initial-state {:frames 0, :rng 42},
+         :gain 1.0,
+         :params
+         {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+         :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {:level 0.8},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :pinned,
+        :cue-id :pinned,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :launch-mode :persistent,
+        :started-at-ms 0.0,
+        :effect-version 1,
+        :priority 5,
+        :id "0:3",
+        :release-duration-ms 50,
+        :order 2,
+        :effect-id :noise,
+        :started-at-beat 0.0}}]}}
+   {:kind :command,
+    :command
+    {:command-id :launch-restart,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :restart,
+     :time-ms 0.0},
+    :expected
+    {:model-digest
+     "1b22f74731705f7a4bf87f3cdc2d5cd45de3bd454c9902252803f06d07b8d4d8",
+     :output-digest
+     "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :launch-restart,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 10,
+      :status :accepted,
+      :instance-id "0:4"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition
+        {:id :noise,
+         :version 1,
+         :program :seeded,
+         :seed 42,
+         :initial-state {:frames 0, :rng 42},
+         :gain 1.0,
+         :params
+         {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+         :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {:level 0.8},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :restart,
+        :cue-id :restart,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :launch-mode :persistent,
+        :started-at-ms 0.0,
+        :effect-version 1,
+        :priority 9,
+        :id "0:4",
+        :release-duration-ms 50,
+        :order 3,
+        :effect-id :noise,
+        :started-at-beat 0.0}}]}}
+   {:kind :frame,
+    :frame {:time-ms 0.0},
+    :clock {:time-ms 0.0, :beat 0.0},
+    :expected
+    {:model-digest
+     "bde5877403f0d7f4c5128bd7e873f030d455275e170f353ef3b37c2367d6d5b4",
+     :output-digest
+     "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 1},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :sample, :instance-id "0:2", :version 1, :seed 2027382}
+      {:type :sample, :instance-id "0:3", :version 1, :seed 2027382}
+      {:type :sample, :instance-id "0:4", :version 1, :seed 2027382}]}}
+   {:kind :command,
+    :command
+    {:command-id :invalid,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :param/set,
+     :instance-id "0:4",
+     :param :level,
+     :value 2.0},
+    :expected
+    {:model-digest
+     "bde5877403f0d7f4c5128bd7e873f030d455275e170f353ef3b37c2367d6d5b4",
+     :output-digest
+     "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 1},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :invalid,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 10,
+      :status :rejected,
+      :code :invalid-params,
+      :message "Invalid parameters",
+      :details
+      {:errors
+       [{:path [:level],
+         :message "Value does not satisfy parameter schema"}]}},
+     :events []}}
+   {:kind :command,
+    :command
+    {:command-id :adjust,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :param/set,
+     :instance-id "0:4",
+     :param :level,
+     :value 0.4},
+    :expected
+    {:model-digest
+     "75bc7d5aad42ddd498a3f0aa620ab0431a724562c9615c13c2997a81e9a33302",
+     :output-digest
+     "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 1},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.4},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :adjust,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 11,
+      :status :accepted},
+     :events
+     [{:type :param/changed,
+       :instance-id "0:4",
+       :param :level,
+       :value 0.4}]}}
+   {:kind :command,
+    :command
+    {:command-id :adjust,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :param/set,
+     :instance-id "0:4",
+     :param :level,
+     :value 0.4},
+    :expected
+    {:model-digest
+     "75bc7d5aad42ddd498a3f0aa620ab0431a724562c9615c13c2997a81e9a33302",
+     :output-digest
+     "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 1},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.4},
+       :phase :running,
+       :state {:frames 1, :rng 2027382},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :adjust,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 11,
+      :status :accepted},
+     :events []}}
+   {:kind :frame,
+    :frame {:time-ms 100.0},
+    :clock {:time-ms 100.0, :beat 0.2},
+    :expected
+    {:model-digest
+     "a0b5c25c578b668837374d40208732e9b2ba19690f402b13c16cce54929fba7e",
+     :output-digest
+     "3e35feaa7b6fcbffc63b7a454506c02627b25d6b444f974e756113864352a15f",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 2},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 2, :rng 1226992407},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 2, :rng 1226992407},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.4},
+       :phase :running,
+       :state {:frames 2, :rng 1226992407},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :sample, :instance-id "0:2", :version 1, :seed 1226992407}
+      {:type :sample, :instance-id "0:3", :version 1, :seed 1226992407}
+      {:type :sample,
+       :instance-id "0:4",
+       :version 1,
+       :seed 1226992407}]}}
+   {:kind :command,
+    :command
+    {:command-id :reload,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :registry/publish,
+     :kind :effects,
+     :definition
+     {:id :noise,
+      :version 2,
+      :program :seeded,
+      :seed 11,
+      :initial-state {:frames 100, :rng 11},
+      :gain 0.5,
+      :params
+      {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+      :release-duration-ms 50}},
+    :expected
+    {:model-digest
+     "03fef9d886eaa1d634f4cb320b9a9d17291055163d1cc2da320ccd8ea4c30c6b",
+     :output-digest
+     "3e35feaa7b6fcbffc63b7a454506c02627b25d6b444f974e756113864352a15f",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 2},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 2, :rng 1226992407},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 2, :rng 1226992407},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.4},
+       :phase :running,
+       :state {:frames 2, :rng 1226992407},
+       :cue-id :restart,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :reload,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 12,
+      :status :accepted,
+      :id :noise,
+      :version 2},
+     :events
+     [{:type :registry/published,
+       :kind :effects,
+       :id :noise,
+       :version 2}]}}
+   {:kind :frame,
+    :frame {:time-ms 200.0},
+    :clock {:time-ms 200.0, :beat 0.4},
+    :expected
+    {:model-digest
+     "22cf9c49951435300810aa2dfc4cfb3ec17e35e565ffa26f929d2f7e244a7070",
+     :output-digest
+     "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 3},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 3, :rng 551494037},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 3, :rng 551494037},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:params {:level 0.4},
+       :phase :running,
+       :state {:frames 101, :rng 530981},
+       :cue-id :restart,
+       :started-at-ms 200.0,
+       :effect-version 2,
+       :priority 9,
+       :id "0:4",
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.4}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :effect/reloaded,
+       :instance-id "0:2",
+       :from-version 1,
+       :to-version 2,
+       :policy :preserve-state}
+      {:type :sample, :instance-id "0:2", :version 2, :seed 551494037}
+      {:type :sample, :instance-id "0:3", :version 1, :seed 551494037}
+      {:type :effect/reloaded,
+       :instance-id "0:4",
+       :from-version 1,
+       :to-version 2,
+       :policy :restart}
+      {:type :sample, :instance-id "0:4", :version 2, :seed 530981}]}}
+   {:kind :command,
+    :command
+    {:command-id :release,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :instance/end,
+     :instance-id "0:4",
+     :time-ms 200.0},
+    :expected
+    {:model-digest
+     "94e1acf6f0fb85c5947f9e9c185cf35bf2a4e9f434752e752545a4bf64df02a9",
+     :output-digest
+     "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 3},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 3, :rng 551494037},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 3, :rng 551494037},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:release-at-beat 0.4,
+       :params {:level 0.4},
+       :phase :releasing,
+       :state {:frames 101, :rng 530981},
+       :cue-id :restart,
+       :started-at-ms 200.0,
+       :effect-version 2,
+       :priority 9,
+       :id "0:4",
+       :release-at-ms 200.0,
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.4}},
+     :ack
+     {:command-id :release,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 13,
+      :status :accepted,
+      :instance-id "0:4"},
+     :events
+     [{:type :instance/released, :instance-id "0:4", :time-ms 200.0}]}}
+   {:kind :frame,
+    :frame {:time-ms 225.0},
+    :clock {:time-ms 225.0, :beat 0.45},
+    :expected
+    {:model-digest
+     "a2f63fdc07baac5de92d5072c79382d01cccec1e866e52fdb5b9e6cef58a1c68",
+     :output-digest
+     "f637103cc1fb9cd6cf04d534aa1daa0c55f3fa0c5f5f65c10b0e6858dcd13f59",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 4},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 4, :rng 961371815},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 4, :rng 961371815},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:4"
+      {:release-at-beat 0.4,
+       :params {:level 0.4},
+       :phase :releasing,
+       :state {:frames 102, :rng 2008663734},
+       :cue-id :restart,
+       :started-at-ms 200.0,
+       :effect-version 2,
+       :priority 9,
+       :id "0:4",
+       :release-at-ms 200.0,
+       :order 3,
+       :effect-id :noise,
+       :started-at-beat 0.4}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :sample, :instance-id "0:2", :version 2, :seed 961371815}
+      {:type :sample, :instance-id "0:3", :version 1, :seed 961371815}
+      {:type :sample,
+       :instance-id "0:4",
+       :version 2,
+       :seed 2008663734}]}}
+   {:kind :frame,
+    :frame {:time-ms 250.0},
+    :clock {:time-ms 250.0, :beat 0.5},
+    :expected
+    {:model-digest
+     "a3cab902d913797271d0bee0a9491b0b5d9040a870aea8979ec9e08898acf89b",
+     :output-digest
+     "be2a3ee99fa65a2c4b691444bee57b6b3c2ec42f63b6b9a9d00b8dc9d33c7fd2",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 5},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 5, :rng 1404753842},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 5, :rng 1404753842},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :sample, :instance-id "0:2", :version 2, :seed 1404753842}
+      {:type :sample, :instance-id "0:3", :version 1, :seed 1404753842}
+      {:type :instance/finished,
+       :instance-id "0:4",
+       :reason :release-complete}]}}
+   {:kind :command,
+    :command
+    {:command-id :master,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :master/set,
+     :value 0.5},
+    :expected
+    {:model-digest
+     "67813b2f7ac9de6799e070fe6dc5b1d3ce8f850b6162b780edd68bac5477da08",
+     :output-digest
+     "be2a3ee99fa65a2c4b691444bee57b6b3c2ec42f63b6b9a9d00b8dc9d33c7fd2",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 5},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 5, :rng 1404753842},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 5, :rng 1404753842},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :master,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 14,
+      :status :accepted},
+     :events [{:type :master/changed, :value 0.5}]}}
+   {:kind :frame,
+    :frame {:time-ms 300.0},
+    :clock {:time-ms 300.0, :beat 0.6},
+    :expected
+    {:model-digest
+     "c3cafd8950dfae25f5c3cffbd005685ac1baddca23aea01302d773302c0ba8a0",
+     :output-digest
+     "18bd7737bbd267700609ab94f507d1f2b5c0dc0e903b070daa6e5cb59c3ad8a7",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 6},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 6, :rng 2076553157},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 6, :rng 2076553157},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :sample, :instance-id "0:2", :version 2, :seed 2076553157}
+      {:type :sample,
+       :instance-id "0:3",
+       :version 1,
+       :seed 2076553157}]}}
+   {:kind :command,
+    :command
+    {:command-id :blackout,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :blackout/set,
+     :value true},
+    :expected
+    {:model-digest
+     "00c3d1143dabfa601ecae4bce4d4a236f46da97800c54b0715615a2116be108e",
+     :output-digest
+     "18bd7737bbd267700609ab94f507d1f2b5c0dc0e903b070daa6e5cb59c3ad8a7",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 6},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 6, :rng 2076553157},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 6, :rng 2076553157},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :ack
+     {:command-id :blackout,
+      :show-id :recorded,
+      :epoch 0,
+      :revision 15,
+      :status :accepted},
+     :events [{:type :blackout/changed, :value true}]}}
+   {:kind :frame,
+    :frame {:time-ms 350.0},
+    :clock {:time-ms 350.0, :beat 0.7},
+    :expected
+    {:model-digest
+     "50ffd1a87ada0a2b963cabad723e15cd9e22f4435d68975b6e9a0791a9434818",
+     :output-digest
+     "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
+     :instances
+     {"0:1"
+      {:params {},
+       :phase :running,
+       :state {:frames 7},
+       :cue-id :base,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 0,
+       :id "0:1",
+       :order 0,
+       :effect-id :base,
+       :started-at-beat 0.0},
+      "0:2"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 7, :rng 1350734175},
+       :cue-id :preserve,
+       :started-at-ms 0.0,
+       :effect-version 2,
+       :priority 5,
+       :id "0:2",
+       :order 1,
+       :effect-id :noise,
+       :started-at-beat 0.0},
+      "0:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 7, :rng 1350734175},
+       :cue-id :pinned,
+       :started-at-ms 0.0,
+       :effect-version 1,
+       :priority 5,
+       :id "0:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 0.0}},
+     :intents
+     [{:type :sample, :instance-id "0:1", :version 1, :seed nil}
+      {:type :sample, :instance-id "0:2", :version 2, :seed 1350734175}
+      {:type :sample,
+       :instance-id "0:3",
+       :version 1,
+       :seed 1350734175}]}}
+   {:kind :command,
+    :command
+    {:command-id :restart-show,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :show/restart,
+     :time-ms 400.0},
+    :expected
+    {:model-digest
+     "2f7e020f0c1e1ff0ee02003e6e07eaf868672b5f4e26d858bfc9ad9614751ac2",
+     :output-digest
+     "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
+     :instances {},
+     :ack
+     {:command-id :restart-show,
+      :show-id :recorded,
+      :epoch 1,
+      :revision 16,
+      :status :accepted},
+     :events [{:type :show/restarted, :epoch 1}]}}
+   {:kind :command,
+    :command
+    {:command-id :stale-release,
+     :show-id :recorded,
+     :epoch 0,
+     :source {:adapter :test},
+     :op :instance/end,
+     :instance-id "0:2",
+     :time-ms 400.0},
+    :expected
+    {:model-digest
+     "2f7e020f0c1e1ff0ee02003e6e07eaf868672b5f4e26d858bfc9ad9614751ac2",
+     :output-digest
+     "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
+     :instances {},
+     :ack
+     {:command-id :stale-release,
+      :show-id :recorded,
+      :epoch 1,
+      :revision 16,
+      :status :rejected,
+      :code :stale-epoch,
+      :message "Show epoch changed",
+      :details nil},
+     :events []}}
+   {:kind :frame,
+    :frame {:time-ms 400.0},
+    :clock {:time-ms 400.0, :beat 0.8},
+    :expected
+    {:model-digest
+     "b9c84800e419a610682ff2fad9a2c2290a931e08fd15cea0c3e138935a435c72",
+     :output-digest
+     "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
+     :instances {},
+     :intents []}}
+   {:kind :command,
+    :command
+    {:command-id :clear-blackout,
+     :show-id :recorded,
+     :epoch 1,
+     :source {:adapter :test},
+     :op :blackout/set,
+     :value false},
+    :expected
+    {:model-digest
+     "0911242a03ddae91e00514d6fc606d1608313bd97f4d73347711e7ba526d3d3b",
+     :output-digest
+     "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
+     :instances {},
+     :ack
+     {:command-id :clear-blackout,
+      :show-id :recorded,
+      :epoch 1,
+      :revision 17,
+      :status :accepted},
+     :events [{:type :blackout/changed, :value false}]}}
+   {:kind :command,
+    :command
+    {:command-id :one-shot,
+     :show-id :recorded,
+     :epoch 1,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :preserve,
+     :time-ms 450.0,
+     :launch {:mode :one-shot, :duration-ms 100}},
+    :clock {:time-ms 450.0, :beat 0.9},
+    :expected
+    {:model-digest
+     "c7281f38fff65f0a39b8c3bd84fd91c4ee9b28f18b2862b4fd94de805b71d25e",
+     :output-digest
+     "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
+     :instances
+     {"1:1"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :preserve,
+       :started-at-ms 450.0,
+       :effect-version 2,
+       :priority 5,
+       :id "1:1",
+       :order 0,
+       :effect-id :noise,
+       :started-at-beat 0.9}},
+     :ack
+     {:command-id :one-shot,
+      :show-id :recorded,
+      :epoch 1,
+      :revision 18,
+      :status :accepted,
+      :instance-id "1:1"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition
+        {:id :noise,
+         :version 2,
+         :program :seeded,
+         :seed 11,
+         :initial-state {:frames 100, :rng 11},
+         :gain 0.5,
+         :params
+         {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+         :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {:level 0.8},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :preserve-state,
+        :cue-id :preserve,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :duration-ms 100,
+        :launch-mode :one-shot,
+        :started-at-ms 450.0,
+        :effect-version 2,
+        :priority 5,
+        :id "1:1",
+        :release-duration-ms 50,
+        :order 0,
+        :effect-id :noise,
+        :started-at-beat 0.9}}]}}
+   {:kind :frame,
+    :frame {:time-ms 450.0},
+    :clock {:time-ms 450.0, :beat 0.9},
+    :expected
+    {:model-digest
+     "f7d3eb6f4bee03b5db87ff1c23f211288a1eefa7eb5c40a4fd96a74bf8a94b3e",
+     :output-digest
+     "b629de865dceb439ac0a96a9c52834c209f21268a181977cc9b3d6f5072b187c",
+     :instances
+     {"1:1"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 101, :rng 530981},
+       :cue-id :preserve,
+       :started-at-ms 450.0,
+       :effect-version 2,
+       :priority 5,
+       :id "1:1",
+       :order 0,
+       :effect-id :noise,
+       :started-at-beat 0.9}},
+     :intents
+     [{:type :sample, :instance-id "1:1", :version 2, :seed 530981}]}}
+   {:kind :frame,
+    :frame {:time-ms 575.0},
+    :clock {:time-ms 575.0, :beat 1.15},
+    :expected
+    {:model-digest
+     "b081cc61028f40c7c40bec11634feb6dd989f44ecfd3ca55cfc0672e886925a0",
+     :output-digest
+     "f230021b873df8c8c04bfaee57fcb1d3a35eb6fc110e375b02c1b58d0c8ec81a",
+     :instances
+     {"1:1"
+      {:release-at-beat 1.0999999999999999,
+       :params {:level 0.8},
+       :phase :releasing,
+       :state {:frames 102, :rng 2008663734},
+       :cue-id :preserve,
+       :started-at-ms 450.0,
+       :effect-version 2,
+       :priority 5,
+       :id "1:1",
+       :release-at-ms 550.0,
+       :order 0,
+       :effect-id :noise,
+       :started-at-beat 0.9}},
+     :intents
+     [{:type :sample,
+       :instance-id "1:1",
+       :version 2,
+       :seed 2008663734}]}}
+   {:kind :frame,
+    :frame {:time-ms 600.0},
+    :clock {:time-ms 600.0, :beat 1.2},
+    :expected
+    {:model-digest
+     "641f77e0fda1db87b73f050774053af05bb2a81cd8daa45c7fa98516434bf840",
+     :output-digest
+     "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
+     :instances {},
+     :intents
+     [{:type :instance/finished,
+       :instance-id "1:1",
+       :reason :release-complete}]}}
+   {:kind :command,
+    :command
+    {:command-id :fixture-base,
+     :show-id :recorded,
+     :epoch 1,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :base,
+     :time-ms 600.0},
+    :expected
+    {:model-digest
+     "79a297e84717728c6a1943ac3bbc2ca2d2cc152c2b5114d301c1e3f398d23c96",
+     :output-digest
+     "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
+     :instances
+     {"1:2"
+      {:params {},
+       :phase :running,
+       :state {},
+       :cue-id :base,
+       :started-at-ms 600.0,
+       :effect-version 1,
+       :priority 0,
+       :id "1:2",
+       :order 1,
+       :effect-id :base,
+       :started-at-beat 1.2}},
+     :ack
+     {:command-id :fixture-base,
+      :show-id :recorded,
+      :epoch 1,
+      :revision 19,
+      :status :accepted,
+      :instance-id "1:2"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition {:id :base, :version 1, :program :solid},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :pinned,
+        :cue-id :base,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :launch-mode :persistent,
+        :started-at-ms 600.0,
+        :effect-version 1,
+        :priority 0,
+        :id "1:2",
+        :release-duration-ms 0,
+        :order 1,
+        :effect-id :base,
+        :started-at-beat 1.2}}]}}
+   {:kind :command,
+    :command
+    {:command-id :fixture-noise,
+     :show-id :recorded,
+     :epoch 1,
+     :source {:adapter :test},
+     :op :cue/launch,
+     :cue-id :preserve,
+     :time-ms 620.0},
+    :clock {:time-ms 620.0, :beat 1.24},
+    :expected
+    {:model-digest
+     "35f277278dbfe70152e43b0fee0716d8de5411575504f2aa69297525849fa66c",
+     :output-digest
+     "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
+     :instances
+     {"1:2"
+      {:params {},
+       :phase :running,
+       :state {},
+       :cue-id :base,
+       :started-at-ms 600.0,
+       :effect-version 1,
+       :priority 0,
+       :id "1:2",
+       :order 1,
+       :effect-id :base,
+       :started-at-beat 1.2},
+      "1:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {},
+       :cue-id :preserve,
+       :started-at-ms 620.0,
+       :effect-version 2,
+       :priority 5,
+       :id "1:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 1.24}},
+     :ack
+     {:command-id :fixture-noise,
+      :show-id :recorded,
+      :epoch 1,
+      :revision 20,
+      :status :accepted,
+      :instance-id "1:3"},
+     :events
+     [{:type :instance/launched,
+       :instance
+       {:definition
+        {:id :noise,
+         :version 2,
+         :program :seeded,
+         :seed 11,
+         :initial-state {:frames 100, :rng 11},
+         :gain 0.5,
+         :params
+         {:level {:type :number, :default 0.8, :bounds [0.0 1.0]}},
+         :release-duration-ms 50},
+        :system
+        {:opacity 1.0,
+         :restore-opacity 1.0,
+         :paused? false,
+         :clock-offset-ms 0,
+         :clock-offset-beats 0},
+        :params {:level 0.8},
+        :phase :running,
+        :state {},
+        :source {:adapter :test},
+        :reload-policy :preserve-state,
+        :cue-id :preserve,
+        :timing-meter {:beats-per-bar 4, :bars-per-phrase 4},
+        :launch-mode :persistent,
+        :started-at-ms 620.0,
+        :effect-version 2,
+        :priority 5,
+        :id "1:3",
+        :release-duration-ms 50,
+        :order 2,
+        :effect-id :noise,
+        :started-at-beat 1.24}}]}}
+   {:kind :frame,
+    :frame {:time-ms 620.0},
+    :clock {:time-ms 620.0, :beat 1.24},
+    :expected
+    {:model-digest
+     "4053fcb32543b7e07c84477b777fd35d28e443018b690904fb26ea56e1483c5d",
+     :output-digest
+     "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
+     :instances
+     {"1:2"
+      {:params {},
+       :phase :running,
+       :state {:frames 1},
+       :cue-id :base,
+       :started-at-ms 600.0,
+       :effect-version 1,
+       :priority 0,
+       :id "1:2",
+       :order 1,
+       :effect-id :base,
+       :started-at-beat 1.2},
+      "1:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 101, :rng 530981},
+       :cue-id :preserve,
+       :started-at-ms 620.0,
+       :effect-version 2,
+       :priority 5,
+       :id "1:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 1.24}},
+     :intents
+     [{:type :sample, :instance-id "1:2", :version 1, :seed nil}
+      {:type :sample, :instance-id "1:3", :version 2, :seed 530981}]}}
+   {:kind :frame,
+    :frame {:time-ms 720.0},
+    :clock {:time-ms 720.0, :beat 1.44},
+    :expected
+    {:model-digest
+     "6433e2a2da08de6845860ca383618692e68a49078666a707f762a1eff1ad4e16",
+     :output-digest
+     "11973271a8536af7b8d05dd283d76f592988aec751b11c674bba7a08130c4e14",
+     :instances
+     {"1:2"
+      {:params {},
+       :phase :running,
+       :state {:frames 2},
+       :cue-id :base,
+       :started-at-ms 600.0,
+       :effect-version 1,
+       :priority 0,
+       :id "1:2",
+       :order 1,
+       :effect-id :base,
+       :started-at-beat 1.2},
+      "1:3"
+      {:params {:level 0.8},
+       :phase :running,
+       :state {:frames 102, :rng 2008663734},
+       :cue-id :preserve,
+       :started-at-ms 620.0,
+       :effect-version 2,
+       :priority 5,
+       :id "1:3",
+       :order 2,
+       :effect-id :noise,
+       :started-at-beat 1.24}},
+     :intents
+     [{:type :sample, :instance-id "1:2", :version 1, :seed nil}
+      {:type :sample,
+       :instance-id "1:3",
+       :version 2,
+       :seed 2008663734}]}}]},
+ :expected-bytes
+ {1 {511 48, 512 10}, 2 {1 5, 2 0, 10 48, 11 10, 12 5, 13 0}}}
