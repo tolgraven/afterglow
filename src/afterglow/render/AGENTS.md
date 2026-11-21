@@ -59,6 +59,12 @@ These namespaces are independent of the legacy show scheduler and perform no I/O
 - `resolve-contributions` is the canonical mixed stream backend. Merge ordinary
   blocks between typed batches in their original order and pack once. The batch
   convenience API must not perform a separate physical render for each layer.
+- Its transport path partitions by target: any geometric or exact-number write
+  keeps that target's entire ordered history in general arithmetic; unrelated
+  pixel batches stay dense. Exact master levels, rich values and excessive dense
+  stride still use the full general oracle. Validate both partitions, pack each
+  target once, and retain compact history by stable ID. Never convert an earlier
+  exact target contribution to doubles merely because a later write is typed.
 - Explicit fixture :footprint reserves the whole physical span, including gaps
   and universe crossings, and covers every coarse/fine offset. Use interval
   validation rather than allocating one entry per reserved channel.

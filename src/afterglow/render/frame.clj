@@ -437,9 +437,10 @@
     (aset-boolean present index true))))
 
 (defn- pack-dense-state
-  [patch ^doubles values ^booleans present {:keys [master blackout? compact-values?]}]
+  [patch ^doubles values ^booleans present {:keys [master blackout? compact-values?] :as options}]
   (let [stride (int (::stride patch)), master (double master)
         fixtures (::dense-fixtures patch), fixture-count (count fixtures)
+        ^objects general (::general-assigned options)
         {:keys [universes indexed]} (create-buffers patch)
         compact (when compact-values? (create-compact patch))
         ^objects compact-arrays (:arrays compact), ^objects compact-masks (:masks compact)
@@ -449,41 +450,43 @@
       (java.util.Arrays/fill ^booleans (aget compact-masks 5) true)
       (java.util.Arrays/fill ^booleans (aget compact-masks 6) true))
     (dotimes [index fixture-count]
-      (let [^DenseFixture fixture (nth fixtures index)
-            base (* stride index)
-            dimmer (if (aget present (+ base 3)) (aget values (+ base 3)) (if (.-emitter fixture) 1.0 0.0))
-            intensity (if blackout? 0.0 (* master dimmer))
-            extracted (if (.-extractMin fixture)
-                        (min (aget values base) (min (aget values (inc base)) (aget values (+ base 2)))) 0.0)
-            red (if (aget present (+ base 4)) (aget values (+ base 4)) (- (aget values base) extracted))
-            green (if (aget present (+ base 5)) (aget values (+ base 5)) (- (aget values (inc base)) extracted))
-            blue (if (aget present (+ base 6)) (aget values (+ base 6)) (- (aget values (+ base 2)) extracted))
-            white (if (aget present (+ base 7)) (aget values (+ base 7)) extracted)
-            scale (if (and (not blackout?) (.-dimmer fixture)) 1.0 intensity)
-            channels (.-channels fixture)]
-        (dotimes [channel-index (count channels)]
-          (let [^DenseChannel channel (nth channels channel-index)
-                level (case (.-kind channel)
-                        0 intensity 1 (* scale red) 2 (* scale green)
-                        3 (* scale blue) 4 (* scale white)
-                        5 (* scale (aget values (+ base (.-slot channel))))
-                        (aget values (+ base (.-slot channel))))
-                scatter (.-scatter channel), compact-index (.-compactIndex channel)]
-            (if scatter (pack-scatter! indexed scatter level)
-                (pack-value! universes (.-fallback channel) level))
-            (when (and compact (>= compact-index 0))
-              (aset-double ^doubles (aget compact-arrays (int compact-index)) index level)
-              (aset-boolean ^booleans (aget compact-masks (int compact-index)) index true))))
-        (when compact
-          (aset-double intensities index intensity)
-          (let [color-base (* index 3)]
-            (if (and (not (.-emitter fixture)) (.-dimmer fixture))
-              (let [emission (.-emission fixture)]
-                (dotimes [component 3]
-                  (aset-double colors (+ color-base component) (* intensity (double (nth emission component))))))
-              (do (aset-double colors color-base (* intensity (min 1.0 (+ red white))))
-                  (aset-double colors (inc color-base) (* intensity (min 1.0 (+ green white))))
-                  (aset-double colors (+ color-base 2) (* intensity (min 1.0 (+ blue white))))))))))
+      (if-let [assigned (when general (aget general index))]
+        (pack-target! (nth (:fixtures patch) index) assigned options universes indexed compact)
+        (let [^DenseFixture fixture (nth fixtures index)
+              base (* stride index)
+              dimmer (if (aget present (+ base 3)) (aget values (+ base 3)) (if (.-emitter fixture) 1.0 0.0))
+              intensity (if blackout? 0.0 (* master dimmer))
+              extracted (if (.-extractMin fixture)
+                          (min (aget values base) (min (aget values (inc base)) (aget values (+ base 2)))) 0.0)
+              red (if (aget present (+ base 4)) (aget values (+ base 4)) (- (aget values base) extracted))
+              green (if (aget present (+ base 5)) (aget values (+ base 5)) (- (aget values (inc base)) extracted))
+              blue (if (aget present (+ base 6)) (aget values (+ base 6)) (- (aget values (+ base 2)) extracted))
+              white (if (aget present (+ base 7)) (aget values (+ base 7)) extracted)
+              scale (if (and (not blackout?) (.-dimmer fixture)) 1.0 intensity)
+              channels (.-channels fixture)]
+          (dotimes [channel-index (count channels)]
+            (let [^DenseChannel channel (nth channels channel-index)
+                  level (case (.-kind channel)
+                          0 intensity 1 (* scale red) 2 (* scale green)
+                          3 (* scale blue) 4 (* scale white)
+                          5 (* scale (aget values (+ base (.-slot channel))))
+                          (aget values (+ base (.-slot channel))))
+                  scatter (.-scatter channel), compact-index (.-compactIndex channel)]
+              (if scatter (pack-scatter! indexed scatter level)
+                  (pack-value! universes (.-fallback channel) level))
+              (when (and compact (>= compact-index 0))
+                (aset-double ^doubles (aget compact-arrays (int compact-index)) index level)
+                (aset-boolean ^booleans (aget compact-masks (int compact-index)) index true))))
+          (when compact
+            (aset-double intensities index intensity)
+            (let [color-base (* index 3)]
+              (if (and (not (.-emitter fixture)) (.-dimmer fixture))
+                (let [emission (.-emission fixture)]
+                  (dotimes [component 3]
+                    (aset-double colors (+ color-base component) (* intensity (double (nth emission component))))))
+                (do (aset-double colors color-base (* intensity (min 1.0 (+ red white))))
+                    (aset-double colors (inc color-base) (* intensity (min 1.0 (+ green white))))
+                    (aset-double colors (+ color-base 2) (* intensity (min 1.0 (+ blue white)))))))))))
     (cond-> {:values nil :universes universes :target-order (:target-order patch)}
       compact (assoc :compact (:view compact)))))
 
@@ -620,28 +623,31 @@
        {:target-ids target-ids :target-indices target-indices :columns columns :blend blend :opacity opacity})) batches))
 
 (defn- merge-packed-batches!
-  [patch ^doubles target-values ^booleans target-present batches]
-  (let [stride (int (::stride patch))]
-    (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
-            {:keys [attribute components values slot]} columns]
-      (let [^doubles source values, row-count (count target-ids), components (int components)]
-        (dotimes [row row-count]
-          (let [index (long (if target-indices (aget ^ints target-indices row) row))
-                base (+ (* index stride) (int slot))]
-            (dotimes [component components]
-              (let [value (aget source (+ (* row components) component))]
-                (when-not (and (Double/isFinite value) (<= 0.0 value) (<= value 1.0))
-                  (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
-                (let [destination (+ base component)
-                      before (aget target-values destination)
-                      blended (case blend :replace value :add (+ before value) :max (max before value))
-                      level (if (== 1 opacity) blended (+ before (* opacity (- blended before))))]
-                  (when-not (and (Double/isFinite level) (<= 0.0 level) (<= level 1.0))
-                    (fail! "Blended assignment exceeds its finite attribute range"
-                           {:target-id (nth target-ids row) :attribute attribute :value level}))
-                  (when (pos? opacity)
-                    (aset-double target-values destination level)
-                    (aset-boolean target-present destination true)))))))))))
+  ([patch target-values target-present batches]
+   (merge-packed-batches! patch target-values target-present batches nil))
+  ([patch ^doubles target-values ^booleans target-present batches ^booleans excluded]
+   (let [stride (int (::stride patch))]
+     (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
+             {:keys [attribute components values slot]} columns]
+       (let [^doubles source values, row-count (count target-ids), components (int components)]
+         (dotimes [row row-count]
+           (let [index (long (if target-indices (aget ^ints target-indices row) row))
+                 base (* index stride)]
+             (when-not (and excluded (aget excluded (int index)))
+               (dotimes [component components]
+                 (let [value (aget source (+ (* row components) component))]
+                   (when-not (and (Double/isFinite value) (<= 0.0 value) (<= value 1.0))
+                     (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
+                   (let [destination (+ base (int slot) component)
+                         before (aget target-values destination)
+                         blended (case blend :replace value :add (+ before value) :max (max before value))
+                         level (if (== 1 opacity) blended (+ before (* opacity (- blended before))))]
+                     (when-not (and (Double/isFinite level) (<= 0.0 level) (<= level 1.0))
+                       (fail! "Blended assignment exceeds its finite attribute range"
+                              {:target-id (nth target-ids row) :attribute attribute :value level}))
+                     (when (pos? opacity)
+                       (aset-double target-values destination level)
+                       (aset-boolean target-present destination true)))))))))))))
 
 (defn- merge-packed-assignments!
   [patch ^doubles values ^booleans present assignments]
@@ -664,14 +670,69 @@
      :value (if (= 1 components) (aget ^doubles values row)
                 (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))
 
+(defn- general-targets
+  "A target's entire ordered history must retain general arithmetic when any
+  write uses geometry or exact numbers. Other targets stay in dense storage."
+  [blocks]
+  (reduce (fn [targets block]
+            (case (:kind block)
+              :assignments (into targets (keep #(when-not (packed-assignment? %) (:target-id %)))
+                                 (:assignments block))
+              :batch (let [{:keys [target-ids columns opacity]} (:compiled block)]
+                       (if (or (not (packed-number? opacity))
+                               (some #(geometric-attributes (:attribute %)) columns))
+                         (into targets target-ids) targets)))) #{} blocks))
+
+(defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity]} ^booleans general]
+  (for [row (range (count target-ids))
+        :when (aget general (int (if target-indices (aget ^ints target-indices row) row)))
+        {:keys [attribute components values]} columns]
+    {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity opacity
+     :value (if (= 1 components) (aget ^doubles values row)
+                (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))
+
+(defn- resolve-partitioned
+  [patch blocks options]
+  (let [size (* (int (::stride patch)) (count (:fixtures patch)))
+        values (double-array size), present (boolean-array size)
+        targets (general-targets blocks)]
+    (if (empty? targets)
+      (do (doseq [block blocks]
+            (case (:kind block)
+              :assignments (merge-packed-assignments! patch values present (:assignments block))
+              :batch (merge-packed-batches! patch values present [(:compiled block)])))
+          (pack-dense-state patch values present options))
+      (let [general (boolean-array (count (:fixtures patch)))
+            _ (doseq [id targets :let [fixture (get (:by-id patch) id)] :when fixture]
+                (aset-boolean general (int (::index fixture)) true))
+            assignments
+            (reduce (fn [assignments block]
+                      (case (:kind block)
+                        :assignments
+                        (let [groups (group-by #(contains? targets (:target-id %)) (:assignments block))]
+                          (merge-packed-assignments! patch values present (get groups false))
+                          (into assignments (get groups true)))
+                        :batch
+                        (do (merge-packed-batches! patch values present [(:compiled block)] general)
+                            (into assignments (expand-general-rows (:compiled block) general))))) [] blocks)
+            assigned (reduce-assignments patch assignments)]
+        ;; Mark zero-opacity targets too: their absent attributes and history use
+        ;; the same reference path. Each target is packed once into private output.
+        (dotimes [index (alength general)]
+          (when (and (aget general index) (nil? (aget ^objects assigned index)))
+            (aset ^objects assigned index {})))
+        (pack-dense-state patch values present
+                          (assoc (prepare-previous-compact patch options) ::general-assigned assigned))))))
+
 (defn resolve-contributions
   "Resolve the kernel's ordered mixed contribution stream exactly once.
 
   Blocks are {:kind :assignments :assignments [...]} or {:kind :batch :batch ...}.
   Every block keeps its position; ordinary writes between two batches cannot be
   moved ahead of or behind them. Scalar/color transport frames reduce directly
-  into one owned dense target state, then pack once. Geometry, exact numbers,
-  heterogeneous patches and rich values use the general reference path.
+  into one owned target state, then pack once. Targets using geometry or exact
+  numbers keep general arithmetic without expanding unrelated pixel batches.
+  Heterogeneous patches, exact master levels and rich values use the general path.
   Assignments and batches accept :opacity in [0,1], default 1. Each write is
   previous + opacity * (blend(previous, value) - previous); zero skips the write,
   preserving earlier contributions and absent-attribute defaults. Geometry uses
@@ -695,20 +756,9 @@
                                                (fail! "Assignment contribution needs a vector" {})) block)
                             :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
                             (fail! "Unknown contribution kind" {:kind (:kind block)}))) contributions)
-           dense? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
-                       (every? (fn [block]
-                                 (case (:kind block)
-                                   :assignments (every? packed-assignment? (:assignments block))
-                                   :batch (and (packed-number? (get-in block [:compiled :opacity]))
-                                               (not-any? #(geometric-attributes (:attribute %)) (get-in block [:compiled :columns]))))) blocks))]
-       (if dense?
-         (let [size (* (int (::stride patch)) (count (:fixtures patch)))
-               values (double-array size), present (boolean-array size)]
-           (doseq [block blocks]
-             (case (:kind block)
-               :assignments (merge-packed-assignments! patch values present (:assignments block))
-               :batch (merge-packed-batches! patch values present [(:compiled block)])))
-           (pack-dense-state patch values present options))
+           partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
+       (if partitioned?
+         (resolve-partitioned patch blocks options)
          (resolve-frame patch
                         (into [] (mapcat #(case (:kind %)
                                           :assignments (:assignments %)

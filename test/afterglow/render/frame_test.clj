@@ -353,6 +353,91 @@
     (is (= #{:head :other} (set (keys (:values (frame/portable-frame (assoc initial :values {:head {:pan 0.9}})))))))
     (is (thrown? clojure.lang.ExceptionInfo (frame/portable-frame (dissoc initial :compact))))))
 
+(deftest mixed-pixel-and-moving-targets-preserve-all-contribution-orders
+  (let [pixel (assoc rgb :id :pixel :address 30 :channels {:red 1 :green 2 :blue 3 :white 4}
+                     :rgbw-policy :extract-min)
+        head (assoc moving :address 510 :rotation-deg [0 25 0]
+                    :calibration {:pan {:min-deg -540 :max-deg 540}}
+                    :channels {:pan [1 2] :tilt [3 4] :focus [5 6] :zoom 7
+                               :red 8 :green 9 :blue 10 :white 11 :dimmer 12})
+        other (assoc pixel :id :other :address 50)
+        fixtures [pixel head other]
+        history (frame/resolve-frame [other head pixel] [(assignment :moving :pan 0.98)]
+                                     {:include-values? false :compact-values? true})
+        color-values (double-array [0.25 0.125 0.5 0.125 0.25 0.5 0.25 0.125 0.5])
+        first-batch {:kind :batch :batch {:target-ids [:other :moving :pixel]
+                                          :outputs {:color {:type :vec3 :components 3 :values color-values}
+                                                    :white (field :number 1 [0.125 0.125 0.125])}}}
+        base [{:kind :assignments :assignments [(assignment :moving :pan 0.0)]}
+              first-batch
+              {:kind :assignments :assignments [(assignment :pixel :red 0.5)
+                                                (assignment :moving :focus 0.25)
+                                                (assignment :moving :color [0.125 0.125 0.125] :add)]}
+              ;; Repeated target IDs must retain each target's row order.
+              {:kind :batch :batch {:target-ids [:moving :pixel :moving :pixel]
+                                    :blend :add :opacity 0.5
+                                    :outputs {:red (field :number 1 [0.125 0.125 0.25 0.25])}}}]
+        aim [(assignment :moving :aim [2.0 1.0 5.0]) (assignment :moving :focus 0.75)]
+        geometry-blocks [{:kind :assignments :assignments aim}
+                         {:kind :batch :batch {:target-ids [:moving]
+                                              :outputs {:aim (field :vec3 3 [2.0 1.0 5.0])
+                                                        :focus (field :number 1 [0.75])}}}]]
+    (doseq [geometry geometry-blocks
+            blocks [(into [geometry] base) (conj base geometry)
+                    (into (conj (subvec base 0 2) geometry) (subvec base 2))]
+            opts [{:master 1.0} {:master 0.4} {:blackout? true}]]
+      (let [options (assoc opts :compact-values? true :previous-compact (:compact history))
+            expected (frame/resolve-contributions fixtures blocks options)
+            actual (frame/resolve-contributions fixtures blocks (assoc options :include-values? false))]
+        (is (= (buffer-values expected) (buffer-values actual)))
+        (is (= (frame/project-compact (:compact expected)) (frame/project-compact (:compact actual))))
+        (is (= [:pixel :moving :other] (:target-order actual)))
+        (is (nil? (:values actual)))))
+    (is (= [0.25 0.125 0.5 0.125 0.25 0.5 0.25 0.125 0.5] (vec color-values)))
+    (is (= 0.98 (aget ^doubles (get-in history [:compact :fields :pan :values]) 1)))))
+
+(deftest mixed-general-targets-retain-exact-arithmetic-and-zero-opacity-defaults
+  (let [pixel (assoc rgb :id :pixel :address 20)
+        head (assoc moving :channels {:pan [1 2] :tilt [3 4] :focus [5 6]})
+        fixtures [head pixel]
+        light {:kind :batch :batch {:target-ids [:pixel]
+                                    :outputs {:color (field :vec3 3 [0.5 0.25 0.125])}}}]
+    (doseq [[first-value second-value] [[1/10 7/10] [0.1M 0.7M]]
+            master [1.0 0.5 1/3]]
+      (let [blocks [light {:kind :assignments :assignments [(assignment :moving :focus first-value)]}
+                    {:kind :batch :batch {:target-ids [:moving] :opacity 1/2
+                                          :outputs {:pan (field :number 1 [0.75])}}}
+                    {:kind :assignments :assignments [(assignment :moving :focus second-value :add)]}]
+            expected (frame/resolve-contributions fixtures blocks {:master master :compact-values? true})
+            actual (frame/resolve-contributions fixtures blocks {:master master :include-values? false :compact-values? true})]
+        (is (= [204 0] (bytes-at actual 1 5 6)))
+        (is (= (buffer-values expected) (buffer-values actual)))
+        (is (= (frame/project-compact (:compact expected)) (frame/project-compact (:compact actual))))))
+    (let [blocks [light {:kind :assignments :assignments [(assoc (assignment :moving :aim [1 2 4]) :opacity 0)]}]
+          expected (frame/resolve-contributions fixtures blocks {:compact-values? true})
+          actual (frame/resolve-contributions fixtures blocks {:include-values? false :compact-values? true})
+          saved (buffer-values actual)
+          next-frame (frame/resolve-contributions fixtures [] {:include-values? false :compact-values? true})]
+      (is (= (buffer-values expected) saved))
+      (is (= (frame/project-compact (:compact expected)) (frame/project-compact (:compact actual))))
+      (is (not (contains? (first (frame/project-compact (:compact actual))) :aim)))
+      (aset-byte ^bytes (get-in next-frame [:universes 1]) 19 (byte 42))
+      (aset-double ^doubles (get-in next-frame [:compact :fields :intensity :values]) 1 0.125)
+      (is (= saved (buffer-values actual)))
+      (is (= 1.0 (aget ^doubles (get-in actual [:compact :fields :intensity :values]) 1))))))
+
+(deftest mixed-general-and-dense-inputs-validate-both-partitions
+  (let [fixtures [moving (assoc rgb :address 20)]
+        geometry {:kind :assignments :assignments [(assignment :moving :aim [1 2 4])]}]
+    (doseq [bad [{:kind :batch :batch {:target-ids [:rgb] :outputs {:red (field :number 1 [Double/NaN])}}}
+                {:kind :batch :batch {:target-ids [:moving] :outputs {:focus (field :number 1 [1.01])}}}
+                {:kind :batch :batch {:target-ids [:moving] :outputs {:direction (field :vec3 3 [Double/NaN 1 1])}}}
+                {:kind :assignments :assignments [(assignment :unknown :direction [1 0 0])]}
+                {:kind :assignments :assignments [(assignment :rgb :red 1.1)]}
+                {:kind :assignments :assignments [(assignment :moving :focus 0.8) (assignment :moving :focus 0.8 :add)]}]]
+      (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]]
+        (is (thrown? clojure.lang.ExceptionInfo (frame/resolve-contributions fixtures [geometry bad] options)))))))
+
 (deftest explicit-physical-footprints-reserve-sparse-and-cross-universe-gaps
   (let [sparse {:id :sparse :universe 1 :address 1 :channels {:dimmer [1 4]}}
         gap {:id :gap :universe 1 :address 2 :channels {:dimmer 1}}
