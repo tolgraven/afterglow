@@ -387,6 +387,22 @@
                             (assoc result attribute (aget ^doubles values (int index)))))) previous [:pan :tilt])))
       previous)))
 
+(defn previous-pans
+  "Read the last accepted normalized pan by stable fixture ID, in the requested
+  order. Accepts the same :previous-values and :previous-compact as resolve-frame.
+  A nil entry directs a solver to use the fixture's neutral calibration."
+  [patch target-ids options]
+  (when-not (map? (:previous-values options {}))
+    (fail! "Previous values must be a map keyed by fixture ID" {}))
+  (let [history (prepare-previous-compact patch options)]
+    (mapv (fn [id]
+            (let [fixture (or (get (:by-id patch) id) (fail! "Unknown movement target" {:fixture-id id}))
+                  pan (:pan (previous-for-target history fixture))]
+              (when (and (some? pan) (not (unit? pan)))
+                (fail! "Previous pan must be a normalized finite value" {:fixture-id id :pan pan}))
+              pan))
+          target-ids)))
+
 (defn- pack-target! [fixture assigned {:keys [master blackout? include-values?] :as options} universes indexed compact]
   (let [id (:id fixture)
         source (when-let [^objects sources (::geometry-sources options)]
