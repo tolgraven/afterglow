@@ -1,7 +1,9 @@
 # Functional rendering and expression compilation
 
 Read the repository instructions and Tolglow's implementation contract first.
-These namespaces are independent of the legacy show scheduler and perform no I/O.
+Keep fixture blending, geometry, DMX packing and shader source generation pure.
+The show owns the optional GPU sessions. Their workers own OpenGL calls, fences
+and readback. Effect steps return data to the renderer.
 
 - `frame/compile-patch` validates relative offsets, universe spans and physical
   channel ownership. Reuse its immutable plan until the rig revision changes.
@@ -14,8 +16,8 @@ These namespaces are independent of the legacy show scheduler and perform no I/O
   have dedicated tests. Change these semantics only with explicit migration.
 - Inputs and compiled plans remain immutable. Private scratch arrays/transients
   and fresh returned byte arrays have one owner. Do not retain or mutate output
-  arrays after publishing them to consumers. No atom, global clock or shared pool
-  belongs in these namespaces.
+  arrays after publishing them to consumers. Keep clocks, queues and mutable
+  driver state inside the execution boundary of the session that owns them.
 - `:include-values? false` avoids preview maps. Its dense numeric path must match
   general-path bytes; exact Ratio/BigDecimal inputs and geometry use the general
   path. Keep the dense scratch bounds for heterogeneous fixtures. Request rich

@@ -19,9 +19,11 @@ an intentional, tested contract changes it.
   and codecs. `control/devices/` owns composable sessions and optional transport
   shells. Push 2 source-derived tests do not establish hardware parity; Push 3
   currently supports explicitly configured generic MIDI bindings only.
-- `render/` owns validated fixture packing and the CPU/GLSL expression IR. Keep
-  the CPU oracle, explicit tolerances and privately owned buffers. Basic aiming
-  is not complete fixture photometry or a universal calibration solution.
+- `render/` owns fixture calibration, blending, DMX packing, numeric expression
+  compilation and native GPU execution. Package the moving-head GLSL and WebGL
+  solver in `resources/gpu/`. Tolglow selects the backend in show configuration
+  and consumes the resulting fixture state. Keep the CPU reference, explicit
+  numerical tolerances and privately owned readback buffers.
 - Move effect state out of closures into explicit context. Pure functions return
   next state, assignments and intent data; the boundary owns clocks, RNG and IO.
   Mutable objects inside maps do not become immutable. Never call external
