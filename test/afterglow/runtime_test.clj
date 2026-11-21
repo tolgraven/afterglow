@@ -171,5 +171,27 @@
                                          (mapv #(select-keys % [:id]) jobs)))))))
 
 (deftest empty-frame-has-empty-outputs
-  (is (= {:frame {} :effects [] :assignments [] :intents []}
+  (is (= {:frame {} :effects [] :assignments [] :contributions [] :intents []}
          (runtime/render-frame {:frame {} :effects []}))))
+
+
+(deftest mixed-blocks-retain-middleware-effect-and-worker-order
+  (let [step (fn [ctx]
+               (-> ctx
+                   (update :assignments conj :before)
+                   (runtime/append-contributions [{:kind :batch :batch {:tag (:effect-id ctx)}}])
+                   (update :assignments conj :after)))
+        context (frame (instance :later 2 1 {} step) (instance :earlier 0 2 {} step))
+        result (runtime/render-frame context)]
+    (is (nil? (:assignments result)) "No partial ordinary-only aggregate may escape")
+    (is (= [{:kind :assignments :assignments [:before]}
+            {:kind :batch :batch {:tag :earlier}}
+            {:kind :assignments :assignments [:after]}
+            {:kind :assignments :assignments [:before]}
+            {:kind :batch :batch {:tag :later}}
+            {:kind :assignments :assignments [:after]}] (:contributions result)))
+    (is (= result (runtime/render-frame context #(reverse (mapv %1 %2))))))
+  (doseq [blocks [nil {} [{:kind :unknown}] [{:kind :batch :batch []}]
+                  [{:kind :assignments :assignments nil}]]]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (runtime/render-frame (frame (instance :bad #(assoc % :contributions blocks))))))))

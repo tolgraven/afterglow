@@ -202,7 +202,10 @@
   Supply an explicitly owned bounded compiler cache at the shell if desired.
   Optional map-work follows afterglow.runtime/render-frame's blocking contract.
   Compilation, evaluation or validation failure throws without returning any new
-  model, assignments or intents. No hardware output or external work happens here.
+  model, contributions or intents. :contributions retains ordered typed and
+  ordinary blocks; :assignments is nil if any batch is present. Consumers of a
+  batch compiler must resolve the contribution stream, never just assignments.
+  No hardware output or external work happens here.
 
   Command :revision is preserved; :frame-number advances. Asynchronous shells
   must compare [epoch revision frame-number] before committing a frame, or use a
@@ -242,4 +245,5 @@
                          (:effects evaluated))]
      {:model (assoc model :instances instances :time-ms time-ms
                     :last-frame-time-ms time-ms :last-frame-beat (:beat clock) :frame-number frame-number)
-      :assignments (:assignments evaluated) :intents (:intents evaluated)})))
+      :assignments (:assignments evaluated) :contributions (:contributions evaluated)
+      :intents (:intents evaluated)})))

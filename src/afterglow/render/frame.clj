@@ -61,6 +61,30 @@
                                       (long (if fine (get universe-indices (first fine)) -1))
                                       (long (if fine (second fine) -1)) (double (or inverted-from -1.0))))))
 
+(defn- validate-footprints! [fixtures slots]
+  (when (some #(contains? % :footprint) fixtures)
+    (doseq [fixture fixtures :when (contains? fixture :footprint)]
+      (let [footprint (:footprint fixture)
+            mapped (mapcat (fn [[_ channel]] (remove nil? [(:offset channel) (:fine-offset channel)]))
+                           (:compiled-channels fixture))]
+        (when-not (and (positive-int? footprint) (every? #(<= % footprint) mapped))
+          (fail! "Explicit fixture footprint must be positive and cover every mapped offset"
+                 {:fixture-id (:id fixture) :footprint footprint}))
+        ;; Validate the physical end without allocating one entry per reserved
+        ;; byte; a sparse mode may reserve a large span with few mapped channels.
+        (channel-address fixture footprint)))
+    (let [reserved-ids (into #{} (keep #(when (contains? % :footprint) (:id %))) fixtures)
+          ranges (concat
+                   (for [fixture fixtures :when (contains? fixture :footprint)
+                         :let [start (+ (* (long (:universe fixture)) 512) (dec (:address fixture)))]]
+                     {:fixture-id (:id fixture) :start start :end (+ start (dec (:footprint fixture)))})
+                   (for [{:keys [fixture-id slot]} slots :when (not (contains? reserved-ids fixture-id))
+                         :let [start (+ (* (long (first slot)) 512) (second slot))]]
+                     {:fixture-id fixture-id :start start :end start}))]
+      (doseq [[left right] (partition 2 1 (sort-by :start ranges))]
+        (when (<= (:start right) (:end left))
+          (fail! "Fixture physical footprints overlap" {:left left :right right}))))))
+
 (defn compile-patch
   "Validate and compile fixtures to reusable immutable channel scatter metadata.
 
@@ -70,7 +94,9 @@
   :rgbw-policy is :none or :extract-min (requires a white channel).
   Optional :rotation-deg is [x y z], applied X then Y then Z.
   Axis calibration is {:min-deg a :max-deg b}, or legacy [center half-circle]
-  values in DMX units. Compilation rejects duplicate IDs and channel collisions."
+  values in DMX units. Optional :footprint reserves every physical channel in
+  that span and must cover all mapped coarse/fine offsets. Without it only mapped
+  channels are reserved. Compilation rejects duplicate IDs and all collisions."
   [fixtures]
   (when-not (vector? fixtures) (fail! "Fixtures must be a vector" {:path [:fixtures]}))
   (when-not (= (count fixtures) (count (set (map :id fixtures))))
@@ -123,6 +149,7 @@
         collisions (filter #(> (count (val %)) 1) (group-by :slot slots))]
     (when (seq collisions)
       (fail! "Fixture channels overlap" {:collisions (into {} collisions)}))
+    (validate-footprints! compiled slots)
     (let [universes (vec (sort (set (map (comp first :slot) slots))))
           universe-indices (zipmap universes (range))
           compiled (mapv
@@ -299,9 +326,37 @@
     (dotimes [component 3] (aset-double values (+ base component) (double (nth value component))))
     (aset-boolean valid (int index) true)))
 
-(defn- pack-target! [fixture assigned {:keys [master blackout? previous-values include-values?]} universes indexed compact]
+(defn- prepare-previous-compact [patch options]
+  (if-let [compact (:previous-compact options)]
+    (let [n (:count compact), ids (:target-order compact)]
+      (when-not (and (map? compact) (integer? n) (not (neg? n))
+                     (vector? ids) (= n (count ids)) (map? (:fields compact)))
+        (fail! "Invalid previous compact frame" {}))
+      (doseq [attribute [:pan :tilt]
+              :let [{:keys [values valid type components]} (get-in compact [:fields attribute])]]
+        (when-not (and (= type :number) (= components 1)
+                       (= (class values) (class (double-array 0)))
+                       (= (class valid) (class (boolean-array 0)))
+                       (= n (alength ^doubles values)) (= n (alength ^booleans valid)))
+          (fail! "Invalid previous compact movement field" {:attribute attribute})))
+      (cond-> options
+        (not= ids (:target-order patch)) (assoc ::previous-indices (zipmap ids (range)))))
+    options))
+
+(defn- previous-for-target [options fixture]
+  (let [id (:id fixture), previous (get (:previous-values options) id {})]
+    (if-let [compact (:previous-compact options)]
+      (let [index (if-let [indices (::previous-indices options)] (get indices id) (::index fixture))]
+        (if (nil? index) previous
+            (reduce (fn [result attribute]
+                      (let [{:keys [values valid]} (get-in compact [:fields attribute])]
+                        (if (or (contains? result attribute) (not (aget ^booleans valid (int index)))) result
+                            (assoc result attribute (aget ^doubles values (int index)))))) previous [:pan :tilt])))
+      previous)))
+
+(defn- pack-target! [fixture assigned {:keys [master blackout? include-values?] :as options} universes indexed compact]
   (let [id (:id fixture)
-        assigned (resolve-geometry fixture assigned (get previous-values id))
+        assigned (resolve-geometry fixture assigned (previous-for-target options fixture))
         color (:color assigned [0.0 0.0 0.0])
         has-emitters? (::emitter? fixture)
         dimmer (:dimmer assigned (if has-emitters? 1.0 0.0))
@@ -466,7 +521,9 @@
 
   First argument is a fixture vector or immutable compile-patch result. Options:
   :master [0,1] (default 1), :blackout? (default false), :previous-values for aim
-  continuity. Returned :target-order preserves fixture order. :values includes
+  continuity, or :previous-compact to read pan/tilt history directly from typed
+  fields. History remaps by stable ID when target order changes, without full UI
+  projection. Returned :target-order preserves fixture order. :values includes
   logical attributes, final :channels, and :emitted-color for preview. No buffer
   aliases an earlier call. :include-values? false omits rich preview maps,
   returning :values nil, while producing identical bytes. :compact-values? true
@@ -490,6 +547,7 @@
               (every? packed-assignment? assignments))
        (resolve-packed-only patch assignments options)
        (let [assigned (reduce-assignments patch assignments)
+           options (prepare-previous-compact patch options)
            {:keys [universes indexed]} (create-buffers patch)
            compact (when (:compact-values? options) (create-compact patch))
            values (reduce (fn [values fixture]
@@ -556,56 +614,117 @@
                     (sort-by (comp str key) outputs))]
        {:target-ids target-ids :target-indices target-indices :columns columns :blend blend})) batches))
 
-(defn resolve-batches
-  "Resolve ordered typed CPU/GPU numeric batches without rebuilding assignments.
+(defn- merge-packed-batches!
+  [patch ^doubles target-values ^booleans target-present batches]
+  (let [stride (int (::stride patch))]
+    (doseq [{:keys [target-ids target-indices columns blend]} batches
+            {:keys [attribute components values slot]} columns]
+      (let [^doubles source values, row-count (count target-ids), components (int components)]
+        (dotimes [row row-count]
+          (let [index (long (if target-indices (aget ^ints target-indices row) row))
+                base (+ (* index stride) (int slot))]
+            (dotimes [component components]
+              (let [value (aget source (+ (* row components) component))]
+                (when-not (and (Double/isFinite value) (<= 0.0 value) (<= value 1.0))
+                  (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
+                (let [destination (+ base component)
+                      before (aget target-values destination)
+                      level (case blend :replace value :add (+ before value) :max (max before value))]
+                  (when-not (and (Double/isFinite level) (<= 0.0 level) (<= level 1.0))
+                    (fail! "Blended assignment exceeds its finite attribute range"
+                           {:target-id (nth target-ids row) :attribute attribute :value level}))
+                  (aset-double target-values destination level)
+                  (aset-boolean target-present destination true))))))))))
 
-  Each batch contains :target-ids, :outputs from ir/evaluate-batch, optional
-  :count and :blend (:replace/:max/:add). Output arrays must remain read-only for
-  this call. All data is validated and merged in batch/row order.
+(defn- merge-packed-assignments!
+  [patch ^doubles values ^booleans present assignments]
+  (let [stride (int (::stride patch)), slots (::attribute-slots patch), by-id (:by-id patch)]
+    (doseq [{:keys [target-id attribute value blend] :or {blend :replace} :as assignment} assignments]
+      (let [fixture (get by-id target-id)]
+        (validate-assignment! fixture target-id attribute value blend assignment)
+        (let [base (* stride (int (::index fixture)))]
+          (if (= :color attribute)
+            (dotimes [component 3]
+              (write-packed-assignment! values present (+ base component) (nth value component)
+                                        blend target-id attribute))
+            (write-packed-assignment! values present (+ base (int (get slots attribute))) value
+                                      blend target-id attribute)))))))
 
-  Rendering options match resolve-frame. Use :include-values? false for the
-  dense transport path, optionally :compact-values? true. Rich-map projection,
-  geometry and heterogeneous rigs retain the general path. The dense path avoids
-  one assignment map per head/attribute; it still performs validated CPU fixture
-  resolution and channel packing, and does not submit GPU work."
-  ([fixtures batches] (resolve-batches fixtures batches {}))
-  ([fixtures batches options]
+(defn- expand-batch [{:keys [target-ids columns blend]}]
+  (for [row (range (count target-ids))
+        {:keys [attribute components values]} columns]
+    {:target-id (nth target-ids row) :attribute attribute :blend blend
+     :value (if (= 1 components) (aget ^doubles values row)
+                (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))
+
+(defn resolve-contributions
+  "Resolve the kernel's ordered mixed contribution stream exactly once.
+
+  Blocks are {:kind :assignments :assignments [...]} or {:kind :batch :batch ...}.
+  Every block keeps its position; ordinary writes between two batches cannot be
+  moved ahead of or behind them. Scalar/color transport frames reduce directly
+  into one owned dense target state, then pack once. Geometry, exact numbers,
+  heterogeneous patches and rich values use the general reference path.
+  Options and ownership match resolve-frame. Typed arrays must remain read-only
+  throughout this call; failed validation returns no frame or partial output."
+  ([fixtures contributions] (resolve-contributions fixtures contributions {}))
+  ([fixtures contributions options]
    (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
-         options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)
-         batches (validate-batches patch batches)
-         geometry? (some (fn [batch] (some #(geometric-attributes (:attribute %)) (:columns batch))) batches)]
+         options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)]
      (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
                     (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))
                     (map? (:previous-values options)))
        (fail! "Invalid render options" {:options options}))
-     (if (and (not (:include-values? options)) (not geometry?) (packed-plan? patch) (packed-number? (:master options)))
-       (let [stride (int (::stride patch))
-             size (* stride (count (:fixtures patch)))
-             target-values (double-array size)
-             target-present (boolean-array size)]
-         (doseq [{:keys [target-ids target-indices columns blend]} batches
-                 {:keys [attribute components values slot]} columns]
-           (let [^doubles source values, row-count (count target-ids), components (int components)]
-             (dotimes [row row-count]
-               (let [index (long (if target-indices (aget ^ints target-indices row) row))
-                     base (+ (* index stride) (int slot))]
-                 (dotimes [component components]
-                   (let [value (aget source (+ (* row components) component))]
-                     (when-not (and (Double/isFinite value) (<= 0.0 value) (<= value 1.0))
-                       (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
-                     (let [destination (+ base component)
-                           before (aget target-values destination)
-                           level (case blend :replace value :add (+ before value) :max (max before value))]
-                       (when-not (and (Double/isFinite level) (<= 0.0 level) (<= level 1.0))
-                         (fail! "Blended assignment exceeds its finite attribute range"
-                                {:target-id (nth target-ids row) :attribute attribute :value level}))
-                       (aset-double target-values destination level)
-                       (aset-boolean target-present destination true))))))))
-         (pack-dense-state patch target-values target-present options))
-       (let [assignments (vec (for [{:keys [target-ids columns blend]} batches
-                                   row (range (count target-ids))
-                                   {:keys [attribute components values]} columns]
-                               {:target-id (nth target-ids row) :attribute attribute :blend blend
-                                :value (if (= 1 components) (aget ^doubles values row)
-                                           (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))]
-         (resolve-frame patch assignments options))))))
+     (when-not (vector? contributions) (fail! "Contributions must be an ordered vector" {}))
+     (let [blocks (mapv (fn [block]
+                          (when-not (map? block) (fail! "Invalid contribution block" {}))
+                          (case (:kind block)
+                            :assignments (do (when-not (vector? (:assignments block))
+                                               (fail! "Assignment contribution needs a vector" {})) block)
+                            :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
+                            (fail! "Unknown contribution kind" {:kind (:kind block)}))) contributions)
+           dense? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
+                       (every? (fn [block]
+                                 (case (:kind block)
+                                   :assignments (every? packed-assignment? (:assignments block))
+                                   :batch (not-any? #(geometric-attributes (:attribute %)) (get-in block [:compiled :columns])))) blocks))]
+       (if dense?
+         (let [size (* (int (::stride patch)) (count (:fixtures patch)))
+               values (double-array size), present (boolean-array size)]
+           (doseq [block blocks]
+             (case (:kind block)
+               :assignments (merge-packed-assignments! patch values present (:assignments block))
+               :batch (merge-packed-batches! patch values present [(:compiled block)])))
+           (pack-dense-state patch values present options))
+         (resolve-frame patch
+                        (into [] (mapcat #(case (:kind %)
+                                          :assignments (:assignments %)
+                                          :batch (expand-batch (:compiled %)))) blocks)
+                        options))))))
+
+(defn resolve-batches
+  "Resolve ordered typed batches; convenience form of resolve-contributions.
+  Each batch carries :target-ids, :outputs from ir/evaluate-batch, optional
+  :count and :blend (:replace/:max/:add). Options match resolve-frame."
+  ([fixtures batches] (resolve-batches fixtures batches {}))
+  ([fixtures batches options]
+   (when-not (vector? batches) (fail! "Batches must be an ordered vector" {}))
+   (resolve-contributions fixtures (mapv #(hash-map :kind :batch :batch %) batches) options)))
+
+
+(defn portable-frame
+  "Materialize a completed frame for a portable save boundary, never per tick.
+  Converts all compact targets to ordinary values, preserving movement history,
+  merges any richer values already present, and converts DMX bytes to unsigned
+  vectors. No arrays, compilation, effect evaluation or output IO remain."
+  [frame]
+  (let [compact-values (when (:compact frame)
+                         (into {} (map (juxt :id identity)) (project-compact (:compact frame))))
+        values (merge {} compact-values (:values frame))
+        ids (:target-order frame)]
+    (when-not (and (vector? ids) (every? #(contains? values %) ids) (map? (:universes frame)))
+      (fail! "Portable frame needs complete rich or compact values" {}))
+    {:target-order ids :values values
+     :universes (into (sorted-map)
+                      (map (fn [[universe buffer]] [universe (mapv #(bit-and 255 %) buffer)]))
+                      (:universes frame))}))

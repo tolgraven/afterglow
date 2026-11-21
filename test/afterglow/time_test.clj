@@ -34,3 +34,24 @@
   (is (thrown? clojure.lang.ExceptionInfo (time/start {:beats 1} 0)))
   (is (:done? (time/sample (time/start {:beats 0} {:beat 1}) {:beat 1})))
   (is (false? (:done? (time/sample (time/start {:beats 0} {:beat 1}) {:beat 0})))))
+
+
+(deftest fractional-meter-counts-quarter-note-beats-and-retains-exact-ratios
+  (is (= {:beats-per-bar 7/2 :bars-per-phrase 4}
+         (time/normalize-meter {:beats-per-bar 7/2})))
+  (is (= 7 (time/duration->beats {:bars 2} {:beats-per-bar 7/2})))
+  (is (= 7/4 (time/duration->beats {:bars 1/2} {:beats-per-bar 7/2})))
+  (is (= 28 (time/duration->beats {:phrases 2} {:beats-per-bar 7/2 :bars-per-phrase 4})))
+  (let [timer (time/start {:bars 2} {:beat 8.0 :time-ms 0 :meter {:beats-per-bar 3.5}})]
+    (is (= 7.0 (get-in timer [:duration :value])))
+    (is (= 0.5 (:progress (time/sample timer {:beat 11.5 :time-ms 1000 :bpm 240}))))
+    (is (= 0.5 (:progress (time/sample timer {:beat 11.5 :time-ms 90000 :playing? false}))))
+    (is (false? (:done? (time/sample timer {:beat 14.999 :meter {:beats-per-bar 4}}))))
+    (is (:done? (time/sample timer {:beat 15.0 :meter {:beats-per-bar 4}})))
+    (is (= 3500.0 (time/estimate-ms (:duration timer) 120)))
+    (is (= 1750.0 (time/estimate-ms (:duration timer) 240))))
+  (doseq [beats [0 -1 ##NaN ##Inf "7/8"]]
+    (is (thrown? clojure.lang.ExceptionInfo (time/normalize-meter {:beats-per-bar beats}))))
+  (doseq [bars [0 -1 1/2 2.5 ##NaN ##Inf]]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (time/normalize-meter {:beats-per-bar 3.5 :bars-per-phrase bars})))))

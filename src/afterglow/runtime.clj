@@ -1,9 +1,9 @@
 (ns afterglow.runtime
-  "Experimental, immutable effect evaluation kernel.
+  "Pure effect evaluation kernel for the new control model and show engine.
 
-  This namespace is not connected to afterglow.show or its legacy effect
-  protocols. It establishes a small contract for testing a functional runtime,
-  not a replacement renderer or a claim of legacy behavior parity.
+  Effects return ordered ordinary or typed contributions. The engine coordinates
+  their lifecycle and the render backend resolves fixture output. Old show/effect
+  protocols are not executed here.
 
   Effects are pure functions of a supplied frame snapshot and their own state.
   They describe assignments and external work as data; the owner of the show
@@ -22,8 +22,39 @@
   [result]
   (and (map? result) (contains? result :state)
        (vector? (:assignments result))
+       (or (not (contains? result :contributions)) (vector? (:contributions result)))
        (vector? (:intents result))
        (instance? Boolean (:done? result))))
+
+(defn- validate-contributions! [blocks]
+  (when-not (and (vector? blocks)
+                 (every? (fn [block]
+                           (and (map? block)
+                                (case (:kind block)
+                                  :assignments (vector? (:assignments block))
+                                  :batch (map? (:batch block))
+                                  false))) blocks))
+    (invalid! "Contributions must be ordered assignment or typed batch blocks"
+              {:type ::invalid-contributions})))
+
+(defn append-contributions
+  "Append ordered contribution blocks to an effect context, flushing assignments.
+
+  Blocks are {:kind :assignments :assignments [...]} or {:kind :batch :batch ...}.
+  Ordinary middleware may continue appending to :assignments; those values form
+  the tail after the blocks. Call this helper whenever adding blocks so earlier
+  ordinary contributions keep their exact order. Typed arrays must be privately
+  owned until returned and read-only thereafter. This helper performs no IO."
+  [context blocks]
+  (when-not (vector? (:assignments context))
+    (invalid! "Effect context requires vector assignments" {:type ::invalid-result}))
+  (validate-contributions! blocks)
+  (let [existing (:contributions context [])]
+    (validate-contributions! existing)
+    (assoc context :assignments []
+           :contributions (into (cond-> existing
+                                  (seq (:assignments context))
+                                  (conj {:kind :assignments :assignments (:assignments context)})) blocks))))
 
 (defn- validate-context
   [context]
@@ -53,7 +84,7 @@
         input {:frame frame :effect-id id
                :instance (or (:instance instance) (dissoc instance :step))
                :state (:state instance)
-               :assignments [] :intents [] :done? false}
+               :assignments [] :contributions [] :intents [] :done? false}
         result (try
                  ((:step instance) input)
                  (catch Exception cause
@@ -64,6 +95,7 @@
                 {:type ::invalid-result :effect-id id}))
     ;; Identity comes from the instance, never from the effect's return value.
     {:id id :state (:state result) :assignments (:assignments result)
+     :contributions (:contributions (append-contributions result []))
      :intents (:intents result) :done? (:done? result)}))
 
 (defn- index-results
@@ -94,10 +126,13 @@
   A step takes a map with :frame, :effect-id, :instance, :state, :assignments [], :intents []
   and :done? false. It returns that map with updated :state, assignment/intent
   vectors, and a boolean :done?. Compose steps with ordinary functions such as
-  comp or ->. Only these four output fields are consumed; the frame and identity
-  remain owned by the caller. :instance is the descriptor's explicit :instance
+  comp or ->. Only :state, :assignments, :contributions, :intents and :done? are
+  consumed; the frame and identity remain owned by the caller. :instance is the descriptor's explicit :instance
   data when present, otherwise the descriptor without its step function.
-  All inputs/state/output data must be immutable.
+  Optional :contributions stores ordered assignment/batch blocks; use
+  append-contributions to preserve order when composing with ordinary steps.
+  All inputs/state/output data must be immutable or exclusively owned until
+  return and read-only thereafter (typed numeric result buffers).
   The kernel validates shape, but cannot prove that arbitrary user functions
   are pure or that data contains no mutable Java objects.
 
@@ -109,7 +144,10 @@
 
   Assignment and intent vectors are concatenated by ascending priority, then
   launch order, then original vector position. Per-effect vector order is kept.
-  These are ordered contributions; target blending/DMX packing is a later stage.
+  The returned :contributions stream preserves mixed block ordering. Aggregate
+  :assignments remains a vector for ordinary-only results and is nil when typed
+  batches are present, preventing accidental partial rendering by old consumers.
+  Target blending/DMX packing is a later stage.
   A completed effect's final contributions are included, then it is removed.
   Remaining instances keep their original vector order with updated state.
 
@@ -129,7 +167,9 @@
          ordered (sort-by (fn [[position instance]]
                             [(:priority instance) (:order instance) position])
                           (map-indexed vector instances))
-         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)]
+         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
+         blocks (into [] (mapcat :contributions) contributions)
+         batch? (some #(= :batch (:kind %)) blocks)]
      (assoc context
             :effects (into []
                            (keep (fn [instance]
@@ -137,5 +177,6 @@
                                      (when-not (:done? result)
                                        (assoc instance :state (:state result))))))
                            instances)
-            :assignments (into [] (mapcat :assignments) contributions)
+            :contributions blocks
+            :assignments (when-not batch? (into [] (mapcat :assignments) blocks))
             :intents (into [] (mapcat :intents) contributions)))))

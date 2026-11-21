@@ -56,3 +56,13 @@ These namespaces are independent of the legacy show scheduler and perform no I/O
   equivalent stage in isolation. The IR-through-DMX stage includes compact
   preview and validates every measured buffer; it excludes model/command
   scheduling, worker dispatch, transport and whole-show deadline behavior.
+- `resolve-contributions` is the canonical mixed stream backend. Merge ordinary
+  blocks between typed batches in their original order and pack once. The batch
+  convenience API must not perform a separate physical render for each layer.
+- Explicit fixture :footprint reserves the whole physical span, including gaps
+  and universe crossings, and covers every coarse/fine offset. Use interval
+  validation rather than allocating one entry per reserved channel.
+- :previous-compact supplies pan/tilt history by stable target ID, including rig
+  reordering. Avoid full map projections just to maintain movement history.
+  portable-frame deliberately projects all targets and copies bytes at save time;
+  a bounded browser preview must never become the complete saved output state.

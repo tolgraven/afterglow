@@ -11,14 +11,14 @@ an intentional, tested contract changes it.
   snapshot override is historical; real DJ Link behavior remains unverified.
   `deps.edn` and `bin/test` provide plugin-free headless test entry points.
 - `./bin/test pure` includes the functional model/runtime/control/render and
-  injected device boundaries. `./bin/test legacy` additionally exercises real
-  legacy namespaces, including the explicit bridge. Neither lane activates
+  injected device boundaries. `./bin/test parity` additionally exercises real
+  old-source parity oracles. Neither lane activates
   physical DMX, Art-Net, MIDI, OSC or Push output. Loopback transport tests are
   allowed only with owned startup/cleanup.
 - `runtime.clj` is the pure frame kernel; `runtime/engine.clj` advances the shared
-  model, `executor.clj` owns bounded workers, and `legacy.clj` bridges instances
-  into actual legacy Effects/resolvers. This is working additive integration,
-  not proof that every legacy effect closure or whole show loop is pure/atomic.
+  model and `executor.clj` owns bounded workers. The new runtime must not execute
+  old effect closures through a compatibility adapter. Old source exists only
+  as a feature/functional parity reference; the bridge experiment was removed.
 - `control/` owns semantic commands, validated parameters, pure bindings/views
   and codecs. `control/devices/` owns composable sessions and optional transport
   shells. Push 2 source-derived tests do not establish hardware parity; Push 3
@@ -35,7 +35,7 @@ an intentional, tested contract changes it.
   Define buffer ownership, cancellation/deadline behavior and publication rules.
 - Channel packing, cross-universe addressing, RGBW, movement history and release
   are separate compatibility gates. A green pure lane cannot prove them alone;
-  a narrow bridge test does not replace representative whole-show replay.
+  representative whole-show replay remains required.
 - Use the companion `docs/work-items.edn` for exact disjoint path claims,
   dependencies, acceptance and evidence. Coordinate shared schema changes before
   modifying consumers. Release claims after recording actual verification.

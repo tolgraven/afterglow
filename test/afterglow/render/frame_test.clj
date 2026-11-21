@@ -311,3 +311,64 @@
                (frame/resolve-batches [rgb] [{:target-ids [:rgb] :outputs {:red (field :number 1 [0.8])}}
                                             {:target-ids [:rgb] :blend :add :outputs {:red (field :number 1 [0.8])}}]
                                       {:include-values? false}))))
+
+(deftest mixed-contributions-preserve-interleaved-precedence
+  (let [fixtures [{:id :p :universe 1 :address 1 :position [0 0 0]
+                   :channels {:red 1 :green 2 :blue 3 :focus 4}}]
+        batch (fn [level blend] {:kind :batch :batch {:target-ids [:p] :blend blend
+                                                     :outputs {:red {:type :number :components 1 :values (double-array [level])}}}})
+        blocks [(batch 0.2 :replace)
+                {:kind :assignments :assignments [{:target-id :p :attribute :red :value 0.1 :blend :add}]}
+                (batch 0.5 :max)
+                {:kind :assignments :assignments [{:target-id :p :attribute :red :value 0.1 :blend :add}]}]
+        expected (frame/resolve-frame fixtures [{:target-id :p :attribute :red :value 0.6}])]
+    (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]]
+      (is (= (mapv vec (vals (:universes expected)))
+             (mapv vec (vals (:universes (frame/resolve-contributions fixtures blocks options)))))))
+    (is (= 0.6 (get-in (frame/resolve-contributions fixtures blocks) [:values :p :channels :red])))
+    (doseq [bad [nil [{:kind :unknown}] [{:kind :assignments :assignments nil}]
+                 [{:kind :batch :batch {:target-ids [:missing] :outputs {}}}]]]
+      (is (thrown? clojure.lang.ExceptionInfo (frame/resolve-contributions fixtures bad))))))
+
+(deftest compact-history-survives-target-reordering-and-portable-save
+  (let [head {:id :head :position [0 0 0] :universe 1 :address 1
+              :calibration {:pan {:min-deg -540 :max-deg 540}}
+              :channels {:pan [1 2] :tilt 3 :dimmer 4}}
+        other (assoc head :id :other :address 10)
+        initial (frame/resolve-frame [head other] [(assignment :head :pan 0.99) (assignment :other :pan 0.01)]
+                                     {:include-values? false :compact-values? true})
+        assignments [(assignment :head :direction [0 0 1]) (assignment :other :direction [0 0 1])]
+        rich-history (frame/portable-frame initial)
+        compact-result (frame/resolve-contributions [other head]
+                                                     [{:kind :assignments :assignments assignments}]
+                                                     {:previous-compact (:compact initial)})
+        rich-result (frame/resolve-frame [other head] assignments {:previous-values (:values rich-history)})]
+    (is (= (:values rich-result) (:values compact-result)))
+    (is (> (get-in compact-result [:values :head :pan]) 0.5))
+    (is (< (get-in compact-result [:values :other :pan]) 0.5))
+    (is (= [:head :other] (:target-order rich-history)))
+    (is (= 0.99 (get-in rich-history [:values :head :pan])))
+    (is (every? #(and (integer? %) (<= 0 % 255)) (get-in rich-history [:universes 1])))
+    (is (not (contains? rich-history :compact)))
+    (is (= #{:head :other} (set (keys (:values (frame/portable-frame (assoc initial :values {:head {:pan 0.9}})))))))
+    (is (thrown? clojure.lang.ExceptionInfo (frame/portable-frame (dissoc initial :compact))))))
+
+(deftest explicit-physical-footprints-reserve-sparse-and-cross-universe-gaps
+  (let [sparse {:id :sparse :universe 1 :address 1 :channels {:dimmer [1 4]}}
+        gap {:id :gap :universe 1 :address 2 :channels {:dimmer 1}}
+        crossing {:id :crossing :universe 1 :address 511 :footprint 4 :channels {:dimmer 1}}
+        reserved {:id :reserved :universe 2 :address 2 :channels {:dimmer 1}}]
+    (is (empty? (frame/validate-patch [sparse gap])) "Absent footprint preserves actual-channel ownership")
+    (is (seq (frame/validate-patch [(assoc sparse :footprint 4) gap])))
+    (is (seq (frame/validate-patch [crossing reserved])) "Unmapped bytes in next universe remain physically owned")
+    (is (empty? (frame/validate-patch [crossing (assoc reserved :address 3)])))
+    (doseq [footprint [nil 0 -1 2.5 3]]
+      (is (seq (frame/validate-patch [(assoc sparse :footprint footprint)]))))
+    (is (seq (frame/validate-patch [(assoc crossing :universe Integer/MAX_VALUE)])))
+    (is (empty? (frame/validate-patch [(assoc crossing :address 1 :footprint Integer/MAX_VALUE)]))
+        "Reservation validation uses intervals, not a per-channel allocation")))
+
+
+(deftest empty-physical-frame-has-a-portable-save-shape
+  (is (= {:target-order [] :values {} :universes {}}
+         (frame/portable-frame (frame/resolve-frame [] [] {:include-values? false})))))

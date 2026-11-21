@@ -217,7 +217,7 @@
   (let [show (model (instance "high" :priority 2 :order 0)
                     (instance "later" :priority 0 :order 2)
                     (instance "early" :priority 0 :order 1))]
-    (with-open [pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
+    (with-open [^java.io.Closeable pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
       (let [serial (engine/advance show {:time-ms 20} compiler)
             parallel (engine/advance show {:time-ms 20} compiler (executor/mapper pool))]
         (is (= serial parallel))
@@ -260,3 +260,16 @@
     (is (= ::engine/stale-epoch
            (try (engine/advance (:model restarted) {:time-ms 152 :epoch 0} compiler)
                 (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+
+(deftest seven-eighth-meter-one-shot-and-release-use-quarter-note-beat-boundaries
+  (let [show (assoc-in (musical-show) [:transport :meter :beats-per-bar] 3.5)
+        launched (control! show {:op :cue/launch :cue-id :music :launch {:mode :one-shot}})
+        id (first (keys (:instances launched)))
+        released (at-beat launched 1875 3.75)
+        finished (at-beat (:model released) 2000 4.0)]
+    (is (= 3.5 (get-in launched [:instances id :duration-timer :duration :value])))
+    (is (= :releasing (get-in released [:model :instances id :phase])))
+    (is (= 3.5 (get-in released [:model :instances id :release-at-beat])))
+    (is (= 1750.0 (get-in released [:model :instances id :release-at-ms])))
+    (is (empty? (get-in finished [:model :instances])))))

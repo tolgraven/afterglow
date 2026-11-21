@@ -8,11 +8,16 @@
 (defn finite-number? [x]
   (and (number? x) (Double/isFinite (double x))))
 
-(defn normalize-meter [meter]
-  (let [meter (merge default-meter meter)]
-    (when-not (every? #(and (integer? (get meter %)) (pos? (get meter %)))
-                      [:beats-per-bar :bars-per-phrase])
-      (throw (ex-info "Meter needs positive integer beats per bar and bars per phrase"
+(defn normalize-meter
+  "Capture beats per bar and whole bars per phrase. Beats use the transport's
+  quarter-note unit: a 7/8 bar contains 7/2 beats, not seven quarter notes."
+  [meter]
+  (let [meter (merge default-meter meter)
+        beats-per-bar (:beats-per-bar meter)
+        bars-per-phrase (:bars-per-phrase meter)]
+    (when-not (and (finite-number? beats-per-bar) (pos? beats-per-bar)
+                   (integer? bars-per-phrase) (pos? bars-per-phrase))
+      (throw (ex-info "Meter needs positive finite quarter-note beats per bar and positive integer bars per phrase"
                       {:meter meter})))
     (select-keys meter [:beats-per-bar :bars-per-phrase])))
 

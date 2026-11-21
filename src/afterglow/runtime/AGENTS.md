@@ -20,3 +20,10 @@ of this runtime alone.
 - Keep tests under `test/afterglow/runtime`. Cover real command/lifecycle paths,
   parallel equivalence, failures, deadlines, cleanup and hot reload. Cross-repo
   compiler/renderer tests belong in tolglow's integration lane.
+- Kernel/engine output now has ordered `:contributions` assignment/batch blocks.
+  Effect contexts keep vector `:assignments`; append-contributions flushes that
+  tail before adding blocks. Aggregate :assignments is nil if batches exist, so
+  consumers must resolve the complete stream instead of silently dropping data.
+- Typed result arrays are exclusively owned until evaluation returns and then
+  read-only. They are output payloads, not mutable state shared between effects.
+  Preserve mixed block order under worker completion reversal and final frames.
