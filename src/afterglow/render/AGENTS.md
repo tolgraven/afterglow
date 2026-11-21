@@ -87,3 +87,8 @@ The calibrated shader, mount buffer layout and GPU readback live in this project
 `resources/gpu/`. Access the assets from the classpath through `afterglow.render.gpu`.
 Keep show choreography in the caller. Test wrap history and numbers against `frame/resolve-frame`
 and report float32 error and completed readback cost before enabling a physical-output path.
+
+`ir/emit-glsl-batch` and the CPU batch compiler accept the same map of named
+expressions. Bind varying names in returned order. Offsets and stride measure
+float32 components per fixture. Validate the device's interleaved component
+limit and use the declared clock and parameter bindings before a draw.
