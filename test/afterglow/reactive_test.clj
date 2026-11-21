@@ -300,3 +300,22 @@
       (is (= {:value 7} @(reactive/db-signal system)))
       (is (identical? old (reactive/subscribe system [::value])))
       (is (= 7 @old)))))
+
+(deftest traced-publication-reports-real-deliveries-and-keeps-arguments-private
+  (let [system (reactive/create-system {:value 0})
+        hits (atom 0)]
+    (reactive/reg-sub! system ::floor (fn [{:keys [db]} _] (quot (:value @db) 2)))
+    (reactive/reg-fx! system ::count (fn [_ _ _] (swap! hits inc) nil))
+    (reactive/watch! system ::watch [::floor "private query argument"] ::count)
+    (let [trace #(:delivery-trace (reactive/publish-traced! system {:value %}))
+          initial (trace 2) same (trace 3) changed (trace 4)
+          calls #(filter (comp #{:reactive/dispatch} :type) (:events %))]
+      (is (= [::watch] (:subscribers (first (calls initial)))))
+      (is (= {:kind :subscription :id ::floor} (:emitter (first (calls changed)))))
+      (is (= ::count (get-in (first (calls changed)) [:data :registration-id])))
+      (is (empty? (calls same)))
+      (is (some #(and (= :reactive/read (:type %)) (= [::floor] (:subscribers %))) (:events same)))
+      (is (not (.contains (pr-str changed) "private query argument")))
+      (is (= 0 (:skipped changed)))
+      (is (= 2 @hits))
+      (is (not (contains? (reactive/publish! system {:value 7}) :delivery-trace))))))
