@@ -29,8 +29,11 @@
     (is (= [type components] ((juxt :type :components) field)) (str key))
     (is (= (alength ^doubles values) (alength ^doubles computed)))
     (dotimes [i (alength ^doubles values)]
-      (let [a (aget ^doubles values i) b (aget ^doubles computed i)]
-        (is (< (abs (- a b)) (+ 0.0002 (* 0.000003 (abs a)))) (str key " at " i))))))
+      (let [a (aget ^doubles values i) b (aget ^doubles computed i)
+            ;; Apple Software Renderer uses an approximate sin instruction.
+            ;; Only the explicitly sinusoidal intensity field has this tolerance.
+            absolute (if (= key :intensity) 0.001 0.000003)]
+        (is (< (abs (- a b)) (+ absolute (* 0.000003 (abs a)))) (str key " at " i))))))
 
 (deftest execute-a-multi-output-shader-against-the-independent-cpu-batch
   (let [positions (mapv (fn [i] [(/ i 39.0) (- (mod i 7) 3) (* -0.005 i i)]) (range 65))

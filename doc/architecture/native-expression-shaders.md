@@ -49,3 +49,11 @@ nonfinite-result recovery and complete DMX universe comparison. Use
 `xvfb-run -a` with Mesa on headless Linux. Software OpenGL establishes correctness
 on the tested cases. Physical GPU throughput and general byte equivalence
 require measurements on the target machine.
+
+
+The macOS 15 Apple Software Renderer returned absolute errors of 0.00075151 at
+`abs(sin(8.5))` and 0.00065782 at `abs(sin(0.75))`. The two sampled sine
+values have an exploratory 0.001 absolute tolerance. Arithmetic/vector fields
+use 0.000003 absolute plus 0.000003 relative tolerance. The 256-pixel packing
+case uses exactly representable arithmetic and requires identical DMX bytes.
+These measurements do not bound transcendental error for other inputs.
