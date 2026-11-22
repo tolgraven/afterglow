@@ -5,7 +5,8 @@
   metres, +Y up, a local forward direction of +Z, positive yaw toward +X and
   positive elevation toward +Y. This is a new explicit fixture contract, not
   an implementation of all legacy fixture function ranges/optics."
-  (:require [afterglow.render.photometry :as photometry]
+  (:require [afterglow.render.optics :as optics]
+            [afterglow.render.photometry :as photometry]
             [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes #{:red :green :blue :white :amber :uv})
@@ -635,6 +636,8 @@
     (cond-> {:values (when values (persistent! values)) :universes universes :target-order (:target-order patch)}
       compact (assoc :compact (:view compact)))))
 
+(declare resolve-contributions)
+
 (defn resolve-frame
   "Resolve an ordered assignment vector to per-target values and fresh DMX bytes.
 
@@ -662,10 +665,15 @@
                     (map? (:previous-values options)))
        (fail! "Invalid render options" {:options options}))
      (when-not (vector? assignments) (fail! "Assignments must be a vector" {}))
-     (if (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
-              (every? packed-assignment? assignments))
+     (cond
+       (seq (:edge-tracking options))
+       (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
+
+       (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
+            (every? packed-assignment? assignments))
        (resolve-packed-only patch assignments options)
-       (pack-general-state patch (reduce-assignments patch assignments) options)))))
+
+       :else (pack-general-state patch (reduce-assignments patch assignments) options)))))
 
 (defn project-compact
   "Project selected stable target indices from a completed compact frame.
@@ -804,21 +812,78 @@
   (when (some #(some? (:source %)) blocks)
     (object-array (count (:fixtures patch)))))
 
+(defn- tracking-ids [links]
+  (into #{} (mapcat (juxt :leader :follower)) links))
+
+(defn- track-edge [patch ^objects assigned options {:keys [leader follower surface along]}]
+  (let [head (get (:by-id patch) leader)
+        next-head (get (:by-id patch) follower)]
+    (cond
+      (nil? head) {:reason :missing-leader}
+      (nil? next-head) {:reason :missing-follower}
+      (not (contains? (::supported next-head) :aim)) {:reason :fixed-follower}
+      :else
+      (let [index (int (::index head))
+            attrs (aget assigned index)
+            sources (::geometry-sources options)
+            source (when sources (get (aget ^objects sources index) (if (:aim attrs) :aim :direction)))
+            resolved (resolve-geometry head attrs (previous-for-target options head) source)
+            ;; Absent direct axes pack channel value zero, exactly as in the
+            ;; completed frame. Reconstruct travel limits from the command.
+            pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))
+            spot (optics/beam-footprint (optics/fixture-beam head (assoc resolved :pose pose)) surface)
+            next-attrs (aget assigned (int (::index next-head)))
+            follower-beam (optics/fixture-beam next-head next-attrs)]
+        (if-let [solution (when spot (optics/edge-aim spot follower-beam surface along))]
+          (let [target (assoc next-attrs :aim (:aim solution))
+                calibrated (resolve-geometry next-head target (previous-for-target options next-head) nil)]
+            (if (:aim-reachable? calibrated)
+              (select-keys solution [:aim :contact])
+              {:reason :unreachable}))
+          {:reason (if spot :no-tangent :missed-receiver)})))))
+
+(defn- apply-tracking! [patch ^objects assigned options]
+  (let [links (:edge-tracking options)]
+    (when-not (vector? links) (fail! "Edge tracking must be an ordered vector" {}))
+    (loop [pending (seq links), seen #{}, suppressed #{}, reports []]
+      (if (seq pending)
+        (let [{:keys [leader follower] :as link} (first pending)]
+          (when (or (nil? leader) (nil? follower) (= leader follower) (contains? seen follower))
+            (fail! "Each follower must be new and distinct from its leader" {:link link}))
+          (let [result (if (contains? suppressed leader)
+                         {:reason :leader-suppressed}
+                         (track-edge patch assigned options link))
+                failed? (contains? result :reason)]
+            (when-let [fixture (get (:by-id patch) follower)]
+              (let [index (int (::index fixture))
+                    attrs (aget assigned index)]
+                (aset assigned index (if failed? (assoc attrs :dimmer 0.0) (assoc attrs :aim (:aim result))))))
+            (recur (next pending) (conj seen leader follower)
+                   (cond-> suppressed failed? (conj follower))
+                   (conj reports (merge {:leader leader :follower follower} result)))))
+        reports))))
+
 (defn- finish-contributions [patch ^objects assigned options pack]
-  (if (::prepare-movement? options)
-    (let [targets (if assigned
-                    (into {} (keep (fn [fixture]
-                                     (let [attributes (aget assigned (int (::index fixture)))]
-                                       (cond (:aim attributes) [(:id fixture) {:aim (:aim attributes)}]
-                                             (:direction attributes) [(:id fixture) {:direction (:direction attributes)}]))))
-                          (::moving-heads patch))
-                    {})]
-      {:targets targets
-       :pack (fn [solved]
-               (when-not (and (map? solved) (every? #(contains? targets %) (keys solved)))
-                 (fail! "Movement results do not belong to this frame's active heads" {}))
-               (pack (assoc options ::solved-movement solved)))})
-    (pack options)))
+  (let [links (:edge-tracking options)
+        reports (when (seq links) (apply-tracking! patch assigned (prepare-previous-compact patch options)))
+        pack (if reports (fn [opts] (assoc (pack opts) :edge-tracking reports)) pack)]
+    (if (::prepare-movement? options)
+      (let [targets (if assigned
+                      (into {} (keep (fn [fixture]
+                                       (let [attributes (aget assigned (int (::index fixture)))]
+                                         (cond (:aim attributes) [(:id fixture) {:aim (:aim attributes)}]
+                                               (:direction attributes) [(:id fixture) {:direction (:direction attributes)}]))))
+                            (::moving-heads patch))
+                      {})
+            ;; Both sides of a tangent use the same CPU geometry. Independent
+            ;; heads may still use the native solver within this frame.
+            reference-ids (when reports (tracking-ids links))]
+        {:targets targets :reference-ids reference-ids
+         :pack (fn [solved]
+                 (when-not (and (map? solved) (every? #(and (contains? targets %) (not (contains? reference-ids %))) (keys solved)))
+                   (fail! "Movement results do not belong to this frame's eligible heads" {}))
+                 (pack (assoc options ::solved-movement solved)))})
+      (pack options))))
 
 (defn- resolve-general-contributions [patch blocks options]
   (let [assigned (object-array (count (:fixtures patch)))
@@ -838,7 +903,7 @@
   [patch blocks options]
   (let [size (* (int (::stride patch)) (count (:fixtures patch)))
         values (double-array size), present (boolean-array size)
-        targets (general-targets blocks)]
+        targets (cond-> (general-targets blocks) (seq (:edge-tracking options)) (into (tracking-ids (:edge-tracking options))))]
     (if (empty? targets)
       (do (doseq [block blocks]
             (with-effect-source (:source block)
@@ -914,6 +979,10 @@
   aim source, or direction source when no aim exists. Later valid replacement is
   allowed. Global patch/options/history errors remain unattributed. Provenance
   stays per block and sparse geometric target; no source maps are copied per pixel.
+  Optional :edge-tracking links run after blending. Each {:leader id :follower id
+  :surface receiver :along xyz} places the next beam tangent to its leader on the
+  receiver. A missed or unreachable spot suppresses that follower's light for
+  the frame and the returned :edge-tracking reports its reason.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))
