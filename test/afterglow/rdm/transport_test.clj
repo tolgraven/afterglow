@@ -84,3 +84,32 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (transport/command! request! command (+ (System/nanoTime) 1000000000) (constantly false))))
     (is (empty? @sent))))
+
+(deftest delayed-commands-consume-only-the-matching-nack
+  (let [command (assoc device :pid 0x82 :command :set :sub-device 2 :data [65])
+        delayed (assoc (ack command [0 0]) :response-type 1)
+        nack (fn [request] (assoc (ack request [0 4]) :response-type 2))
+        queue (assoc device :pid 0x20 :command :get)
+        run (fn [responses]
+              (let [remaining (atom responses)]
+                (transport/command! (fn [_ _] (first (first (swap-vals! remaining next)))) command
+                                    (+ (System/nanoTime) 1000000000) (constantly true))))]
+    (is (= :nack (:status (run [delayed (nack (assoc command :sub-device 1))
+                                (nack (assoc command :command :get)) (nack (assoc command :pid 0x83))
+                                (nack command)]))))
+    (is (= :queue-nack (:status (run [delayed (nack queue)]))))
+    (is (= :ack (:status (run [delayed (nack (assoc command :sub-device 1)) (ack command [])]))))))
+
+(deftest cancellation-releases-the-io-worker-during-ack-timer
+  (let [waiting (promise) continue? (atom true) attempts (atom 0)
+        job (future
+              (try (transport/command! (fn [_ r] (swap! attempts inc) (assoc (ack r [0 30]) :response-type 1))
+                                       (assoc device :pid 0x60) (+ (System/nanoTime) 5000000000)
+                                       #(do (when (pos? @attempts) (deliver waiting true)) @continue?))
+                   (catch clojure.lang.ExceptionInfo e (:rdm/error (ex-data e)))))]
+    (try
+      (is (= true (deref waiting 1000 :timeout)))
+      (reset! continue? false)
+      (is (= :cancelled (deref job 900 :timeout)))
+      (is (= 1 @attempts))
+      (finally (future-cancel job)))))

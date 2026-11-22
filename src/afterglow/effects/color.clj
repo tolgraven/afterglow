@@ -113,11 +113,13 @@
         (chan-fx/apply-channel-value buffers ch (int (* 255 (clr/red as-if-red))))))
     ;; Finally, see if there is a color wheel color close enough to select
   (when (and (seq (:color-wheel-hue-map target))
-               (>= (clr/saturation resolved) (:color-wheel-min-saturation @(:variables show) 40)))
-      (let [found (util/find-closest-key (:color-wheel-hue-map target) (clr/hue resolved))
-            [channel function-spec] ((:color-wheel-hue-map target) found)]
-        (when (< (math/abs (- (clr/hue resolved) found)) (:color-wheel-hue-tolerance @(:variables show) 60))
-          (chan-fx/apply-channel-value buffers channel (chan-fx/function-percentage-to-dmx 50 function-spec)))))))
+             (>= (* 100.0 (clr/saturation resolved)) (:color-wheel-min-saturation @(:variables show) 40)))
+    (let [degrees (* 360.0 (clr/hue resolved))
+          distance #(Math/abs (double (- (mod (+ (- degrees %) 180) 360) 180)))
+          hue (apply min-key distance (keys (:color-wheel-hue-map target)))
+          [channel function-spec] (get (:color-wheel-hue-map target) hue)]
+      (when (< (distance hue) (:color-wheel-hue-tolerance @(:variables show) 60))
+        (chan-fx/apply-channel-value buffers channel (chan-fx/function-percentage-to-dmx 50 function-spec)))))))
 
 (def ^:private default-color
   "The color to mix with when fading from a non-assignment."

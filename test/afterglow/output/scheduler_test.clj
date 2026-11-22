@@ -111,3 +111,27 @@
           packet (retirement/include-retired plan (render/idle-universes claimed))]
       (is (zero? (physical packet [3 511])))
       (is (zero? (physical packet [4 0]))))))
+
+(deftest gate-transition-waits-for-a-sending-frame-and-fences-its-completion
+  (let [sending (promise) release (promise) changing (promise) output (atom [])
+        owner (scheduler/create {:now-ms (constantly 0)
+                                 :send! (fn [universes _]
+                                          (deliver sending true)
+                                          (deref release 5000 false)
+                                          (swap! output conj (get-in (bytes-copy universes) [0 0])))})
+        token (scheduler/begin-frame! owner 1 @patch {} false)]
+    (scheduler/complete! owner token (frame 180 0 0))
+    (let [publication (future (scheduler/publish! owner))]
+      (try
+        (is (true? (deref sending 1500 false)))
+        (is (= (:generation token) (:generation (deref (future (scheduler/begin-frame! owner 1 @patch {} false))
+                                                       1000 nil))))
+        (let [blackout (future (deliver changing true) (scheduler/begin-frame! owner 1 @patch {} true))]
+          (is (true? (deref changing 1000 false)))
+          (is (= :sending (deref blackout 80 :sending)))
+          (deliver release true)
+          (is (some? (:generation (deref blackout 1500 nil))))
+          (is (nil? (scheduler/complete! owner token (frame 180 0 0))))
+          (scheduler/publish! owner)
+          (is (= [180 0] @output)))
+        (finally (deliver release true) (deref publication 1500 nil) (scheduler/close! owner))))))

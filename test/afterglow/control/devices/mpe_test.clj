@@ -272,3 +272,14 @@
     (is (= #{:glide :lift} (:disabled-axes defaults)))
     (is (= {:level :pressure :step :strike} (:params defaults)))
     (is (not (contains? defaults :cues)))))
+
+(deftest independently-valid-profile-and-cue-overrides-are-bounded-after-merge
+  (let [ids (mapv #(keyword (str "p" %)) (range 63))
+        schemas (zipmap ids (repeat {:type :number :default 0 :bounds [0 1]}))
+        device {:params (zipmap (butlast ids) (repeat :pressure))}
+        cue {:params {(last ids) :slide}}
+        model {:settings {:expressive {:devices {:pad (assoc device :cues {:test cue})}}}}
+        policy (expressive/policy model :pad :test {})
+        plan (expressive/plan schemas #{:pressure :slide} (:params policy) policy)]
+    (is (= 62 (count (:mappings plan))))
+    (is (= [{:code :mapping-limit :limit 62}] (:diagnostics plan)))))

@@ -34,27 +34,45 @@
       (mapv (fn [s] (assoc s :density (/ (max 0.0 (- (Math/log (/ (contrast s) reference)))) path-m)))
             samples))))
 
-(defn- tail-fit [observations]
+(defn- log-decay [samples]
+  (let [xs (mapv #(/ (:elapsed-ms %) 1000.0) samples)
+        ys (mapv #(Math/log (:density %)) samples)
+        mean #(/ (reduce + 0.0 %) (count %))
+        mx (mean xs) my (mean ys)
+        dx (mapv #(- % mx) xs) dy (mapv #(- % my) ys)
+        slope (/ (reduce + (map * dx dy)) (reduce + (map * dx dx)))
+        residual (reduce + (map (fn [x y] (let [d (- y (* slope x))] (* d d))) dx dy))]
+    {:slope slope :r-squared (- 1.0 (/ residual (reduce + (map * dy dy))))}))
+
+(defn- tail-fit [observations metered?]
   (let [clearing (filterv #(= :clearing (:phase %)) observations)
         peak (apply max-key :density clearing)
         tail (filterv #(and (>= (:elapsed-ms %) (:elapsed-ms peak))
-                            (> (:density %) (* 0.05 (:density peak)))) clearing)
-        xs (mapv #(/ (- (:elapsed-ms %) (:elapsed-ms peak)) 1000.0) tail)
-        ys (mapv #(Math/log (:density %)) tail)]
-    (check (and (>= (count tail) 5) (>= (peek xs) 3)
+                            (> (:density %) (* 0.05 (:density peak)))) clearing)]
+    (check (and (>= (count tail) 5) (>= (- (:elapsed-ms (peek tail)) (:elapsed-ms peak)) 3000)
                 (> (:density peak) 0.003)
                 (< (:density (peek tail)) (* 0.78 (:density peak))))
            "Keep scanning until the mixed fog has clearly fallen from its peak")
-    (let [mean #(/ (reduce + 0.0 %) (count %))
-          mx (mean xs) my (mean ys)
-          dx (mapv #(- % mx) xs) dy (mapv #(- % my) ys)
-          slope (/ (reduce + (map * dx dy)) (reduce + (map * dx dx)))
-          residual (reduce + (map (fn [x y] (let [d (- y (* slope x))] (* d d))) dx dy))
-          score (- 1.0 (/ residual (reduce + (map * dy dy))))
-          half-life (/ (- (Math/log 2.0)) slope)]
-      (check (and (finite? half-life) (<= 0.1 half-life 86400) (> score 0.75))
-             "Clearing does not follow a steady decay; check the sightline and repeat")
-      {:clearance-half-life-s half-life :r-squared score})))
+    ;; A metered search models the plume separately and only needs an initial
+    ;; clearance estimate. Without a meter, use the latter half of the observed
+    ;; decay in time and require its two halves to agree on the decay rate.
+    (let [mid-time (fn [xs] (* 0.5 (+ (:elapsed-ms (first xs)) (:elapsed-ms (peek xs)))))
+          settled (if metered? tail (filterv #(>= (:elapsed-ms %) (mid-time tail)) tail))]
+      (when-not metered?
+        (let [mid (mid-time settled)
+              early (filterv #(<= (:elapsed-ms %) mid) settled)
+              late (filterv #(>= (:elapsed-ms %) mid) settled)]
+          (check (and (>= (count early) 3) (>= (count late) 3)
+                      (>= (- (:elapsed-ms (peek settled)) (:elapsed-ms (first settled))) 3000)
+                      (< (:density (peek settled)) (* 0.78 (:density (first settled))))
+                      (let [a (:slope (log-decay early)) b (:slope (log-decay late))]
+                        (and (neg? a) (neg? b) (<= (abs (- a b)) (* 0.05 (min (- a) (- b)))))))
+                 "Continue scanning until the plume is mixed and the late clearance rate is steady")))
+      (let [{:keys [slope r-squared]} (log-decay settled)
+            half-life (/ (- (Math/log 2.0)) slope)]
+        (check (and (finite? half-life) (<= 0.1 half-life 86400) (> r-squared 0.75))
+               "Clearing does not follow a steady decay; check the sightline and repeat")
+        {:clearance-half-life-s half-life :r-squared r-squared}))))
 
 (defn- schedule [observations flows]
   (let [events (reduce (fn [m {:keys [elapsed-ms density]}] (assoc-in m [elapsed-ms :reading] density))
@@ -111,8 +129,8 @@
          "Expected bounded camera samples and a finite held-flow history")
   (let [obs (optical-observations samples path-m)
         flows (filterv #(<= (:elapsed-ms %) (:elapsed-ms (peek obs))) flows)
-        tail (tail-fit obs)
         metered? (some #(pos? (:flow-m3-s %)) flows)
+        tail (tail-fit obs metered?)
         result
         (if-not metered? tail
           (let [timeline (schedule obs flows)

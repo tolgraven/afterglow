@@ -41,6 +41,13 @@
                  [com.taoensso/encore "3.172.1"]
                  [org.slf4j/slf4j-api "2.0.20"]
                  [commons-codec "1.23.0"]
+                 ;; Direct choices keep older transitive versions out of the paired show and build tools.
+                 [com.fasterxml.jackson.core/jackson-core "2.22.3"]
+                 [org.apache.commons/commons-lang3 "3.22.0"]
+                 [commons-net/commons-net "3.13.0"]
+                 [org.bouncycastle/bcpkix-jdk18on "1.87"]
+                 [org.bouncycastle/bcprov-jdk18on "1.87"]
+                 [org.bouncycastle/bcutil-jdk18on "1.87"]
                  [com.fzakaria/slf4j-timbre "0.4.1"]
                  [com.taoensso/tower "3.0.2"]
                  [com.taoensso/truss "2.5.1"]
@@ -86,7 +93,10 @@
   :profiles {:dev     {:source-paths ["dev"]
                        :prep-tasks ^:replace ["javac" "compile"]
                        :dependencies [[ring/ring-mock "0.6.2" :exclusions [ring/ring-codec]]
-                                      [ring/ring-devel "1.15.6"]]
+                                      [ring/ring-devel "1.15.6"]
+                                      [org.apache.httpcomponents.client5/httpclient5 "5.6.5"]
+                                      [org.apache.httpcomponents.core5/httpcore5 "5.4.4"]
+                                      [org.apache.httpcomponents.core5/httpcore5-h2 "5.4.4"]]
                        :repl-options {:init-ns afterglow.examples
                                       :welcome (println "afterglow loaded.")}
                        :jvm-opts     ["-XX:-OmitStackTraceInFastThrow" "-Dapple.awt.UIElement=true"]

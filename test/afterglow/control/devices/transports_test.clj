@@ -36,3 +36,10 @@
   (is (= :unsupported (:standalone generic/push-3-capabilities)))
   (is (false? (:hardware-verified? generic/push-3-capabilities)))
   (is (thrown? clojure.lang.ExceptionInfo (generic/connect-push-3-midi! {}))))
+
+(deftest touch-lock-feedback-reaches-the-physical-display-renderer
+  (let [draw (fn [editable?]
+               (let [image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)]
+                 (transports/render-view! image {:bpm 120 :master 1 :touched-control {:target :tempo :editable? editable?}})
+                 (vec (.getRGB image 0 32 960 24 nil 0 960))))]
+    (is (not= (draw true) (draw false)))))

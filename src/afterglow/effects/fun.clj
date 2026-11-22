@@ -242,7 +242,7 @@
                               (let [fraction (/ (- now creation-time) fade-time)
                                     faded    (- 100 (* fraction 100))]  ; Functions use % rather than DMX values
                                 (chan-fx/build-head-function-assigner
-                                 head
+                                 :dimmer head
                                  (fn [_show _snapshot _target previous-assignment]
                                    (colors/clamp-percent-float (max (dimmer-fx/master-scale master faded)
                                                                     (or previous-assignment 0)))))))))))

@@ -21,6 +21,10 @@ Persistence stores definitions and comparison data, not live functions or
 handles. Validate source without reader evaluation or custom tagged readers.
 Only an explicit trusted-source restore compiles a literal function form; never
 evaluate code merely because a fixture or imported EDN document contains it.
+A saved Var descriptor uses the locally registered function when its kind, id
+and qualified symbol match, including across a staged restore using
+`:local-system`. A cold import may supply a host-owned `:allowed-vars` set of
+qualified symbols. Keep that policy outside the saved show.
 Keep the public portable schema coordinated with Tolglow state persistence.
 
 Run `afterglow.reactive-test` with real callbacks and controlled thread/latch

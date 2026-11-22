@@ -114,12 +114,14 @@
         launch (fn [m id]
                  (:model (control/apply-command m {:op :cue/launch :cue-id id :command-id (name id) :source {:adapter :test}
                                                     :show-id (:show-id m) :epoch (:epoch m) :time-ms 0})))
-        advance (fn [m]
+        advance (fn [m finish?]
                   (engine/advance m {:time-ms 0}
                                   (fn [d] (if (= :base (:id d)) #(update % :assignments conj (row :focus 1/4))
-                                              identity))))
+                                              #(assoc % :done? finish?)))))
         m (-> show (launch :base) (launch :adjust))]
-    (is (== 1/2 (get-in (frame/resolve-contributions patch (:contributions (advance m))) [:values :head :channels :focus])))))
+    (doseq [finish? [false true]]
+      (is (== 1/2 (get-in (frame/resolve-contributions patch (:contributions (advance m finish?)))
+                           [:values :head :channels :focus]))))))
 
 (deftest opaque-replacements-remain-typed-blocks-at-their-group-anchor
   (let [prepared {:kind :batch :compiled {:target-ids [:head] :columns [{:attribute :focus}]

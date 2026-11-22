@@ -9,7 +9,7 @@
 (def plan (fog/plan {:width 2 :height 2 :depth 5 :fog-half-life-s 180 :air-changes-per-hour 50
                      :measured-fog {:clearance-half-life-s 18 :extinction-per-m 2.1 :reference-path-m 3}} rig))
 
-(defn recording []
+(defn recording [plan]
   (let [ts (range 0 85000 1000)
         states (rest (reductions #(fog/present plan %1 %2 {1 [(if (<= 5000 %2 12000) 255 0)]})
                                  (fog/initial plan 1 0) ts))]
@@ -19,7 +19,7 @@
      :volume-m3 20 :path-m 3}))
 
 (deftest recover-room-and-fluid-properties-from-a-stationary-sightline
-  (let [data (recording) fit (calibration/fit data)
+  (let [data (recording plan) fit (calibration/fit data)
         tail (calibration/fit (dissoc data :flows))]
     (is (< (abs (- (:clearance-half-life-s fit) 18)) 0.4))
     (is (< (abs (- (:mixing-seconds fit) 3)) 0.15))
@@ -30,6 +30,13 @@
     (is (< (abs (- (:clearance-half-life-s tail) 18)) 1.2))
     (is (thrown? Exception (calibration/fit (update data :samples subvec 0 12))))
     (is (thrown? Exception (calibration/fit (assoc-in data [:samples 0 :bright] 0.3))))))
+
+(deftest a-slowly-mixing-plume-needs-evidence-of-settled-decay
+  (let [slow-plan (assoc-in plan [:sources 0 :mix-per-s] (/ 1.0 60))
+        data (recording slow-plan)]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Continue scanning"
+                          (calibration/fit (dissoc data :flows))))
+    (is (< (abs (- (:clearance-half-life-s (calibration/fit data)) 18)) 1.5))))
 
 (deftest exposure-and-freshness-come-from-the-calibrated-physical-model
   (let [room (fog/reconfigure plan {:mixed-m3 5.0 :sources []} 1 0 true)

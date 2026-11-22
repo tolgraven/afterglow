@@ -8,7 +8,7 @@
 
 (defn- lane [indices spec tint]
   (let [[u i] (:coarse spec) [fu fi] (:fine spec) [r g b] tint]
-    (Lane. (long (indices u)) (long i) (if fu (long (indices fu)) -1) (long (or fi -1)) (double (:inverted-from spec -1)) spec
+    (Lane. (long (indices u)) (long i) (if fu (long (indices fu)) -1) (long (or fi -1)) (double (or (:inverted-from spec) -1)) spec
            (double r) (double g) (double b))))
 
 (defn compile-layout [fixtures universes light-key]
