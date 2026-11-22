@@ -6,6 +6,7 @@
   positive elevation toward +Y. This is a new explicit fixture contract, not
   an implementation of all legacy fixture function ranges/optics."
   (:require [afterglow.render.optics :as optics]
+            [afterglow.render.photometry :as photometry]
             [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes #{:red :green :blue :white :amber :uv})
@@ -111,6 +112,8 @@
         (mapv
          (fn [index fixture]
            (let [{:keys [id position universe address channels calibration]} fixture]
+             (when-let [{:keys [path message]} (first (photometry/errors fixture))]
+               (fail! message {:path (into [:fixtures index] path) :fixture-id id}))
              (when-not (and (map? fixture) (some? id)
                             (vec3? (or position [0 0 0]))
                             (integer? universe) (<= 0 universe Integer/MAX_VALUE)
