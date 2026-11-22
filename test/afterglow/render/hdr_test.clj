@@ -27,20 +27,26 @@
 
 (deftest true-excess-falls-off-with-distance-and-stays-in-the-scope
   (doseq [b [(block (row :source :color [1.21 0 0])) (batch :source :color [1.21 0 0])]]
-    (let [hdr {:spill 1 :radius 1 :fixture-ids [:source :near :far]}
+    (let [hdr {:spill 1 :radius 1 :white-mix 0 :spill-white-mix 0 :fixture-ids [:source :near :far]}
           out (native-and-rich [b] {:hdr hdr})]
       ;; Excess is 0.21. At half a metre with linear falloff the received red is 0.105.
       (is (= [255 0 0 27 0 0 5 0 0 0 0 0 0 0 0] out))
       (is (= 13 (nth (native-and-rich [b] {:hdr (assoc hdr :falloff :quadratic)}) 3)))
       (is (= 13 (nth (native-and-rich [b] {:hdr (assoc hdr :max-excess 0.1)}) 3)))
       (is (= 0 (nth (native-and-rich [b] {:hdr (assoc hdr :fixture-ids [:source])}) 3)))
-      (is (every? zero? (native-and-rich [b] {:hdr hdr :blackout? true})))))
-  (let [b (block (row :source :color [1.4 0 0]) (row :near :color [0 0 1]))
-        settings {:spill 1 :radius 1}
-        base (native-and-rich [b] {:hdr settings})
-        bleach (native-and-rich [b] {:hdr (assoc settings :white-mix 1.0 :spill-white-mix 1.0)})]
-    (is (= [255 0 0 51 0 255] (subvec base 0 6)))
-    (is (= [255 102 102 92 51 255] (subvec bleach 0 6)))))
+      (is (every? zero? (native-and-rich [b] {:hdr hdr :blackout? true}))))))
+
+(deftest whitening-defaults-and-independent-tint-controls
+  (let [b (block (row :source :color [0.7 0 0]) (row :near :color [0 0 0.5]))
+        settings {:gain 2 :spill 1}
+        render #(subvec (native-and-rich [b] {:hdr (merge settings %)}) 0 6)]
+    (is (= [255 102 102 92 51 255]
+           (render {}) (render {:white-mix 1 :spill-white-mix 1})))
+    (is (= [255 0 0 92 51 255] (render {:white-mix 0})))
+    (is (= [255 102 102 51 0 255] (render {:spill-white-mix 0})))
+    (is (= [255 0 0 51 0 255] (render {:white-mix 0 :spill-white-mix 0})))
+    (is (= [255 0 0 0 0 0]
+           (subvec (native-and-rich [(block (row :source :color [1.4 0 0]))] {:hdr {}}) 0 6)))))
 
 (deftest cue-gain-is-independent-of-opacity-and-applies-once
   (let [tag #(assoc % :source {:cue-id :cue :instance-id 99})
@@ -51,13 +57,13 @@
     (is (= [255 204 102] (subvec (native-and-rich b opts) 12)))
     (is (= 255 (nth (native-and-rich b {:hdr {:fixture-ids [:source] :source-gains {:lamp 2.0}}}) 12)))
     (is (= [0.6 0.0 0.0] (vec (get-in base [:batch :outputs :color :values]))))
-    (is (= [255 0 0] (subvec (native-and-rich [base] {:hdr {:cue-gains {:cue 2.0}}}) 0 3)))
+    (is (= [255 51 51] (subvec (native-and-rich [base] {:hdr {:cue-gains {:cue 2.0}}}) 0 3)))
     (is (= [153 0 0] (subvec (native-and-rich [base] {:hdr {:cue-gains {:cue 2.0} :fixture-ids [:near]}}) 0 3)))
     (is (= [153 0 0] (subvec (native-and-rich [base] {}) 0 3))))
   (let [a (row :source :red 0.7)
         b (assoc (row :source :red 0.6) :blend :add)]
     (is (thrown? Exception (frame/resolve-frame rig [a b])))
-    (is (= [255 0 0 38] (subvec (bytes-of (frame/resolve-frame rig [a b] {:hdr {:spill 1 :radius 1}})) 0 4)))
+    (is (= [255 76 76 71] (subvec (bytes-of (frame/resolve-frame rig [a b] {:hdr {:spill 1 :radius 1}})) 0 4)))
     (is (= 0 (nth (bytes-of (frame/resolve-frame rig [a b (row :source :red 0.2)] {:hdr {:spill 1}})) 3)))))
 
 (deftest hdr-does-not-relax-other-channel-ranges
@@ -75,7 +81,7 @@
                                               :transforms [{:attribute :color :value {:op :multiply :args [{:op :previous :attribute :color} 2.0]}}]})
         expected (native-and-rich [base change] {:hdr {:spill 1 :radius 1}})
         pending (frame/prepare-movement-frame rig [base change] {:hdr {:spill 1 :radius 1} :compact-values? true})]
-    (is (= [255 0 0 51] (subvec expected 0 4)))
+    (is (= [255 102 102 92] (subvec expected 0 4)))
     (is (= expected (bytes-of ((:pack pending) {})) (bytes-of ((:pack pending) {}))))))
 
 (deftest profiled-shutter-gates-highlight-and-rgbw-extracts-after-mapping
@@ -85,7 +91,7 @@
                    (assoc-in [:channels :shutter] {:offset 5 :functions [{:type :shutter-closed :start 0 :end 10}]}))
         p (frame/compile-patch [source (rgb-head :neighbor 6 [0 0 0])])
         values [(row :source :color [1.2 0.5 0.5])]
-        render (fn [rows] (subvec (bytes-of (frame/resolve-frame p rows {:hdr {:spill 1}})) 0 8))]
+        render (fn [rows] (subvec (bytes-of (frame/resolve-frame p rows {:hdr {:spill 1 :white-mix 0 :spill-white-mix 0}})) 0 8))]
     (is (= [128 0 0 128 0 0 0 0] (render values)))
     (is (= [128 0 0 128 255 51 0 0] (render (conj values (row :source :shutter 1)))))))
 
@@ -115,7 +121,7 @@
                         :native-layer {:id :scene :member 1 :targets :previous
                                        :transforms [{:attribute :color :value {:op :previous :attribute :color}}]})
         bytes (native-and-rich [base modifier] {:hdr {:cue-gains {:lift 3.0} :spill 1 :radius 1}})]
-    (is (= [255 0 0 26] (subvec bytes 0 4)))))
+    (is (= [255 51 51 48] (subvec bytes 0 4)))))
 
 (deftest suppressed-edge-followers-neither-cast-spill-nor-light-up-from-it
   (let [opts {:hdr {:spill 1.0 :radius 2.0} :edge-tracking [{:leader :missing :follower :source}]}
@@ -137,7 +143,7 @@
                             (mapv :emitted-color (frame/project-compact (:compact compact)))))
                      (bytes-of compact)))]
       (is (= [0 0 0 255 102 102 102 0]
-             (subvec (render [(row :source :white 1.4)] {:hdr {:spill 1.0 :radius 1.0}}) 0 8)))
+             (subvec (render [(row :source :white 1.4)] {:hdr {:spill 1.0 :radius 1.0 :white-mix 0 :spill-white-mix 0}}) 0 8)))
       (doseq [primary [(row :source :red 0.8) (row :source :white 0.35) (row :source :white 1.7)]
               gain [0.0 0.35 1.6]
               options [{} {:master 0.7} {:blackout? true}]]
