@@ -324,6 +324,7 @@
       (let [deps (volatile! #{})
             compute (volatile! (:compute node))
             settings (get-in (state-of system) [:registrations [:sub (node-name id)] :options])
+            retain-good? (and (:good? node) (not= :fallback (:on-error settings)))
             actions (:actions (state-of system))
             [ok? value] (try
                           (let [v (binding [*stack* (conj *stack* id) *dependencies* deps]
@@ -341,9 +342,8 @@
                               (recover! system (or (::stage (ex-data error)) (first id))
                                         (or (::id (ex-data error)) (node-name id)) (:owner settings) error))
                             (write-state! system (assoc (state-of system) :actions actions))
-                            [false (if (and (:good? node) (not= :fallback (:on-error settings)))
-                                     (:good-value node) (:fallback settings))]))
-            available? (or ok? (contains? settings :fallback) (:good? node))
+                            [false (if retain-good? (:good-value node) (:fallback settings))]))
+            available? (or ok? retain-good? (contains? settings :fallback))
             changed? (or (not= (:available? node) available?) (not= (:value node) value))
             updated (cond-> (assoc node :available? available? :compute @compute :value value :deps @deps :dirty? false :initialized? true)
                       ok? (assoc :good? true :good-value value))]

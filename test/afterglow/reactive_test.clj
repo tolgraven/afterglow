@@ -396,6 +396,27 @@
       ((:close! b)) ((:close! a)))
     (reactive/close! system)))
 
+(deftest fallback-only-subscriptions-deliver-only-available-values
+  (doseq [[options expected] [[{:validate number?} []]
+                              [{:validate #(or (nil? %) (number? %)) :fallback nil} [nil]]]]
+    (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])})
+          observed (atom [])
+          effected (atom [])]
+      (try
+        (reactive/reg-sub! system ::value value-sub (assoc options :on-error :fallback))
+        (reactive/reg-fx! system ::record (fn [_ v _] (swap! effected conj v) nil))
+        (reactive/watch! system ::watch [::value] ::record)
+        (let [lease (reactive/acquire! system [::value] #(swap! observed conj %))]
+          (is (= 1 (:value lease)))
+          (reactive/publish! system)
+          (reactive/publish! system {:value :invalid})
+          (is (= expected @observed))
+          (is (= (into [1] expected) @effected))
+          (reactive/publish! system {:value 2})
+          (is (= (conj expected 2) @observed))
+          (is (= (into [1] (conj expected 2)) @effected)))
+        (finally (reactive/close! system))))))
+
 (deftest first-invalid-value-without-fallback-does-not-trigger-downstream-effects
   (let [system (reactive/create-system {:value -1} {:on-fault! (fn [_ _])}) delivered (atom [])]
     (reactive/reg-sub! system ::positive value-sub {:validate pos-int?})

@@ -65,9 +65,11 @@ external read ignores interruption.
 
 Use `:validate` with a predicate or a registered clojure.spec keyword. Options
 with a durable descriptor can include a named spec and a portable fallback.
-Use `:on-error :fallback` for immediate fallback, or the default `:last-good`
-to retain the most recent validated value. With no valid value and no fallback,
-no dependent effect handler receives a value. Attach an `:owner` map of
+The default `:on-error :last-good` retains the most recent validated value and
+can use a fallback until the first success. With `:on-error :fallback`, each
+failure selects the configured fallback. Omitting that value makes the signal
+unavailable until validation succeeds again. Listeners and effect handlers
+receive an explicit `:fallback nil` only when the validator accepts nil. Attach an `:owner` map of
 `:cue-id`, `:instance-id` and/or `:effect-id` for diagnostics. Application
 ratoms including `db-signal` support normal IRef validators. A rejected owner db
 publication retains its prior value while independent sources continue.
