@@ -4,13 +4,19 @@
   Source ratoms implement normal deref/reset!/swap! semantics. publish! freezes
   every source once, propagates value changes through tracked reactions and
   queues semantic actions. No user function runs inside an atom CAS loop."
-  (:require [afterglow.reactive.registry :as registry]))
+  (:require [afterglow.reactive.coeffects :as coeffects]
+            [afterglow.reactive.registry :as registry]
+            [afterglow.runtime.faults :as runtime-faults]
+            [clojure.spec.alpha :as spec]
+            [taoensso.timbre :as log])
+  (:import [java.util.logging Level Logger]))
 
 (def validate-registry registry/validate-registry)
 (def ^:dynamic ^:private *transaction* nil)
 (def ^:dynamic ^:private *dependencies* nil)
 (def ^:dynamic ^:private *stack* [])
 (def ^:dynamic ^:private *delivery-trace* nil)
+(def ^:dynamic ^:private *managed-query* false)
 
 (defn- node-name [[kind id]]
   (if (= kind :subscription) (first id) id))
@@ -23,7 +29,7 @@
                                          :subscribers [subscriber] :data data})
       (vswap! trace update :skipped inc))))
 
-(defrecord ReactiveSystem [lock state sources])
+(defrecord ReactiveSystem [lock state sources coeffects on-fault!])
 (defprotocol Handle
   (-system [handle]) (-id [handle]) (-kind [handle]))
 (declare read-cell read-reaction change-cell! compare-cell! option! options subscribe queue-action!)
@@ -89,6 +95,16 @@
           (delivered! :reactive/read (if (= kind :node) (first id) kind)
                       (if (= kind :node) (node-name id) id)
                       (node-name (peek *stack*)) {}))))))
+(declare prune-state)
+(defn- reconcile! [system state]
+  (let [state (if (:prune? state) (prune-state state) state)
+        manager (:coeffects system)]
+    (when (seq (coeffects/active-ids manager))
+      (coeffects/retain! manager (into #{} (keep (fn [[[kind id] readers]]
+                                                  (when (and (= kind :cofx) (seq readers)) id)))
+                                       (:dependents state))))
+    state))
+
 (defn- transact! [system f]
   (locking (:lock system)
     (ensure-open! system)
@@ -98,22 +114,55 @@
         (when *transaction* (fail! "Cannot nest different reactive systems" {:type ::cross-system}))
         (let [working (volatile! @(:state system))
               captured @(:sources system)
-              result (binding [*transaction* {:system system :working working :sources captured}
-                               *stack* [] *dependencies* nil]
-                       (f))]
-          (reset! (:state system) @working)
-          result)))))
+              tx {:system system :working working :sources captured :samples (volatile! {})}]
+          (try
+            (let [result (binding [*transaction* tx *stack* [] *dependencies* nil] (f))]
+              (reset! (:state system) (reconcile! system @working))
+              result)
+            (catch Throwable e
+              (reconcile! system @(:state system))
+              (throw e))))))))
 
 (defn create-system
-  "Create an explicit owner. Requiring this namespace starts no workers or IO."
-  [db]
-  (let [system (->ReactiveSystem (Object.)
-                                (atom {:nodes {} :handles {} :cell-handles {} :options {}
-                                       :dependents {} :source-snapshot {:db db} :registrations {}
-                                       :watchers {} :actions [] :generation 0 :next-order 0})
-                                (atom {:db db}))]
-    (reset! (:state system) (assoc-in @(:state system) [:cell-handles :db] (Cell. system :db)))
-    system))
+  "Create an explicit owner. on-fault! receives a portable diagnostic and the
+  original throwable. The configured Afterglow appenders preserve the stack trace."
+  ([db] (create-system db {}))
+  ([db {:keys [on-fault!]}]
+   (let [system (->ReactiveSystem (Object.)
+                                 (atom {:nodes {} :handles {} :cell-handles {} :options {}
+                                        :dependents {} :source-snapshot {:db db} :registrations {}
+                                        :watchers {} :actions [] :generation 0 :next-order 0})
+                                 (atom {:db db}) (coeffects/create)
+                                 (or on-fault! (fn [fault error]
+                                                 (log/warn error "Reactive handler failed" (select-keys fault [:stage :id :message])))))]
+     (reset! (:state system) (assoc-in @(:state system) [:cell-handles :db] (Cell. system :db)))
+     system)))
+
+(defn faults "The latest 64 portable diagnostics in arrival order." [system]
+  (:faults @(:state system) []))
+
+(defn- recover! [system stage id owner error]
+  (when (or (:restoring? *transaction*) (not (runtime-faults/recoverable? error))
+            (#{::cycle ::depth ::cross-system ::mutation-during-evaluation ::restore-mutation
+               ::disposed ::closed ::drain-during-evaluation} (:type (ex-data error))))
+    (throw error))
+  (let [state (state-of system)
+        db (get @(:sources system) :db)
+        seq-id (inc (get state :fault-sequence 0))
+        fault (merge (select-keys db [:epoch :time-ms :frame-number])
+                     (select-keys owner [:instance-id :effect-id :cue-id])
+                     {:type :reactive/fault :category :reactive :stage stage :id id
+                      :sequence seq-id :generation (:generation state)
+                      :message (let [s (str (ex-message error))] (subs s 0 (min 512 (count s))))
+                      :class (.getName (class error))
+                      :stacktrace (mapv str (take 16 (.getStackTrace ^Throwable error)))})]
+    (write-state! system (-> state (assoc :fault-sequence seq-id)
+                             (update :faults #(vec (take-last 64 (conj (or % []) fault))))))
+    (try ((:on-fault! system) fault error)
+         (catch Exception reporter-error
+           (.log (Logger/getLogger "afterglow.reactive") Level/WARNING "Reactive diagnostic listener failed" reporter-error)))
+    (when *delivery-trace* (delivered! :reactive/fault stage id id fault))
+    fault))
 
 (defn ratom
   "Create/cache a named source ratom. Values change synchronously; reactions
@@ -177,13 +226,13 @@
     (when-not (validator value) (fail! "Validator rejects reactive value" {:type ::invalid-value :id (-id handle)}))))
 (defn- notify-watches! [handle old new]
   (doseq [[key f] (sort-by (comp pr-str key) (:watches (options handle)))]
-    (f key handle old new)
-    (when *delivery-trace*
-      (let [kind (-kind handle) id (-id handle)]
-        ;; Watch keys may be arbitrary JVM objects. Only named keys cross the wire.
-        (delivered! :reactive/watch (if (= kind :node) (first id) kind)
-                    (if (= kind :node) (node-name id) id)
-                    (when (or (keyword? key) (string? key)) key) {})))))
+    (let [kind (-kind handle) id (-id handle) name (if (= kind :node) (node-name id) id)]
+      (try
+        (f key handle old new)
+        (when *delivery-trace*
+          (delivered! :reactive/watch (if (= kind :node) (first id) kind) name
+                      (when (or (keyword? key) (string? key)) key) {}))
+        (catch Throwable e (recover! (-system handle) :watch name nil e))))))
 
 (defn change-cell! [cell f]
   (let [system (-system cell) id (-id cell)]
@@ -212,8 +261,34 @@
   (reduce (fn [s id] (if (contains? (:nodes s) id) (assoc-in s [:nodes id :dirty?] true) s))
           state (get-in state [:dependents dependency])))
 (defn- replace-dependencies [state id old new]
-  (let [state (reduce #(update-in %1 [:dependents %2] disj id) state old)]
-    (reduce #(update-in %1 [:dependents %2] (fnil conj #{}) id) state new)))
+  (if (= old new) state
+    (let [state (reduce (fn [s dep]
+                          (let [remaining (disj (get-in s [:dependents dep]) id)]
+                            (if (seq remaining) (assoc-in s [:dependents dep] remaining)
+                                (update s :dependents dissoc dep)))) state old)]
+      (reduce #(update-in %1 [:dependents %2] (fnil conj #{}) id) (assoc state :prune? true) new))))
+
+(defn- prune-state [state]
+  (let [roots (into (mapv #(vector :subscription (:query %)) (vals (:watchers state)))
+                    (keep (fn [[id node]]
+                            (when (or (:root? node) (seq (get-in state [:options [:node id] :watches]))) id)))
+                    (:nodes state))
+        live (loop [pending roots seen #{}]
+               (if-let [id (peek pending)]
+                 (recur (into (pop pending) (when-not (seen id)
+                                              (keep (fn [[k n]] (when (= k :node) n))
+                                                    (get-in state [:nodes id :deps])))) (conj seen id))
+                 seen))]
+    (-> (reduce-kv (fn [s id {:keys [deps]}]
+                     (if (live id) s
+                       (-> s (replace-dependencies id deps #{})
+                           (update :nodes dissoc id) (update :handles dissoc id)
+                           (update :options dissoc [:node id]))))
+                   state (:nodes state))
+        (dissoc :prune?))))
+
+(defn- valid-output? [validator v]
+  (cond (keyword? validator) (spec/valid? validator v) validator (validator v) :else true))
 
 (defn- evaluate-node! [system id]
   (when (some #{id} *stack*) (fail! "Reactive dependency cycle" {:type ::cycle :path (conj *stack* id)}))
@@ -222,29 +297,45 @@
     (when-not node (fail! "Reaction was disposed" {:type ::disposed :id id}))
     (if (and (:initialized? node) (not (:dirty? node)))
       (:value node)
-      (let [dependencies (volatile! #{})
-            [value compute] (binding [*stack* (conj *stack* id) *dependencies* dependencies]
-                              (if-let [compute (:compute node)]
-                                [(compute) compute]
-                                (let [initial ((:factory node))]
-                                  (if (fn? initial) [(initial) initial] [initial (:factory node)]))))
-            handle (get-in (state-of system) [:handles id])]
-        (check-value! handle value)
-        (let [state (state-of system)
-              changed? (or (not (:initialized? node)) (not= (:value node) value))
-              updated (-> state
-                          (replace-dependencies id (:deps node) @dependencies)
-                          (assoc-in [:nodes id] (assoc node :compute compute :value value :deps @dependencies
-                                                     :initialized? true :dirty? false)))
-              updated (if changed? (mark-dependents updated [:node id]) updated)]
-          (write-state! system updated)
-          value)))))
+      (let [deps (volatile! #{})
+            compute (volatile! (:compute node))
+            settings (get-in (state-of system) [:registrations [:sub (node-name id)] :options])
+            actions (:actions (state-of system))
+            [ok? value] (try
+                          (let [v (binding [*stack* (conj *stack* id) *dependencies* deps]
+                                    (if-let [f @compute] (f)
+                                      (let [result ((:factory node))]
+                                        (if (fn? result)
+                                          (do (vreset! compute result) (result))
+                                          (do (vreset! compute (:factory node)) result)))))]
+                            (check-value! (get-in (state-of system) [:handles id]) v)
+                            (when-not (valid-output? (:validate settings) v)
+                              (fail! "Subscription output failed its schema" {:type ::invalid-value}))
+                            [true v])
+                          (catch Throwable error
+                            (when-not (= ::unavailable (:type (ex-data error)))
+                              (recover! system (or (::stage (ex-data error)) (first id))
+                                        (or (::id (ex-data error)) (node-name id)) (:owner settings) error))
+                            (write-state! system (assoc (state-of system) :actions actions))
+                            [false (if (and (:good? node) (not= :fallback (:on-error settings)))
+                                     (:good-value node) (:fallback settings))]))
+            available? (or ok? (contains? settings :fallback) (:good? node))
+            changed? (or (not= (:available? node) available?) (not= (:value node) value))
+            updated (cond-> (assoc node :available? available? :compute @compute :value value :deps @deps :dirty? false :initialized? true)
+                      ok? (assoc :good? true :good-value value))]
+        (write-state! system (cond-> (-> (state-of system) (replace-dependencies id (:deps node) @deps)
+                                         (assoc-in [:nodes id] updated))
+                               changed? (mark-dependents [:node id])))
+        value))))
 
 (defn read-reaction [reaction]
   (let [system (-system reaction) id (-id reaction)]
     (transact! system #(do (ensure-handle! reaction)
                           (dependency! system [:node id])
-                          (evaluate-node! system id)))))
+                          (let [v (evaluate-node! system id)]
+                            (when (and *dependencies* (not (get-in (state-of system) [:nodes id :available?])))
+                              (fail! "Upstream subscription has no validated value" {:type ::unavailable}))
+                            v)))))
 
 (defn- add-node! [system id factory]
   (let [state (state-of system) handle (Reaction. system id) order (:next-order state)]
@@ -255,7 +346,9 @@
 
 (defn reaction [system id f]
   (when-not (and (keyword? id) (fn? f)) (fail! "Reaction needs a keyword ID and function" {:type ::invalid-reaction}))
-  (transact! system #(add-node! system [:reaction id] f)))
+  (transact! system #(let [handle (add-node! system [:reaction id] f)]
+                       (write-state! system (assoc-in (state-of system) [:nodes [:reaction id] :root?] true))
+                       handle)))
 
 (defn queue-action!
   "Queue semantic data for the owner to apply next cycle. No command executes
@@ -276,10 +369,59 @@
     (let [actions (:actions @(:state system))]
       (reset! (:state system) (assoc @(:state system) :actions [])) actions)))
 
-(defn- context [system]
-  {:db (db-signal system) :source #(source system %) :subscribe #(subscribe system %) :queue-action! #(queue-action! system %)})
+(defn- sample! [system id]
+  (let [samples (:samples *transaction*)]
+    (if-let [entry (get @samples id)] entry
+      (let [entry (coeffects/capture (or (:coeffects *transaction*) (:coeffects system)) id
+                                     (:db (:sources *transaction*)) (:restoring? *transaction*))]
+        (vswap! samples assoc id entry)
+        entry))))
 
-(defn- register! [system kind id handler descriptor]
+(defn- marker [entry]
+  (if-let [error (:error entry)] [:error (.getName (class error)) (ex-message error)] [:value (:value entry)]))
+
+(defn- cofx-value [system id]
+  (dependency! system [:cofx id])
+  (let [entry (sample! system id)]
+    (write-state! system (assoc-in (state-of system) [:cofx-snapshot id] (marker entry)))
+    (if-let [error (:error entry)]
+      (throw (ex-info (ex-message error) {::stage :cofx ::id id} error))
+      (:value entry))))
+
+(defn reg-cofx!
+  "Register an on-demand, per-frame, watched, or background input. A sample
+  receives the last committed db. Background work uses an owned bounded pool.
+  The first active reader starts sampling and the last release cancels it."
+  [system id options]
+  (locking (:lock system)
+    (ensure-open! system) (outside-evaluation!)
+    (coeffects/register! (:coeffects system) id options)
+    (write-state! system (mark-dependents (state-of system) [:cofx id]))
+    id))
+
+(defn reg-ref!
+  ([system id ref] (reg-cofx! system id {:ref ref}))
+  ([system id ref select] (reg-cofx! system id {:ref ref :select select})))
+
+(defn invalidate!
+  "Force an active query to run again at the next owner publication."
+  [system query]
+  (locking (:lock system)
+    (ensure-open! system) (outside-evaluation!)
+    (let [id [:subscription query]]
+      (when (get-in (state-of system) [:nodes id])
+        (write-state! system (assoc-in (state-of system) [:nodes id :dirty?] true))
+        true))))
+
+(defn- context [system]
+  {:db (db-signal system) :source #(source system %) :cofx #(cofx-value system %)
+   ;; A form-2 closure may hold a child query across a period without readers.
+   ;; Resolve its cached handle at deref time so a later branch can reacquire it.
+   :subscribe (fn [query] (reify clojure.lang.IDeref
+                            (deref [_] (binding [*managed-query* true] @(subscribe system query)))))
+   :queue-action! #(queue-action! system %)})
+
+(defn- register! [system kind id handler descriptor options]
   (when-not (and (keyword? id) (fn? handler)) (fail! "Registration needs a keyword ID and function" {:type ::invalid-registration}))
   (when descriptor
     (registry/validate-definition descriptor)
@@ -290,7 +432,7 @@
     (when *transaction* (fail! "Register handlers outside reactive evaluation" {:type ::mutation-during-evaluation}))
     (reset! (:state system)
             (-> @(:state system)
-                (assoc-in [:registrations [kind id]] {:handler handler :descriptor descriptor})
+                (assoc-in [:registrations [kind id]] {:handler handler :descriptor descriptor :options options})
                 (update :nodes (fn [nodes]
                                  (into {} (map (fn [[node-id node]]
                                                 [node-id (if (and (= :sub kind) (= :subscription (first node-id))
@@ -300,10 +442,22 @@
 
 (defn reg-sub!
   ([system id handler] (reg-sub! system id handler nil))
-  ([system id handler descriptor] (register! system :sub id handler descriptor)))
+  ([system id handler descriptor-or-options]
+   (if (:implementation descriptor-or-options)
+     (reg-sub! system id handler descriptor-or-options (:options descriptor-or-options))
+     (reg-sub! system id handler nil descriptor-or-options)))
+  ([system id handler descriptor options]
+   (when-not (and (or (nil? options) (and (map? options)
+                                          (every? #{:validate :fallback :on-error :owner} (keys options))))
+                  (#{:last-good :fallback} (get options :on-error :last-good))
+                  (or (not (contains? options :fallback))
+                      (and (registry/portable? (:fallback options))
+                           (valid-output? (:validate options) (:fallback options)))))
+     (fail! "Invalid subscription failure policy or fallback" {:type ::invalid-registration :id id}))
+   (register! system :sub id handler (cond-> descriptor (and descriptor (seq options)) (assoc :options options)) options)))
 (defn reg-fx!
   ([system id handler] (reg-fx! system id handler nil))
-  ([system id handler descriptor] (register! system :fx id handler descriptor)))
+  ([system id handler descriptor] (register! system :fx id handler descriptor (:options descriptor))))
 
 (defn subscribe
   "Return a cached signal for a portable query vector. A normal handler returns
@@ -324,6 +478,8 @@
                                            (fn []
                                              (let [handler (get-in (state-of system) [:registrations [:sub (first query)] :handler])]
                                                (handler (context system) query)))))]
+                 (when-not (or *managed-query* (seq *stack*))
+                   (write-state! system (assoc-in (state-of system) [:nodes id :root?] true)))
                  (evaluate-node! system id)
                  handle))))
 
@@ -338,7 +494,7 @@
              (fn []
                (when-not (get-in (state-of system) [:registrations [:fx effect-id]])
                  (fail! "Unknown effect handler" {:type ::unknown-effect :effect-id effect-id}))
-               (subscribe system query)
+               (binding [*managed-query* true] (subscribe system query))
                (let [state (state-of system)]
                  (when (contains? (:watchers state) id) (fail! "Duplicate watcher ID" {:type ::duplicate-id :id id}))
                  (write-state! system (assoc-in state [:watchers id] {:id id :query query :effect-id effect-id
@@ -349,23 +505,73 @@
 (defn unwatch! [system id]
   (locking (:lock system) (ensure-open! system)
            (outside-evaluation!)
-           (write-state! system (update (state-of system) :watchers dissoc id))))
+           (write-state! system (reconcile! system (-> (state-of system) (update :watchers dissoc id)
+                                                      (assoc :prune? true))))))
+
+(defn demanded-queries
+  "Return live query vectors for these registration IDs, including inputs of
+  other held signals. Never starts a producer or evaluates a subscription."
+  [system ids]
+  (into #{} (comp (map key) (filter #(= :subscription (first %))) (map second)
+                  (filter #(contains? ids (first %))))
+        (:nodes @(:state system))))
+
+(defn demanded? [system ids]
+  (boolean (some (fn [[[kind query] _]]
+                   (and (= kind :subscription) (contains? ids (first query))))
+                 (:nodes @(:state system)))))
+
+(defn acquire!
+  "Own a cached query until close!. Capture the initial value and subscribe to
+  future distinct committed values under one lock. on-change must be nonblocking."
+  [system query on-change]
+  (outside-evaluation!)
+  (when-not (ifn? on-change) (throw (IllegalArgumentException. "Expected a query listener")))
+  (locking (:lock system)
+    (let [token (Object.)
+          signal (transact! system
+                   #(let [signal (binding [*managed-query* true] (subscribe system query))
+                          path [:options [:node (-id signal)] :watches token]]
+                      (write-state! system (assoc-in (state-of system) path (fn [_ _ _ value] (on-change value))))
+                      signal))]
+      {:signal signal :value @signal
+       :close! (fn []
+                 (locking (:lock system)
+                   (let [state (state-of system) id (-id signal) path [:options [:node id] :watches]]
+                     (when (and (identical? signal (get-in state [:handles id])) (contains? (get-in state path) token))
+                       (outside-evaluation!)
+                       (write-state! system (reconcile! system (-> state (update-in path dissoc token)
+                                                                  (assoc :prune? true))))))))})))
 
 (defn- run-watchers! [system]
   (doseq [{:keys [id query effect-id initialized? value]} (sort-by :order (vals (:watchers (state-of system))))]
     (let [new (evaluate-node! system [:subscription query])]
-      (when (or (not initialized?) (not= value new))
-        (let [handler (get-in (state-of system) [:registrations [:fx effect-id] :handler])
-              actions (handler (context system) new (when initialized? value))]
-          (cond
-            (nil? actions) nil
-            (map? actions) (queue-action! system actions)
-            (vector? actions) (doseq [action actions] (queue-action! system action))
-            :else (fail! "Reactive effect handler must return action data or nil" {:type ::invalid-action :effect-id effect-id}))
-          (when *delivery-trace*
-            (delivered! :reactive/dispatch :subscription (first query) id
-                        {:watcher-id id :registration-id effect-id}))
+      (when (and (get-in (state-of system) [:nodes [:subscription query] :available?])
+                 (or (not initialized?) (not= value new)))
+        (let [reg (get-in (state-of system) [:registrations [:fx effect-id]])
+              before (:actions (state-of system))]
+          (try
+            (let [actions ((:handler reg) (context system) new (when initialized? value))]
+              (cond
+                (nil? actions) nil
+                (map? actions) (queue-action! system actions)
+                (vector? actions) (doseq [action actions] (queue-action! system action))
+                :else (fail! "Reactive effect handler must return action data or nil" {:type ::invalid-action :effect-id effect-id})))
+            (when *delivery-trace*
+              (delivered! :reactive/dispatch :subscription (first query) id {:watcher-id id :registration-id effect-id}))
+            (catch Throwable error
+              (recover! system :effect-handler effect-id (get-in reg [:options :owner]) error)
+              (write-state! system (assoc (state-of system) :actions before))))
           (write-state! system (update-in (state-of system) [:watchers id] assoc :initialized? true :value new)))))))
+
+(defn- refresh-coeffects! [system]
+  (doseq [id (coeffects/active-ids (:coeffects system))
+          :when (not (coeffects/demand-only? (:coeffects system) id))]
+    (let [result (sample! system id)
+          marker (marker result)
+          state (state-of system)]
+      (when (not= marker (get-in state [:cofx-snapshot id]))
+        (write-state! system (-> state (assoc-in [:cofx-snapshot id] marker) (mark-dependents [:cofx id])))))))
 
 (defn publish!
   "Freeze source values and commit a complete derived/action batch. With db,
@@ -383,7 +589,10 @@
                                (write-state! system
                                              (-> (reduce #(mark-dependents %1 [:source %2]) state changed)
                                                  (assoc :source-snapshot captured) (update :generation inc)))
+                               (refresh-coeffects! system)
                                (loop []
+                                 (when (:prune? (state-of system))
+                                   (write-state! system (reconcile! system (state-of system))))
                                  (when-let [[id _] (first (sort-by (comp :order val) (filter (comp :dirty? val) (:nodes (state-of system)))))]
                                    (evaluate-node! system id) (recur)))
                                (run-watchers! system)
@@ -392,14 +601,23 @@
      ;; Watch callbacks observe an already committed batch, never a partial DAG.
      (doseq [[id node] (:nodes @(:state system))
              :let [old (get-in before [:nodes id :value])]
-             :when (not= old (:value node))]
+             :when (and (:available? node)
+                        (or (not (get-in before [:nodes id :available?])) (not= old (:value node))))]
        (notify-watches! (get-in @(:state system) [:handles id]) old (:value node)))
-     result)))
-  ([system db] (locking (:lock system) (reset! (db-signal system) db) (publish! system))))
+     (let [state (state-of system)
+           pending (filterv #(> (:sequence %) (get before :published-fault-sequence 0)) (:faults state))]
+       (when (seq pending)
+         (write-state! system (assoc state :published-fault-sequence (:fault-sequence state))))
+       (assoc result :faults pending)))))
+  ([system db]
+   (locking (:lock system)
+     (try (reset! (db-signal system) db)
+          (catch Throwable e (recover! system :source :db nil e)))
+     (publish! system))))
 
 (defn publish-traced!
   "Publish normally and return named reads and completed watcher deliveries from
-  this publication under :delivery-trace. Failed batches throw as in publish!.
+  this publication under :delivery-trace, including isolated failures.
   Values, query arguments and handler closures never enter the trace."
   [system db]
   (binding [*delivery-trace* (volatile! {:events [] :skipped 0})]
@@ -422,7 +640,7 @@
                       (when (= id :db) (fail! "The canonical db source cannot be disposed" {:type ::canonical-source}))
                       (reset! (:sources system) (dissoc @(:sources system) id))
                       (-> state (update :cell-handles dissoc id) (update :source-snapshot dissoc id))))]
-        (write-state! system (update state :options dissoc dependency))))
+        (write-state! system (reconcile! system (-> state (update :options dissoc dependency) (assoc :prune? true))))))
     nil))
 
 (defn export-registry
@@ -465,23 +683,29 @@
                          (assoc :source-snapshot sources
                                 :cell-handles (into {} (map (fn [id] [id (Cell. system id)]) (keys sources)))
                                 :registrations (into {} (map (fn [[{:keys [id kind] :as descriptor} handler]]
-                                                              [[kind id] {:handler handler :descriptor descriptor}]) resolved))))
+                                                              [[kind id] {:handler handler :descriptor descriptor :options (:options descriptor)}]) resolved))))
+             staged (coeffects/fork (:coeffects system))
              working (volatile! initial)]
          ;; One staged graph, with handles pointing at the real owner. Factories
          ;; are constructed once, and no graph is visible until all succeed.
-         (binding [*transaction* {:system system :working working :sources sources :restoring? true}
+         (try
+           (binding [*transaction* {:system system :working working :sources sources :samples (volatile! {})
+                                   :coeffects staged :restoring? true}
                    *stack* [] *dependencies* nil]
            (doseq [{:keys [id query effect-id] :as watcher} (get-in data [:state :watchers])]
              (watch! system id query effect-id)
              (write-state! system (update-in (state-of system) [:watchers id] merge watcher)))
-           (write-state! system (assoc (state-of system) :actions (get-in data [:state :pending-actions] []))))
+             (write-state! system (assoc (state-of system) :actions (get-in data [:state :pending-actions] []))))
+           (catch Throwable e (coeffects/retain! staged #{}) (throw e)))
+         (coeffects/adopt! (:coeffects system) staged)
          (reset! (:sources system) sources)
-         (reset! (:state system) @working))))
+         (reset! (:state system) (reconcile! system @working)))))
    system))
 
 (defn close! [system]
   (locking (:lock system)
     (outside-evaluation!)
+    (coeffects/close! (:coeffects system))
     (reset! (:state system) {:closed? true}) (reset! (:sources system) {}))
   nil)
 
