@@ -991,9 +991,17 @@
                    (conj reports (merge {:leader leader :follower follower} result)))))
         reports))))
 
-(defn- finish-contributions [patch ^objects assigned options pack]
+(defn- finish-contributions [patch ^objects assigned options values present pack]
   (let [links (:edge-tracking options)
         reports (when (seq links) (apply-tracking! patch assigned (prepare-previous-compact patch options)))
+        _ (when (:hdr options)
+            (apply-hdr! patch options values present assigned)
+            ;; A tracked head that cannot reach its receiver stays dark even
+            ;; when a neighboring source sends it HDR spill. Its own dimmer
+            ;; was already zero while computing outgoing spatial highlights.
+            (doseq [{:keys [follower reason]} reports :when reason
+                    :let [i (get-in patch [:by-id follower ::index])] :when (some? i)]
+              (aset assigned (int i) (assoc (aget assigned (int i)) :dimmer 0.0))))
         pack (if reports (fn [opts] (assoc (pack opts) :edge-tracking reports)) pack)]
     (if (::prepare-movement? options)
       (let [targets (if assigned
@@ -1024,8 +1032,7 @@
                                      :batch (expand-batch (:compiled block)))
                                    sources (:source block))))
     (persist-assignments! assigned)
-    (apply-hdr! patch options nil nil assigned)
-    (finish-contributions patch assigned (assoc options ::geometry-sources sources)
+    (finish-contributions patch assigned (assoc options ::geometry-sources sources) nil nil
                           #(pack-general-state patch assigned %))))
 
 (defn- resolve-partitioned
@@ -1039,8 +1046,7 @@
               (case (:kind block)
                 :assignments (merge-packed-assignments! patch values present (:assignments block))
                 :batch (merge-packed-batches! patch values present [(:compiled block)]))))
-          (apply-hdr! patch options values present nil)
-          (finish-contributions patch nil options #(pack-dense-state patch values present %)))
+          (finish-contributions patch nil options values present #(pack-dense-state patch values present %)))
       (let [general (boolean-array (count (:fixtures patch)))
             assigned (object-array (count (:fixtures patch)))
             sources (geometry-source-storage patch blocks)]
@@ -1063,11 +1069,10 @@
         (dotimes [index (alength general)]
           (when (and (aget general index) (nil? (aget ^objects assigned index)))
             (aset ^objects assigned index {})))
-        (apply-hdr! patch options values present assigned)
         (finish-contributions patch assigned
                               (assoc (prepare-previous-compact patch options)
                                      ::general-assigned assigned ::geometry-sources sources)
-                              #(pack-dense-state patch values present %))))))
+                              values present #(pack-dense-state patch values present %))))))
 
 (defn- reduce-contributions [fixtures contributions options]
   (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))

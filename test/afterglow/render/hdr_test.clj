@@ -116,3 +116,10 @@
                                        :transforms [{:attribute :color :value {:op :previous :attribute :color}}]})
         bytes (native-and-rich [base modifier] {:hdr {:cue-gains {:lift 3.0} :spill 1 :radius 1}})]
     (is (= [255 0 0 26] (subvec bytes 0 4)))))
+
+(deftest suppressed-edge-followers-neither-cast-spill-nor-light-up-from-it
+  (let [opts {:hdr {:spill 1.0 :radius 2.0} :edge-tracking [{:leader :missing :follower :source}]}
+        hidden (native-and-rich [(block (row :source :color [3.0 0 0]))] opts)
+        incoming (native-and-rich [(block (row :near :color [3.0 0 0]))] opts)]
+    (is (every? zero? hidden))
+    (is (= [0 0 0 255] (subvec incoming 0 4)))))
