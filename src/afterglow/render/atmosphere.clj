@@ -41,6 +41,15 @@
       (zipmap (remove nil? [(:coarse channel) (:fine channel)]) (physical-bytes channel off)))
     {}))
 
+(defn- inverse-channel-value [pivot physical]
+  (/ (if (and pivot (>= physical pivot)) (+ pivot (- 255.0 physical)) physical) 255.0))
+
+(defn- bin-center [[coarse fine]]
+  (if (or (nil? fine) (= 255 coarse))
+    (double coarse)
+    ;; The first and last fine bins stop at the coarse byte boundary.
+    (+ coarse (/ (max 0.25 (min fine 254.75)) 255.0))))
+
 (defn physical-level
   "Convert a desired physical coarse-unit DMX value to a normalized effect input.
   Inversion reflects the interval from its pivot upwards. On fractional pivots,
@@ -48,14 +57,20 @@
   [{:keys [inverted-from] :as channel} physical]
   (require! (and (finite? physical) (<= 0 physical 255)) "Physical fog level must be in [0,255]" {:value physical})
   (let [pivot (some-> inverted-from double)
-        inverted? (and pivot (>= (double physical) pivot))
-        level (/ (if inverted? (+ pivot (- 255.0 (double physical))) (double physical)) 255.0)
         target (physical-bytes channel physical)
         matches? (fn [v]
                    (let [raw (* 255.0 v)
                          out (if (and pivot (>= raw pivot)) (- 255.0 (- raw pivot)) raw)]
-                     (and (<= 0.0 v 1.0) (= target (physical-bytes channel out)))))]
-    (or (some #(when (matches? %) %) [level (Math/nextDown level) (Math/nextUp level)]) level)))
+                     (and (<= 0.0 v 1.0) (= target (physical-bytes channel out)))))
+        level (inverse-channel-value pivot (double physical))]
+    (if (matches? level)
+      level
+      (let [center (inverse-channel-value pivot (bin-center target))]
+        (or (some #(when (matches? %) %)
+                  [center (Math/nextDown center) (Math/nextUp center)
+                   (Math/nextDown level) (Math/nextUp level)])
+            (throw (ex-info "No representable input for requested fog channel bytes"
+                            {:pivot pivot :physical physical :bytes target})))))))
 
 (defn plan
   "Compile the fog-capable part of a patch. Pass the room in metres and a
