@@ -104,3 +104,8 @@ For physical native output, feed the ordered contribution stream to
 before rotation. Keep one bounded owner per show and pass only accepted movement
 history. Native results must stay with their submitting frame. Check the
 published rich and compact poses and coarse/fine DMX, including fallback.
+
+Keep compound cue members in their declared order through native composition.
+Resolve fields and group opacity before edge tracking, pan/tilt solving, RGBW
+extraction and DMX packing. Preserve untouched attributes and the final
+contributing member's fault source. Cover both rich and compact output.

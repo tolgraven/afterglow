@@ -91,3 +91,25 @@
                    (compute/open! {:compute-backend :native-gpu :movement-backend :native-gpu})))
       (let [blocks [{:kind :assignments :assignments [{:target-id :spot :attribute :direction :value [1 2 3]}]}]]
         (is (= :closed (:reason (:movement (movement/resolve-contributions! @captured patch blocks)))))))))
+
+(deftest deferred-native-field-can-modify-the-prior-members-world-direction
+  (let [[first-block second-block] (blocks 0.75)
+        tag (fn [b member transforms]
+              (assoc b :native-layer {:id :layer :member member :transforms transforms}))
+        stream [(tag second-block 1 [{:attribute :direction
+                                      :value {:op :add :args [{:op :previous :attribute :direction}
+                                                               {:op :incoming :attribute :direction}]}}])
+                (tag first-block 0 [])]
+        owner (compute/open! {:compute-backend :native-gpu :movement-backend :native-gpu :budget-ms 5000})]
+    (try
+      (let [out ((compute/frame-renderer owner (System/nanoTime)) patch stream {})
+            ref ((compute/frame-renderer nil (System/nanoTime)) patch stream {})
+            direction (get-in out [:values :spot :direction])]
+        (let [world [0.575 0.225 1.0]
+              length (Math/sqrt (reduce + (map #(* % %) world)))]
+          (is (every? #(< (abs %) 1.0e-8) (map - direction (map #(/ % length) world)))))
+        (is (= direction (get-in ref [:values :spot :direction])))
+        (is (= 1 (:native-dispatches (compute/status owner))))
+        (is (= 1 (:gpu-heads (compute/movement-status owner out))))
+        (is (< (abs (- (get-in ref [:values :spot :pan]) (get-in out [:values :spot :pan]))) 1.0e-5)))
+      (finally (compute/close! owner)))))
