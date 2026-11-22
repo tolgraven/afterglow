@@ -88,6 +88,7 @@
         sources (mapv (fn [s]
                         (let [saved (get old (:fixture-id s))]
                           (cond-> (merge s (select-keys saved [:emitted-m3 :local-m3 :flow-m3-s]))
+                            (not resume?) (merge (select-keys saved [:dmx-coarse :dmx-fine]))
                             resume? (assoc :flow-m3-s 0.0)))) (:sources blank))
         retired (apply dissoc old (map :fixture-id sources))
         mixed (reduce + (double (:mixed-m3 state 0)) (map :local-m3 (vals retired)))]
@@ -105,10 +106,12 @@
           (fn [sources]
             (mapv (fn [s {:keys [channel dmx-range max-flow-m3-s]}]
                     (let [{:keys [coarse fine]} channel
-                          hi (dmx-byte universes coarse)
-                          lo (if fine (dmx-byte universes fine) 0)]
-                      (if (and (some? hi) (some? lo))
+                          received-hi (dmx-byte universes coarse)
+                          received-lo (when fine (dmx-byte universes fine))]
+                      (if (or (some? received-hi) (some? received-lo))
                         (let [[off full] dmx-range
+                              hi (or received-hi (:dmx-coarse s) (int off))
+                              lo (if fine (or received-lo (:dmx-fine s) 0) 0)
                               amount (min 1.0 (max 0.0 (/ (- (+ hi (/ lo 255.0)) off) (- full off))))]
-                          (assoc s :flow-m3-s (* amount max-flow-m3-s)))
+                          (assoc s :flow-m3-s (* amount max-flow-m3-s) :dmx-coarse hi :dmx-fine lo))
                         s))) sources (:sources plan)))))
