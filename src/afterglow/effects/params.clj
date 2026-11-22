@@ -410,31 +410,31 @@
 
 
 (defn interpret-color
-  "Accept a color as either
-  a [jolby/colors](https://github.com/jolby/colors) object,
-  an [[IParam]] which will produce a color, a keyword, which will be
-  bound to a show variable by the caller, or a string which is passed
-  to the jolby/colors `create-color` function."
+  "Resolve named colors and color objects to HSLA. Keywords and dynamic
+  parameters are bound by the caller."
   [color]
-  (cond (string? color)
-        (clr/as-hsla (apply clr/rgba (map #(/ % 255) (:rgba (colors/create-color color)))))
+  (cond
+    (string? color) (interpret-color (colors/create-color color))
+    (= :com.evocomputing.colors/color (type color))
+    (clr/as-hsla (clr/rgba (/ (colors/red color) 255.0)
+                           (/ (colors/green color) 255.0)
+                           (/ (colors/blue color) 255.0) (colors/alpha color)))
+    (satisfies? clr/IHSLConvert color) (clr/as-hsla color)
+    (or (keyword? color) (param? color)) color
+    :else (throw (IllegalArgumentException. (str "Unable to interpret color parameter: " color)))))
 
-        (keyword? color) ;should pass back a bound color??
-        color
+(def default-color (clr/hsla 0 0 0))
 
-        (= (type color) thi.ng.color.core.HSLA)
-        color
-        (= (type color) :com.evocomputing.colors/color) ;comparing speed
-        color
-
-        (param? color)
-        color
-
-        :else
-        (throw (IllegalArgumentException. (str "Unable to interpret color parameter:" color)))))
-
-(def default-color "The default color for build-color-param (and others)"
-  (clr/as-hsla (apply clr/rgba (map #(/ % 255) (:rgba (colors/create-color :black))))))
+(defn- apply-color-components [base {:keys [r g b h s l adjust-hue adjust-saturation adjust-lightness]}]
+  (let [rgb (fn [v fallback] (if (nil? v) fallback (/ (colors/clamp-rgb-int (math/round v)) 255.0)))
+        base (if (some some? [r g b])
+               (clr/as-hsla (clr/rgba (rgb r (clr/red base)) (rgb g (clr/green base))
+                                      (rgb b (clr/blue base)) (clr/alpha base))) base)
+        percent (fn [v fallback offset]
+                  (cmath/clamp (+ (if (some? v) (/ v 100.0) fallback) (/ (or offset 0) 100.0)) 0.0 1.0))]
+    (clr/hsla (mod (+ (if (some? h) (/ h 360.0) (clr/hue base)) (/ (or adjust-hue 0) 360.0)) 1.0)
+              (percent s (clr/saturation base) adjust-saturation)
+              (percent l (clr/luminance base) adjust-lightness) (clr/alpha base))))
 
 (defn build-color-param
   "Returns a dynamic color parameter. If supplied, `:color` is passed
@@ -466,105 +466,26 @@
   [& {:keys [color r g b h s l adjust-hue adjust-saturation adjust-lightness frame-dynamic]
       :or {color default-color frame-dynamic :default}}]
   {:pre [(some? *show*)]}
-  (let [c (bind-keyword-param (interpret-color color) :com.evocomputing.colors/color default-color "color")
-        r (bind-keyword-param r Number 0)
-        g (bind-keyword-param g Number 0)
-        b (bind-keyword-param b Number 0)
-        h (bind-keyword-param h Number 0)
-        s (bind-keyword-param s Number 0)
-        l (bind-keyword-param l Number 0)
-        adjust-hue (bind-keyword-param adjust-hue Number 0)
-        adjust-saturation (bind-keyword-param adjust-saturation Number 0)
-        adjust-lightness (bind-keyword-param adjust-lightness Number 0)]
-    (if (not-any? param? [c r g b h s l adjust-hue adjust-saturation adjust-lightness])
-      ;; Optimize the degenerate case of all constant parameters
-      (let [result-color (atom c)]
-        (when (seq (filter identity [r g b]))
-          (let [red (when r (colors/clamp-rgb-int (math/round r)))
-                green (when g (colors/clamp-rgb-int (math/round g)))
-                blue (when b (colors/clamp-rgb-int (math/round b)))]
-            (swap! result-color #(colors/create-color {:r (or red (colors/red %))
-                                                       :g (or green (colors/green %))
-                                                       :b (or blue (colors/blue %))
-                                                       :a (colors/alpha %)}))))
-        (when (seq (filter identity [h s l]))
-          (let [hue (when h (colors/clamp-hue (double h)))
-                saturation (when s (colors/clamp-percent-float (double s)))
-                lightness (when l (colors/clamp-percent-float (double l)))]
-            (swap! result-color #(colors/create-color {:h (or hue (colors/hue %))
-                                                       :s (or saturation (colors/saturation %))
-                                                       :l (or lightness (colors/lightness %))}))))
-        (when adjust-hue
-          (swap! result-color #(colors/adjust-hue % (double adjust-hue))))
-        (when adjust-saturation
-          (swap! result-color #(colors/saturate % (double adjust-saturation))))
-        (when adjust-lightness
-          (swap! result-color #(colors/lighten % (double adjust-lightness))))
-        @result-color)
-      ;; Handle the general case of some dynamic parameters
-      (let [dyn (if (= :default frame-dynamic)
-                  ;; Default means incoming args control how dynamic we should be
-                  (boolean (some frame-dynamic-param?
-                                 [color r g b h s l adjust-hue adjust-saturation adjust-lightness]))
-                  ;; We were given an explicit value for frame-dynamic
-                  (boolean frame-dynamic))
-            eval-fn (fn [show snapshot head]
-                      (let [result-color (atom (resolve-param c show snapshot head))]
-                        (when (seq (filter identity [r g b]))
-                          (let [red (when r (colors/clamp-rgb-int
-                                             (math/round (resolve-param r show snapshot head))))
-                                green (when g (colors/clamp-rgb-int
-                                               (math/round (resolve-param g show snapshot head))))
-                                blue (when b ((colors/clamp-rgb-int
-                                               (math/round (resolve-param b show snapshot head)))))]
-                            (swap! result-color #(colors/create-color {:r (or red (colors/red %))
-                                                                       :g (or green (colors/green %))
-                                                                       :b (or blue (colors/blue %))
-                                                                       :a (colors/alpha %)}))))
-                        (when (seq (filter identity [h s l]))
-                          (let [hue (when h (colors/clamp-hue (double (resolve-param h show snapshot head))))
-                                saturation (when s (colors/clamp-percent-float
-                                                    (double (resolve-param s show snapshot head))))
-                                lightness (when l (colors/clamp-percent-float
-                                                   (double (resolve-param l show snapshot head))))]
-                            (swap! result-color #(colors/create-color {:h (or hue (colors/hue %))
-                                                                       :s (or saturation (colors/saturation %))
-                                                                       :l (or lightness (colors/lightness %))}))))
-                                (when adjust-hue
-                                  (swap! result-color
-                                         #(colors/adjust-hue % (double (resolve-param adjust-hue show snapshot head)))))
-                                (when adjust-saturation
-                                  (swap! result-color #(colors/saturate % (double (resolve-param adjust-saturation
-                                                                                                 show snapshot head)))))
-                                (when adjust-lightness
-                                  (swap! result-color
-                                         #(colors/lighten % (double (resolve-param
-                                                                     adjust-lightness show snapshot head)))))
-                                @result-color))
-            resolve-fn (fn [show snapshot head]
-                         (with-show show
-                           (build-color-param :color (resolve-unless-frame-dynamic c show snapshot head)
-                                              :r (resolve-unless-frame-dynamic r show snapshot head)
-                                              :g (resolve-unless-frame-dynamic g show snapshot head)
-                                              :b (resolve-unless-frame-dynamic b show snapshot head)
-                                              :h (resolve-unless-frame-dynamic h show snapshot head)
-                                              :s (resolve-unless-frame-dynamic s show snapshot head)
-                                              :l (resolve-unless-frame-dynamic l show snapshot head)
-                                              :adjust-hue (resolve-unless-frame-dynamic adjust-hue show snapshot head)
-                                              :adjust-saturation (resolve-unless-frame-dynamic
-                                                                  adjust-saturation show snapshot head)
-                                              :adjust-lightness (resolve-unless-frame-dynamic
-                                                                 adjust-lightness show snapshot head)
-                                              :frame-dynamic dyn)))]
+  (let [base (bind-keyword-param (interpret-color color) thi.ng.color.core.HSLA default-color "color")
+        components (update-vals {:r r :g g :b b :h h :s s :l l :adjust-hue adjust-hue
+                                 :adjust-saturation adjust-saturation :adjust-lightness adjust-lightness}
+                                #(bind-keyword-param % Number 0))
+        inputs (cons base (vals components))]
+    (if (not-any? param? inputs)
+      (apply-color-components base components)
+      (let [dynamic? (if (= :default frame-dynamic) (boolean (some frame-dynamic-param? inputs)) (boolean frame-dynamic))]
         (reify IParam
-          (evaluate [_this show snapshot head]
-            (eval-fn show snapshot head))
-          (frame-dynamic? [_this]
-            dyn)
-          (result-type [_this]
-            :com.evocomputing.colors/color)
-          (resolve-non-frame-dynamic-elements [_this show snapshot head]
-            (resolve-fn show snapshot head)))))))
+          (evaluate [_ show snapshot head]
+            (apply-color-components (resolve-param base show snapshot head)
+                                    (update-vals components #(resolve-param % show snapshot head))))
+          (frame-dynamic? [_] dynamic?)
+          (result-type [_] thi.ng.color.core.HSLA)
+          (resolve-non-frame-dynamic-elements [_ show snapshot head]
+            (with-show show
+              (apply build-color-param
+                     (mapcat identity (assoc (update-vals components #(resolve-unless-frame-dynamic % show snapshot head))
+                                             :color (resolve-unless-frame-dynamic base show snapshot head)
+                                             :frame-dynamic dynamic?))))))))))
 
 (defn build-direction-param
   "Returns a dynamic direction parameter for use

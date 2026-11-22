@@ -135,7 +135,7 @@
     (into {}
           (for [[id schema] (:params definition)
                 :when (and (:velocity schema) (#{:number :integer} (:type schema)))
-                :let [[low high] (:bounds schema [0 1])
+                :let [[low high] (or (:bounds schema) [0 1])
                       from (:velocity-min schema low) to (:velocity-max schema high)
                       _ (when-not (every? params/finite-number? [from to])
                           (throw (ex-info "Velocity endpoints must be finite" {:param id})))

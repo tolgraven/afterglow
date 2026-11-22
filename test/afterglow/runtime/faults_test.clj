@@ -163,3 +163,16 @@
     (is (= 37 (get-in many [:variables :runtime :events 0 :sequence])))
     (with-open [pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
       (is (= 1 (:verified-steps (replay/replay (:recording recorded) compile {:map-work (executor/mapper pool)})))))))
+
+(deftest retrying-a-candidate-that-still-fails-preparation-keeps-its-fault
+  (let [model (-> (control/new-show (fixture/model (fixture/instance "live" :reload-policy :preserve-state)))
+                  (assoc-in [:registry :effects :pulse :version] 2)
+                  (assoc-in [:registry :effects :pulse :params :level] {:type :integer :default nil}))
+        failed (invoke model 10 fixture/compiler)
+        retry (:model (control/apply-command (:model failed)
+                         {:op :instance/retry :instance-id "live" :command-id "retry-preparation"
+                          :source :test :show-id (:show-id model) :epoch (:epoch model)}))
+        again (invoke retry 20 fixture/compiler)]
+    (is (= [:effect/reload-failed] (mapv :type (:fault-events failed))))
+    (is (= [:effect/reload-failed] (mapv :type (:fault-events again))))
+    (is (= 1 (get-in again [:model :instances "live" :effect-version])))))
