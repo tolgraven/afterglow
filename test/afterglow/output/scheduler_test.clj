@@ -101,6 +101,8 @@
         physical #(bit-and 255 (get-in %1 %2))]
     (is (= 196 (physical (delivery) [3 511])))
     (is (= 128 (physical (delivery) [4 0])))
+    (is (not (contains? (retirement/include-retired plan {}) 3))
+        "A partial transport packet cannot fabricate zeroes in the active universe.")
     (is (zero? (physical raw [3 511])) "Rendering keeps the original array.")
     (aset-byte ^bytes (get (delivery) 4) 0 (byte 2))
     (is (= 128 (physical (delivery) [4 0])) "The next packet owns its bytes.")
