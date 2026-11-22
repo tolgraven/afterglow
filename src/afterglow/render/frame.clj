@@ -5,7 +5,8 @@
   metres, +Y up, a local forward direction of +Z, positive yaw toward +X and
   positive elevation toward +Y. This is a new explicit fixture contract, not
   an implementation of all legacy fixture function ranges/optics."
-  (:require [afterglow.render.optics :as optics]
+  (:require [afterglow.render.atmosphere :as atmosphere]
+            [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
             [afterglow.runtime.faults :as faults]))
 
@@ -112,6 +113,7 @@
         (mapv
          (fn [index fixture]
            (let [{:keys [id position universe address channels calibration]} fixture]
+             (when (contains? fixture :fogger) (atmosphere/validate-fogger! fixture))
              (when-let [{:keys [path message]} (first (photometry/errors fixture))]
                (fail! message {:path (into [:fixtures index] path) :fixture-id id}))
              (when-not (and (map? fixture) (some? id)
