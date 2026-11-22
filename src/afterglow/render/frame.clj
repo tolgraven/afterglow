@@ -6,6 +6,7 @@
   positive elevation toward +Y. This is a new explicit fixture contract, not
   an implementation of all legacy fixture function ranges/optics."
   (:require [afterglow.render.atmosphere :as atmosphere]
+            [afterglow.render.emission.dense :as emission]
             [afterglow.render.layers :as layers]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
@@ -193,7 +194,8 @@
                                                            (get-in fixture [:compiled-channels :fog])
                                                            (first (get-in fixture [:fogger :dmx-range] [0 255]))))))
                          compiled)]
-      {:type ::patch :fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)
+      {:type ::patch ::emission-layout (emission/compile-layout compiled universes ::emission-channels)
+       :fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)
        :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
        ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
        :target-order (mapv :id compiled) ::attribute-slots attribute-slots
