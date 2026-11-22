@@ -14,7 +14,7 @@
   [settings]
   (let [{:keys [gain source-gains cue-gains instance-gains fixture-ids max-excess
                 white-mix spill spill-white-mix radius falloff]
-         :or {gain 1 max-excess 1 white-mix 0 spill 0 spill-white-mix 0 radius 1 falloff :linear}} settings]
+         :or {gain 1 max-excess 1 white-mix 1 spill 0 spill-white-mix 1 radius 1 falloff :linear}} settings]
     (when-not (and (map? settings)
                    (every? #{:gain :source-gains :cue-gains :instance-gains :fixture-ids
                              :max-excess :white-mix :spill :spill-white-mix :radius :falloff} (keys settings))
@@ -183,6 +183,9 @@
   [layout settings read-at! write-at! high-at? fixture-count packed]
   (let [allowed (some-> (:fixture-ids settings) set)
         scoped? #(or (nil? allowed) (contains? allowed (:id %)))
+        default-white (if (seq settings) 1.0 0.0)
+        source-white-mix (double (:white-mix settings default-white))
+        spill-white-mix (double (:spill-white-mix settings default-white))
         gain (:gain settings 1.0)
         gains (:source-gains settings)
         limit (:max-excess settings 1.0)
@@ -207,14 +210,14 @@
             (aset changed i true)
             (aset gain-frame i g)
             (when (and (pos? peak) (scoped? head))
-              (aset whites i (min 1.0 (* (double (:white-mix settings 0)) peak)))
+              (aset whites i (min 1.0 (* source-white-mix peak)))
               (when (and spill? (gate-open? head read-value)) (scatter! layout head allowed incident excess settings)))))))
     (doseq [head (:heads layout)]
       (let [i (int (:index head)) at (* i 3)
             halo (max (aget incident at) (aget incident (inc at)) (aget incident (+ at 2)))]
         (when (or (aget changed i) (pos? halo))
           (let [gain (aget gain-frame i) white (aget whites i)
-                spill-white (min 1.0 (* (double (:spill-white-mix settings 0)) halo))]
+                spill-white (min 1.0 (* spill-white-mix halo))]
             (if (packed/eligible? packed head)
               (packed/write! packed head incident [gain white spill-white])
               (let [row (or (aget sources i) (read-row head #(read-at! i %1 %2)))]
