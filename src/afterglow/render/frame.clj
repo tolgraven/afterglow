@@ -9,6 +9,7 @@
             [afterglow.render.emission.dense :as emission]
             [afterglow.render.layers :as layers]
             [afterglow.render.hdr :as hdr]
+            [afterglow.render.hdr.packed :as packed-hdr]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
             [afterglow.runtime.faults :as faults]))
@@ -636,7 +637,8 @@
                                 (aset present (+ base c) true))
                               (let [at (+ base (long (slots attr)))]
                                 (aset values at (double v)) (aset present at true)))))))]
-      (hdr/process! @(::hdr-layout patch) settings read-at! write-at! high-at? (count (:fixtures patch))))))
+      (hdr/process! @(::hdr-layout patch) settings read-at! write-at! high-at? (count (:fixtures patch))
+                    (when values (packed-hdr/->Storage values present stride general))))))
 
 (defn- pack-dense-state
   [patch ^doubles values ^booleans present {:keys [master blackout? compact-values?] :as options}]

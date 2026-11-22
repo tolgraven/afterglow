@@ -88,3 +88,23 @@
         render (fn [rows] (subvec (bytes-of (frame/resolve-frame p rows {:hdr {:spill 1}})) 0 8))]
     (is (= [128 0 0 128 0 0 0 0] (render values)))
     (is (= [128 0 0 128 255 51 0 0] (render (conj values (row :source :shutter 1)))))))
+
+(deftest layered-native-overrides-and-large-gains-agree-across-storage-paths
+  (doseq [source [(block (row :source :color [1.4 0.4 0]) (row :source :red 0.5))
+                  (block (row :source :red 0.5) (row :source :blue 0.7) (row :source :dimmer 0.8))]
+          gain [0 0.3 1 1.6]]
+    (native-and-rich [source] {:hdr {:gain gain :radius 2 :white-mix 1.0 :spill 1.0 :spill-white-mix 0.5}}))
+  (is (= [255 255 255] (subvec (native-and-rich [(block (row :source :color [2.0 0.0 0.0]))]
+                                    {:hdr {:gain Double/MAX_VALUE :max-excess 1.0 :white-mix 1.0}})
+                              0 3))))
+
+(deftest one-bounce-and-patch-order-independence
+  (let [fixtures [(rgb-head :a 510 [0 0 0]) (rgb-head :b 4 [0 0.5 0]) (rgb-head :c 7 [0 1.2 0])]
+        rows [(row :a :color [4 0 0])]
+        opts {:hdr {:radius 1 :spill 1 :max-excess 3} :master 0.5}
+        run (fn [rig] (-> (frame/resolve-frame rig rows opts) :universes (update-vals vec)))
+        bytes (run fixtures)]
+    (is (= bytes (run (vec (reverse fixtures)))))
+    (is (= 128 (bit-and 255 (nth (get bytes 1) 3))))
+    ;; B is saturated from incident light and lies within range of C. Only A casts spill.
+    (is (zero? (nth (get bytes 1) 6)))))

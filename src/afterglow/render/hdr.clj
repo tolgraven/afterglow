@@ -1,6 +1,7 @@
 (ns afterglow.render.hdr
   "Linear light overdrive and single-bounce spatial highlights before DMX packing."
   (:require [afterglow.render.photometry :as photometry]
+            [afterglow.render.hdr.packed :as packed]
             [clojure.string :as str]
             [thi.ng.color.core :as color]))
 
@@ -56,6 +57,7 @@
     (when (or lamp? (seq attrs))
       (assoc (->Head id i position rgb? (= rgbw-policy :extract-min) (boolean lamp?)
                      (if lamp? [(->Lane :dimmer 3 (or emission-color [1 1 1]) :tint)] physical) virtual shutters)
+             :simple-rgb? (and rgb? (every? #{:red :green :blue :white} attrs))
              :scan-slots (int-array (into [0 1 2 3] (map :slot) physical))))))
 
 (defn layout
@@ -75,7 +77,7 @@
       (let [mid (unsigned-bit-shift-right (+ lo hi) 1)]
         (if (< (aget coords mid) (double x)) (recur (inc mid) hi) (recur lo mid))))))
 
-(defn- scatter! [{:keys [spatial axis coords]} head allowed ^doubles incident excess settings]
+(defn- scatter! [{:keys [spatial axis coords]} head allowed ^doubles incident ^doubles excess settings]
   (let [[x y z :as pos] (:position head)
         radius (double (:radius settings 1))
         center (double (nth pos axis))
@@ -94,7 +96,7 @@
                   (let [f (* spill (case falloff :linear t :quadratic (* t t) :smoothstep (* t t (- 3.0 (* 2.0 t)))))
                         at (* 3 (long (:index other)))]
                     (dotimes [c 3]
-                      (aset incident (+ at c) (+ (aget incident (+ at c)) (* f (double (nth excess c)))))))))))
+                      (aset incident (+ at c) (min Double/MAX_VALUE (+ (aget incident (+ at c)) (* f (aget excess c)))))))))))
           (recur (inc k)))))))
 
 (defn- gate-open? [head read-value]
@@ -137,20 +139,20 @@
 (defn- source-excess [row gain limit]
   (let [{:keys [lanes levels dimmer]} row
         ^doubles levels levels
-        scale (* (double gain) (double dimmer))
+        scale (min Double/MAX_VALUE (* (double gain) (double dimmer)))
         out (double-array 3)]
     (dotimes [j (alength levels)]
-      (let [raw (* scale (aget levels j))]
-        (when-not (Double/isFinite raw) (throw (ex-info "HDR emitter arithmetic overflow" {})))
+      (let [raw (min Double/MAX_VALUE (* scale (aget levels j)))]
         (when (> raw 1.0)
           (let [tint (:tint (nth lanes j)) extra (- raw 1.0)]
             (dotimes [c 3] (aset out c (+ (aget out c) (* extra (double (nth tint c))))))))))
-    (mapv #(min (double limit) %) out)))
+    (dotimes [c 3] (aset out c (min (double limit) (aget out c))))
+    out))
 
 (defn- write-row [row head gain source-white ^doubles incident at spill-white]
   (let [{:keys [lanes levels dimmer virtual?]} row
         ^doubles levels levels
-        scale (* (double dimmer) (double gain))
+        scale (min Double/MAX_VALUE (* (double dimmer) (double gain)))
         changed (double-array (alength levels))
         peak (loop [j 0 peak 0.0]
                (if (= j (alength levels)) peak
@@ -166,7 +168,10 @@
         d (if (:lamp? head) peak (max peak (min 1.0 scale)))]
     (if (:lamp? head) {:dimmer d}
       (let [normalized (fn [i] (if (pos? d) (/ (aget changed (int i)) d) 0.0))
-            start (if virtual? {:color (mapv normalized (range 3)) :dimmer d} {:dimmer d})]
+            start (cond-> {:dimmer d}
+                    virtual? (assoc :color (mapv normalized (range 3)))
+                    (and (not virtual?) (some #(> (double %) 1.0) (:color row)))
+                    (assoc :color (mapv #(min 1.0 (double %)) (:color row))))]
         (reduce (fn [m j] (assoc m (:attribute (nth lanes j)) (normalized j)))
                 start (range (if virtual? 3 0) (count lanes)))))))
 
@@ -174,7 +179,7 @@
   "Read the composed native field of each emitter and write only normalized
   changes to the private frame scratch. Incoming spill is accumulated from the
   untouched first pass. No fixture can feed received energy back into the pass."
-  [layout settings read-at! write-at! high-at? fixture-count]
+  [layout settings read-at! write-at! high-at? fixture-count packed]
   (let [allowed (some-> (:fixture-ids settings) set)
         scoped? #(or (nil? allowed) (contains? allowed (:id %)))
         gain (:gain settings 1.0)
@@ -182,26 +187,37 @@
         limit (:max-excess settings 1.0)
         spill? (and (pos? (:spill settings 0)) (pos? (:radius settings 1)))
         incident (double-array (* 3 fixture-count))
-        sources (object-array fixture-count)]
+        sources (object-array fixture-count)
+        gain-frame (double-array fixture-count 1.0)
+        whites (double-array fixture-count)
+        changed (boolean-array fixture-count)
+        tmp (double-array 3)]
     (doseq [head (:heads layout)]
-      (let [i (:index head)
-            g (* (double (if (scoped? head) gain 1.0)) (double (get gains (:id head) 1.0)))]
+      (let [i (int (:index head))
+            g (min Double/MAX_VALUE (* (double (if (scoped? head) gain 1.0)) (double (get gains (:id head) 1.0))))]
         (when (or (not (== g 1.0)) (high-at? head))
           (let [read-value #(read-at! i %1 %2)
-                row (read-row head read-value)
-                excess (source-excess row g limit)]
-            (aset sources i [row g (if (scoped? head) (* (double (:white-mix settings 0)) (apply max excess)) 0.0)])
-            (when (and spill? (scoped? head) (some pos? excess) (gate-open? head read-value))
-              (scatter! layout head allowed incident excess settings))))))
+                ^doubles excess (if (packed/eligible? packed head)
+                                  (do (packed/excess! packed head [g limit] tmp) tmp)
+                                  (let [row (read-row head read-value)]
+                                    (aset sources i row)
+                                    (source-excess row g limit)))
+                peak (max (aget excess 0) (aget excess 1) (aget excess 2))]
+            (aset changed i true)
+            (aset gain-frame i g)
+            (when (and (pos? peak) (scoped? head))
+              (aset whites i (min 1.0 (* (double (:white-mix settings 0)) peak)))
+              (when (and spill? (gate-open? head read-value)) (scatter! layout head allowed incident excess settings)))))))
     (doseq [head (:heads layout)]
       (let [i (int (:index head)) at (* i 3)
-            halo (max (aget incident at) (aget incident (inc at)) (aget incident (+ at 2)))
-            own (aget sources i)]
-        (when (or own (pos? halo))
-          (let [[row gain white] (or own [(read-row head #(read-at! i %1 %2)) 1.0 0.0])
-                changed (write-row row head gain (min 1.0 white) incident at
-                                   (min 1.0 (* (double (:spill-white-mix settings 0)) halo)))]
-            (write-at! i changed)))))))
+            halo (max (aget incident at) (aget incident (inc at)) (aget incident (+ at 2)))]
+        (when (or (aget changed i) (pos? halo))
+          (let [gain (aget gain-frame i) white (aget whites i)
+                spill-white (min 1.0 (* (double (:spill-white-mix settings 0)) halo))]
+            (if (packed/eligible? packed head)
+              (packed/write! packed head incident [gain white spill-white])
+              (let [row (or (aget sources i) (read-row head #(read-at! i %1 %2)))]
+                (write-at! i (write-row row head gain white incident at spill-white))))))))))
 
 (defn- contribution-gain [{:keys [source emission-gain]} {:keys [cue-gains instance-gains]}]
   (let [g (* (double (or emission-gain 1)) (double (get cue-gains (:cue-id source) 1))
