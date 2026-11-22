@@ -459,6 +459,11 @@
   ([system id handler] (reg-fx! system id handler nil))
   ([system id handler descriptor] (register! system :fx id handler descriptor (:options descriptor))))
 
+(defn registered-sub?
+  "Whether a named subscription is available for acquisition. Does not start a producer."
+  [system id]
+  (contains? (:registrations @(:state system)) [:sub id]))
+
 (defn subscribe
   "Return a cached signal for a portable query vector. A normal handler returns
   its value. A form-2 handler returns a zero-arg computation; its outer function
