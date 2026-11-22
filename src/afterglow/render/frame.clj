@@ -638,7 +638,8 @@
                               (let [at (+ base (long (slots attr)))]
                                 (aset values at (double v)) (aset present at true)))))))]
       (hdr/process! @(::hdr-layout patch) settings read-at! write-at! high-at? (count (:fixtures patch))
-                    (when values (packed-hdr/->Storage values present stride general))))))
+                    (when values (packed-hdr/->Storage values present stride general))
+                    (and (:observe-hdr? options) (not (:blackout? options)) (pos? (:master options)))))))
 
 (defn- pack-dense-state
   [patch ^doubles values ^booleans present {:keys [master blackout? compact-values?] :as options}]
@@ -780,7 +781,7 @@
        (fail! "Invalid render options" {:options options}))
      (when-not (vector? assignments) (fail! "Assignments must be a vector" {}))
      (cond
-       (or (:hdr options) (seq (:edge-tracking options)))
+       (or (:hdr options) (:observe-hdr? options) (seq (:edge-tracking options)))
        (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
 
        (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
@@ -994,15 +995,19 @@
 (defn- finish-contributions [patch ^objects assigned options values present pack]
   (let [links (:edge-tracking options)
         reports (when (seq links) (apply-tracking! patch assigned (prepare-previous-compact patch options)))
+        contacts (when (:hdr options) (apply-hdr! patch options values present assigned))
         _ (when (:hdr options)
-            (apply-hdr! patch options values present assigned)
             ;; A tracked head that cannot reach its receiver stays dark even
             ;; when a neighboring source sends it HDR spill. Its own dimmer
             ;; was already zero while computing outgoing spatial highlights.
             (doseq [{:keys [follower reason]} reports :when reason
                     :let [i (get-in patch [:by-id follower ::index])] :when (some? i)]
               (aset assigned (int i) (assoc (aget assigned (int i)) :dimmer 0.0))))
-        pack (if reports (fn [opts] (assoc (pack opts) :edge-tracking reports)) pack)]
+        pack (if (or reports (:observe-hdr? options))
+               (fn [opts] (cond-> (pack opts)
+                            reports (assoc :edge-tracking reports)
+                            (:observe-hdr? options) (assoc :hdr-contacts (or contacts {}))))
+               pack)]
     (if (::prepare-movement? options)
       (let [targets (if assigned
                       (into {} (keep (fn [fixture]
@@ -1077,7 +1082,11 @@
 (defn- reduce-contributions [fixtures contributions options]
   (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
         options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)
-        options (if (and (nil? (:hdr options)) (some :emission-gain contributions)) (assoc options :hdr {:white-mix 1.0}) options)
+        options (cond
+                  (:hdr options) options
+                  (some :emission-gain contributions) (assoc options :hdr {:white-mix 1.0})
+                  (:observe-hdr? options) (assoc options :hdr {})
+                  :else options)
         patch (if (:hdr options) (assoc patch ::hdr? true) patch)]
     (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
                    (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))
