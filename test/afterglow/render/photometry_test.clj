@@ -11,9 +11,10 @@
     (is (= props (select-keys (first (:fixtures (frame/compile-patch [(merge spot props)])))
                               photometry/fixture-keys)))
     (is (empty? (photometry/errors spot)))
+    (is (empty? (frame/validate-patch [(assoc spot :lens-radius-m 0)])))
     (doseq [[key value] [[:beam-angle nil] [:beam-angle 0] [:beam-angle 180] [:beam-angle ##Inf]
                          [:max-watts -10] [:measured-relative-brightness ##NaN] [:pseudo-fixture "yes"]
-                         [:zoom-range-deg [2 180]] [:lens-radius-m 0]]]
+                         [:zoom-range-deg [2 180]] [:lens-radius-m -0.1]]]
       (is (= [:fixtures 1 key] (:path (first (frame/validate-patch [spot (assoc spot :id :bad :address 4 key value)]))))))))
 
 (deftest full-white-measurements-and-estimates
