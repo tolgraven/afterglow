@@ -294,3 +294,13 @@
     (is (seq (:events first-result)))
     (is (= (events/finish (:model bad)) (:model (model/apply-command base cmd))))
     (is (empty? (events/pending base)))))
+
+(deftest launch-restricts-an-instance-without-changing-its-published-effect
+  (let [m (configured)
+        result (apply! m {:op :cue/launch :cue-id :red :launch {:targets [:left "right"]}})
+        i (first (vals (:instances result)))]
+    (is (= [:left "right"] (:targets i)))
+    (is (= effect (:definition i) (get-in result [:registry :effects :wash])))
+    (doseq [targets [nil 1 [:left :left] [:left nil]]]
+      (is (= :invalid-targets (get-in (model/apply-command m (command m {:op :effect/launch :effect-id :wash
+                                                                        :launch {:targets targets}})) [:ack :code]))))))

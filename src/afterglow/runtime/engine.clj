@@ -161,6 +161,15 @@
          (:done? (musical-time/sample timer clock))
          (>= (:time-ms clock) (+ (:release-at-ms instance) (get instance :release-duration-ms 0))))))
 
+(defn- render-definition
+  "Narrow a compiled program for one launch. The captured registry definition
+  remains available verbatim for reload, validation and persistence."
+  [{:keys [definition targets]}]
+  (if (nil? targets) definition
+      (assoc definition :targets (if-let [authored (:targets definition)]
+                                   (filterv (set authored) targets)
+                                   targets))))
+
 (defn- prepare-instance
   [model global-clock snapshot instance]
   (let [paused? (true? (get-in instance [:system :paused?]))
@@ -179,7 +188,7 @@
                      (assoc-in [:system :last-delta-ms] delta)
                      (assoc-in [:system :last-frame-number] number))]
     (validate-instance! (:id prepared) prepared)
-    {:instance prepared :intents intents :clock clock :paused? paused?
+    {:instance prepared :program (render-definition prepared) :intents intents :clock clock :paused? paused?
      :input-state input-state :delta-ms delta :number number
      :expired? (and (not paused?) (release-finished? clock prepared))}))
 
@@ -203,7 +212,7 @@
        (vector? (:intents result)) (instance? Boolean (:done? result))
        (or (not (contains? result :contributions)) (vector? (:contributions result)))))
 
-(defn- native-layer [instance]
+(defn- native-layer [instance program-definition]
   (let [program (get-in instance [:definition :layer])
         slot (get-in instance [:source :native-layer])]
     (when (or program slot)
@@ -216,11 +225,14 @@
         (assoc :target-ids (get-in instance [:definition :targets]))
         (and program (nil? slot) (= :previous (:targets program))
              (empty? (get-in instance [:definition :targets])))
-        (assoc :inherit-backdrop? true)))))
+        (assoc :inherit-backdrop? true)
+        (contains? instance :targets)
+        (-> (dissoc :targets :inherit-backdrop?)
+            (assoc :target-ids (:targets program-definition)))))))
 
 (defn- descriptor
-  [compiled {:keys [instance intents expired? clock paused? input-state delta-ms number]}]
-  (let [step (get compiled (:definition instance))]
+  [step {:keys [instance program intents expired? clock paused? input-state delta-ms number]}]
+  (let [instance (assoc instance :definition program)]
     {:id (:id instance) :priority (:priority instance) :order (:order instance)
      :state (:state instance) :instance instance
      :step (fn [context]
@@ -239,7 +251,7 @@
                    _ (when valid? (runtime/append-contributions result []))
                    result (if valid?
                             (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))]
-                              (if-let [layer (native-layer instance)]
+                              (if-let [layer (native-layer instance program)]
                                 (let [tag (assoc layer :member-opacity gain)
                                       flushed (runtime/append-contributions result [])
                                       blocks (cond-> (:contributions flushed)
@@ -301,7 +313,7 @@
    :intents (:intents prepared) :done? false})
 
 (defn- attempt [snapshot compiled prepared]
-  (let [instance (:instance prepared) {:keys [step error]} (get compiled (:definition instance))]
+  (let [instance (:instance prepared) {:keys [step error]} (get compiled (:program prepared))]
     (cond
       (and (not (:expired? prepared))
            (= (:effect-version instance) (get-in instance [:fault :effect-version])))
@@ -312,7 +324,7 @@
 
       :else
       (try
-        (let [value (runtime/evaluate-instance snapshot (descriptor {(:definition instance) step} prepared))
+        (let [value (runtime/evaluate-instance snapshot (descriptor step prepared))
               source (assoc (select-keys instance [:effect-id :effect-version :cue-id]) :instance-id (:id instance))]
           (-> value
               (assoc :instance instance)
@@ -454,7 +466,7 @@
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
          prepared (mapv (partial prepare-isolated model clock snapshot)
                         (sort-by (juxt :priority :order :id) (vals (:instances model))))
-         definitions (distinct (map (comp :definition :instance)
+         definitions (distinct (map :program
                                     (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
                                                                   (get-in % [:instance :fault :effect-version])))
                                             (mapcat #(cond-> [%] (:candidate? %) (conj (:fallback %))) prepared))))
