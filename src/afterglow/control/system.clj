@@ -8,10 +8,12 @@
 (defn- unit? [x] (and (time/finite-number? x) (<= 0 x 1)))
 
 (defn validate-options [options]
-  (when-not (and (map? options) (every? #{:opacity :attack :release} (keys options)))
-    (invalid! "System options accept opacity, attack and release"))
+  (when-not (and (map? options) (every? #{:opacity :gain :attack :release} (keys options)))
+    (invalid! "System options accept opacity, gain, attack and release"))
   (when (and (contains? options :opacity) (not (unit? (:opacity options))))
     (invalid! "Opacity must be in [0,1]"))
+  (when (and (contains? options :gain) (not (and (time/finite-number? (:gain options)) (<= 0 (:gain options)))))
+    (invalid! "Emission gain must be finite and nonnegative"))
   (doseq [key [:attack :release] :when (contains? options key)]
     (when (seq (time/validate-duration (get options key)))
       (invalid! "Attack/release need a musical or explicit ms duration" {:field key})))
@@ -68,6 +70,7 @@
 
 (defn validate-control [command]
   (case (:op command)
+    :instance/gain-set (validate-options {:gain (:value command)})
     :instance/opacity-set (when-not (unit? (:value command)) (invalid! "Opacity must be in [0,1]"))
     :instance/envelope-set (let [envelope (:envelope command)]
                              (when-not (and (map? envelope) (seq envelope)
@@ -94,6 +97,7 @@
               (assoc-in [:system :clock-offset-ms] (- (:time-ms global-clock) (:time-ms clock)))
               (assoc-in [:system :clock-offset-beats] (- (:beat global-clock 0) (:beat clock 0)))
               (update :system dissoc :paused-clock)))
+      :instance/gain-set (assoc-in instance [:system :gain] (:value command))
       :instance/opacity-set
       (let [value (:value command)]
         (when-not (unit? value) (invalid! "Opacity must be in [0,1]"))
@@ -131,7 +135,7 @@
                      (instance? Boolean (:paused? system false))
                      (every? #(time/finite-number? (get system % 0)) [:clock-offset-ms :clock-offset-beats]))
         (invalid! "Invalid instance system controls"))
-      (validate-options (select-keys system [:opacity :attack :release]))
+      (validate-options (select-keys system [:opacity :gain :attack :release]))
       (doseq [k [:last-clock :paused-clock] :when (contains? system k)]
         (let [clock (get system k)]
           (when-not (and (map? clock) (time/finite-number? (:time-ms clock))

@@ -138,3 +138,9 @@ can supply one normalized gain per fixture in `double[]`. For asymmetric
 output response, keep the last unquantized emitter drives as immutable state
 and seed newly selected heads from their last committed output. Quantize only
 at publication. Compare compact and rich output against the same packed bytes.
+
+When HDR is enabled, blend nonnegative emitter overrange before tone mapping.
+Compute spatial spill from one untouched frame, including the shutter gate and
+original dimmer. Preserve gain and opacity as independent controls. Validate
+nonemission channels at their original ranges in both typed and rich output.
+[Gain and spatial highlight spill](../../../doc/architecture/highlight-spill.md)

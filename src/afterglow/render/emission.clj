@@ -114,11 +114,17 @@
   double-array in fixture order per stage, with negative entries for bypass.
   Include a prior frame from the same rig to initialize a new response;
   thereafter pass the returned private :levels as immutable input. Hard
-  blackout and transport overrides are enforced by the caller."
-  [patch frame previous prior-frame attack release ceiling]
-  (let [result (dense/follow (::frame/emission-layout patch) frame previous prior-frame
-                             attack release ceiling copy-projections)]
-    {:frame (rich-output patch result) :levels (:levels result)}))
+  blackout and transport overrides are enforced by the caller. Optionally pass
+  {:attack boolean-or-boolean-array :release boolean-or-boolean-array
+   :previous last-ramps}. Flagged coefficients then represent a fraction of a
+  finite linear transition duration consumed this tick. Each emitter tracks
+  its own target, preserving continuity when only one color channel changes."
+  ([patch frame previous prior-frame attack release ceiling]
+   (follow-frame patch frame previous prior-frame attack release ceiling nil))
+  ([patch frame previous prior-frame attack release ceiling ramps]
+   (let [result (dense/follow (::frame/emission-layout patch) frame previous prior-frame
+                              attack release ceiling copy-projections ramps)]
+     (assoc (select-keys result [:levels :ramps]) :frame (rich-output patch result)))))
 
 (defn with-emitted-levels
   "Replace delivered per-emitter drive for selected fixtures using the same
@@ -140,3 +146,9 @@
                        (assoc (update-vals desired #(/ % d)) :dimmer d)))
                    desired))))
            false))
+
+(defn falling-heads
+  "Boolean array, in patch target order, identifying a fall in at least one
+  emitted component between two frames. Both frames must use the same patch."
+  [patch previous frame]
+  (dense/falling-heads (::frame/emission-layout patch) previous frame))

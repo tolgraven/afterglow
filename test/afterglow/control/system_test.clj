@@ -169,3 +169,22 @@
            (mapv #(dissoc % :source) (:contributions result))))
     (is (= {:instance-id "0:1" :effect-id :light :effect-version 1 :cue-id :light}
            (get-in result [:contributions 0 :source])))))
+
+(deftest emission-gain-is-a-live-control-without-changing-parameters-or-opacity
+  (let [show (launched {:system {:gain 1.5}})
+        id "0:1"
+        low (apply! show {:op :instance/gain-set :instance-id id :value 0.5})]
+    (is (= 255 (first (render-bytes (advance show 0 0)))))
+    (is (= 102 (first (render-bytes (advance low 0 0)))))
+    (is (= {:level 0.8} (get-in low [:instances id :params])))
+    (is (= 1.0 (get-in low [:instances id :system :opacity])))
+    (is (thrown? Exception (apply! low {:op :instance/gain-set :instance-id id :value -1})))))
+
+(deftest cue-overdrive-whitens-red-highlights-by-default
+  (let [model (apply! (launched {}) {:op :instance/gain-set :instance-id "0:1" :value 2.0})
+        step (fn [_] (fn [ctx] (update ctx :assignments conj {:target-id :rgb :attribute :color :value [0.6 0.0 0.0]})))
+        result (engine/advance model {:time-ms 0 :beat 0 :bpm 120} step)
+        p (frame/compile-patch [{:id :rgb :universe 0 :address 1 :channels {:red 1 :green 2 :blue 3}}])
+        rgb (fn [opts] (mapv #(bit-and 255 %) (take 3 (get-in (frame/resolve-contributions p (:contributions result) opts) [:universes 0]))))]
+    (is (= [255 51 51] (rgb {})))
+    (is (= [255 0 0] (rgb {:hdr {}})))))
