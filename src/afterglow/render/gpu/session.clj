@@ -2,7 +2,8 @@
   "One show-owned native context, a bounded queue and a bounded LRU of shaders.
   Results belong to the submitting frame. This owner never publishes a frame."
   (:require [afterglow.render.gpu.expressions :as expressions]
-            [afterglow.render.gpu.native-context :as context])
+            [afterglow.render.gpu.native-context :as context]
+            [afterglow.runtime.reuse :as reuse])
   (:import [java.io Closeable]
            [java.util LinkedHashMap]
            [java.util.concurrent ArrayBlockingQueue Callable ExecutionException Future FutureTask
@@ -41,7 +42,7 @@
      (throw (ex-info "Program and queue capacities must be positive integers" {})))
    (let [queue (ArrayBlockingQueue. queue-capacity)
          gate (Object.) done (promise) cache (LinkedHashMap. 16 0.75 true)
-         stats (atom {:hits 0 :misses 0 :evictions 0 :resident 0})
+         stats (atom {:hits 0 :misses 0 :evictions 0 :resident 0 :draws 0})
          factory (reify ThreadFactory
                    (newThread [_ run] (doto (Thread. run "afterglow-gpu") (.setDaemon true))))
          owner (context/open! ::session timeout-ms (constantly {}))]
@@ -104,7 +105,14 @@
       (do
         (swap! stats update :misses inc)
         ;; Compile the replacement before freeing the least-recently-used program.
-        (let [new-program (context/prepare! owner #(expressions/compile-program! % group))]
+        (let [program (context/prepare! owner #(expressions/compile-program! % group))
+              evaluate (reuse/evaluator
+                        {:pure? true :inputs [[:uniforms]]}
+                        (fn [{:keys [uniforms]}]
+                          (let [batch (expressions/run-program! owner program uniforms)]
+                            (when (pos? (:count program)) (swap! stats update :draws inc))
+                            batch)))
+              new-program (assoc program :evaluate evaluate)]
           (when (= max-programs (.size cache))
             (release! session (.next (.iterator (.keySet cache)))))
           (.put cache group new-program)
@@ -119,7 +127,7 @@
   (when-not (instance? afterglow.render.gpu.expressions.Group group)
     (throw (ex-info "Use session/group to describe the expressions and ordered positions" {})))
   (let [inputs (expressions/capture-inputs (:bindings group) env)]
-    (enqueue! session #(expressions/run-program! (:owner session) (resident! session group) inputs))))
+    (enqueue! session #((:evaluate (resident! session group)) {:uniforms inputs}))))
 
 (defn- await-result [^Future future]
   (try (.get future) (catch ExecutionException error (throw (.getCause error)))))

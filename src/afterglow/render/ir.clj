@@ -308,6 +308,25 @@
                  (every? keyword? (keys outputs)))
     (invalid! [] "Batch outputs must contain 1–64 named keyword expressions")))
 
+(defn input-paths
+  "Data read from env by a validated expression. Use these paths to bind pure
+  calculations to captured parameters, positions and explicit musical clocks."
+  [expression]
+  (into []
+        (comp (mapcat (fn [node]
+                        (let [absolute? (= :absolute (:clock node))]
+                          (case (:op node)
+                            :param [[:params (:key node)]]
+                            :position [[:position]]
+                            :time [[(if absolute? :time-ms :elapsed-ms)]]
+                            :beat [[(if absolute? :beat :elapsed-beats)]]
+                            :bar [[(if absolute? :beat :elapsed-beats)] [:meter :beats-per-bar]]
+                            :phrase [[(if absolute? :beat :elapsed-beats)]
+                                     [:meter :beats-per-bar] [:meter :bars-per-phrase]]
+                            []))))
+              (distinct))
+        (tree-seq #(and (map? %) (vector? (:args %))) :args expression)))
+
 (defn compile-batch
   "Compile named expressions to a reusable float64 CPU batch plan.
 
