@@ -105,12 +105,9 @@
         (shape-fn (adjusted-phase-fn snapshot))))
     (resolve-non-frame-dynamic-elements [this show snapshot head]
       (if (not-any? params/frame-dynamic-param? [interval interval-ratio phase])
-        ;; Can now resolve and optimize
-          (apply fixed-oscillator shape-fn
-                 (map #(params/resolve-param % show snapshot head)
-                      [interval interval-ratio phase])))
-        ;; Can't optimize, there is at least one frame-dynamic parameter, so return self
-        this)))
+        (apply fixed-oscillator shape-fn
+               (map #(params/resolve-param % show snapshot head) [interval interval-ratio phase]))
+        this))))
 
 (defn- variable-oscillator
   "Build an oscillator whose shape function relies on dynamic
@@ -234,7 +231,7 @@
                      (simplify-unless-frame-dynamic [this show snapshot head]
                        (if (params/frame-dynamic-param? down?)
                          this  ; Can't simplify, we depend on a frame-dynamic parameter
-                         (let [down? (params/resolve-param [down? show snapshot head])]  ; Can simplify
+                         (let [down? (params/resolve-param down? show snapshot head)]  ; Can simplify
                            (build-fixed-sawtooth-shape-fn down?)))))
                    ;; The shape function depends on the fixed value of down?, so can be finalized now
                    (build-fixed-sawtooth-shape-fn down?))]
@@ -311,7 +308,7 @@
                      (simplify-unless-frame-dynamic [this show snapshot head]
                        (if (params/frame-dynamic-param? width)
                          this  ; Can't simplify, we depend on a frame-dynamic parameter
-                         (let [width (params/resolve-param [width show snapshot head])]  ; Can simplify
+                         (let [width (params/resolve-param width show snapshot head)]  ; Can simplify
                            (build-fixed-square-shape-fn width)))))
                    ;; The shape function depends on the fixed value of width, so can be finalized now
                    (build-fixed-square-shape-fn width))]
