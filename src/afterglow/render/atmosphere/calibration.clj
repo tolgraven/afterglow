@@ -1,6 +1,7 @@
 (ns afterglow.render.atmosphere.calibration
   "Fit a stationary sightline from linear camera contrast and held nozzle flows.
-  Optical depth is dimensionless. The fit uses metres, seconds and cubic metres.")
+  Optical depth is dimensionless. The fit uses metres, seconds and cubic metres."
+  (:require [afterglow.render.atmosphere :as fog]))
 
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
 (defn- check [condition message]
@@ -60,29 +61,37 @@
                        (sorted-map) observations)
         events (reduce (fn [m {:keys [elapsed-ms flow-m3-s]}] (assoc-in m [elapsed-ms :flow] flow-m3-s))
                        events flows)]
-    (loop [pairs (seq events) t 0.0 q 0.0 rows []]
-      (if-let [[ms {:keys [reading flow]}] (first pairs)]
-        (recur (next pairs) ms (or flow q) (conj rows [(/ (- ms t) 1000.0) q reading]))
-        rows))))
+    (let [n (count events)
+          intervals (double-array n)
+          rates (double-array n)
+          readings (double-array n)]
+      ;; Compile the immutable observation times once. Each search candidate
+      ;; reads these same primitive arrays without allocating per sample.
+      (loop [pairs (seq events) i 0 prior-ms 0.0 held-rate 0.0]
+        (if-let [[ms {:keys [reading flow]}] (first pairs)]
+          (do (aset intervals i (/ (- (double ms) prior-ms) 1000.0))
+              (aset rates i held-rate)
+              (aset readings i (double (or reading Double/NaN)))
+              (recur (next pairs) (inc i) (double ms) (double (or flow held-rate))))
+          {:intervals intervals :rates rates :readings readings})))))
 
-(defn- fit-rates [timeline volume half-life mixing total-variance]
-  ;; The local plume and room total have exact first-order responses to a held
-  ;; pump. Fit extinction as one linear coefficient for each pair of rates.
-  (let [k (/ (Math/log 2) half-life) km (+ k (/ 1.0 mixing))]
+(defn- fit-rates [{:keys [intervals rates readings]} volume half-life mixing total-variance]
+  ;; The room and nozzle use the same physical response as the live solver.
+  (let [^doubles intervals intervals ^doubles rates rates ^doubles readings readings
+        k (/ (Math/log 2) (double half-life)) km (+ k (/ 1.0 (double mixing)))
+        volume (double volume)]
     (loop [i 0 total 0.0 local 0.0 xx 0.0 xy 0.0 yy 0.0]
-      (if (= i (count timeline))
+      (if (= i (alength intervals))
         (when (pos? xx)
           (let [coefficient (/ xy xx)
                 rss (max 0.0 (- yy (* xy coefficient)))]
             {:extinction-per-m coefficient :mixing-seconds mixing :clearance-half-life-s half-life
              :r-squared (- 1.0 (/ rss total-variance))}))
-        (let [[dt q reading] (nth timeline i)
-              next-volume (fn [mass rate]
-                            (let [delta (Math/expm1 (- (* dt rate)))]
-                              (+ (* mass (+ 1.0 delta)) (* q (/ (- delta) rate)))))
-              total (next-volume total k) local (next-volume local km)
+        (let [dt (aget intervals i) q (aget rates i) reading (aget readings i)
+              total (fog/held-volume total q k dt)
+              local (fog/held-volume local q km dt)
               x (/ (- total local) volume)]
-          (if (nil? reading)
+          (if (Double/isNaN reading)
             (recur (inc i) total local xx xy yy)
             (recur (inc i) total local (+ xx (* x x)) (+ xy (* x reading)) (+ yy (* reading reading)))))))))
 
@@ -113,6 +122,7 @@
                 search (fn [half-lives mix-times]
                          (apply max-key :r-squared
                                 (for [h half-lives m mix-times
+                                      :when (and (<= 0.1 h 86400) (<= 0.001 m 86400))
                                       :let [a (fit-rates timeline volume-m3 h m variance)] :when a] a)))
                 h (:clearance-half-life-s tail)
                 coarse (search (map #(* h %) [0.25 0.4 0.65 1 1.5 2.25 4])

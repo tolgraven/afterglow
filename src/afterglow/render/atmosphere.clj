@@ -65,7 +65,9 @@
                       {:epoch epoch :sample-time-ms now :sources (mapv source-state (:sources plan))})
                plan 0.0))
 
-(defn- integrate [volume flow decay seconds]
+(defn held-volume
+  "Equivalent fog volume after a held flow (m³/s) and a positive loss rate (/s)."
+  ^double [^double volume ^double flow ^double decay ^double seconds]
   ;; Exact solution for a held pump level and first-order losses. expm1
   ;; preserves mass for very short output intervals.
   (let [x (- (* decay seconds))]
@@ -82,11 +84,11 @@
           sources (:sources state)
           total (reduce + (:mixed-m3 state) (map :local-m3 sources))
           flow (reduce + 0.0 (map :flow-m3-s sources))
-          remaining (integrate total flow loss seconds)
+          remaining (held-volume total flow loss seconds)
           next-sources (mapv (fn [source spec]
                                (let [rate (:flow-m3-s source)]
                                  (-> source
-                                     (assoc :local-m3 (integrate (:local-m3 source) rate (+ loss (:mix-per-s spec)) seconds))
+                                     (assoc :local-m3 (held-volume (:local-m3 source) rate (+ loss (:mix-per-s spec)) seconds))
                                      (update :emitted-m3 + (* rate seconds)))))
                              sources (:sources plan))
           mixed (max 0.0 (- remaining (reduce + 0.0 (map :local-m3 next-sources))))]
