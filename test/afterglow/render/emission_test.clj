@@ -64,3 +64,33 @@
               delivered (:dimmer (emission/levels f out))]
           (is (<= 0.0 delivered (* full gain)))
           (is (< (- (* full gain) delivered) (/ 1.01 (if fine 65025.0 255.0)))))))))
+
+(deftest packed-gain-columns-and-followers-share-the-rich-emission-contract
+  (let [gains (double-array [0.16 0.4 1.0 0.77])
+        fixtures (:fixtures patch)
+        target (zipmap (:target-order patch) (seq gains))]
+    (doseq [compact? [false true]]
+      (let [options {:include-values? (not compact?) :compact-values? compact?}
+            src (frame/resolve-frame patch rows options)
+            zero (frame/resolve-frame patch [] options)
+            before (freeze src)
+            on (emission/follow-frame patch src nil zero 0.25 0.4 1.0)
+            original (vec (:levels on))
+            expected (emission/with-emitted-levels patch src
+                       (into {} (for [f fixtures :let [levels (emission/emitted-levels f src)] :when levels]
+                                  [(:id f) (update-vals levels #(* 0.25 %))])))
+            ;; Keep a full precision copy of the previous frame's emitted
+            ;; channels while lowering the requested front/strip levels.
+            tail (emission/follow-frame patch zero (:levels on) nil
+                                        (double-array [1 1 -1 1]) (double-array [0.4 0.25 -1 1]) 1.0)
+            old-head (:red (emission/emitted-levels (head :head) (:frame on)))
+            new-head (:red (emission/emitted-levels (head :head) (:frame tail)))]
+        (is (= before (freeze src)))
+        (is (= original (vec (:levels on))))
+        (is (= (freeze (emission/scale-emission patch src target))
+               (freeze (emission/scale-emission patch src gains))))
+        (is (= (freeze expected) (freeze (:frame on))))
+        (is (near? new-head (* 0.6 old-head)))
+        (is (= 0.0 (:dimmer (emission/emitted-levels (head :spot) (:frame tail)))))
+        (is (identical? src (:frame (emission/follow-frame patch src nil src 0.1 0.1 1)))))))
+  (is (thrown? Exception (emission/scale-emission patch (frame/resolve-frame patch [] {}) (double-array [1])))))

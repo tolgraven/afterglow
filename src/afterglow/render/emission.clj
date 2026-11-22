@@ -1,7 +1,8 @@
 (ns afterglow.render.emission
   "Read and adjust light at the output of a composed frame. Levels include the
   operator master. Non-emission channels retain their packed values."
-  (:require [afterglow.render.frame :as frame]
+  (:require [afterglow.render.emission.dense :as dense]
+            [afterglow.render.frame :as frame]
             [afterglow.render.photometry :as photometry]))
 
 (defn- read-byte-at [universes [u slot]]
@@ -38,39 +39,8 @@
     (throw (ex-info "Expected normalized fixture emission" {:level x})))
   (double x))
 
-(defn- packed-word
-  "Nearest physical word, or greatest deliverable logical level <= target.
-  A fractional inversion pivot splits the two monotone runs at its first
-  representable DMX step. Quantizing across that boundary can turn a tiny
-  correction into full output, so consider the runs separately."
-  [channel x down?]
-  (let [scale (if (:fine channel) 255 1)
-        pivot (:inverted-from channel)
-        maximum (* 255 scale)
-        split (if pivot (long (Math/ceil (* scale (double pivot)))) (inc maximum))
-        raw (* x 255.0)
-        choose (fn [desired lo hi descending?]
-                 (when (<= lo hi)
-                   (let [word (long (if down?
-                                      (if descending? (Math/ceil desired) (Math/floor desired))
-                                      (Math/round (double desired))))
-                         word (max lo (min hi word))
-                         value (drive (/ word (double scale)) pivot)]
-                     (if (or (not down?) (<= value x)) [word value]
-                       ;; Floating-point conversion at an exact step can
-                       ;; exceed x by one ulp. Try its lower-drive neighbor.
-                       (let [adjacent ((if descending? inc dec) word)]
-                         (when (<= lo adjacent hi)
-                           [adjacent (drive (/ adjacent (double scale)) pivot)]))))))
-        left (choose (* scale raw) 0 (dec split) false)
-        right (when pivot (choose (* scale (+ pivot (- 255.0 raw))) split maximum true))]
-    (cond (nil? left) (first right)
-          (nil? right) (first left)
-          (<= (abs (- x (second left))) (abs (- x (second right)))) (first left)
-          :else (first right))))
-
 (defn- write-channel! [buffers {:keys [coarse fine] :as channel} value down?]
-  (let [word (long (packed-word channel (unit! value) down?))
+  (let [word (long (dense/packed-word channel (unit! value) down?))
         put! (fn [[u slot] v] (aset-byte ^bytes (get buffers u) (int slot) (unchecked-byte v)))]
     (if fine
       (do (put! coarse (quot word 255)) (put! fine (rem word 255)))
@@ -123,17 +93,32 @@
              (project out fixture (levels fixture out))))))
      frame targets)))
 
+(defn- rich-output [patch {:keys [frame ^booleans changed]}]
+  (if-not changed frame
+    (reduce (fn [out i]
+              (if (aget changed i)
+                (let [fixture (nth (:fixtures patch) i)]
+                  (project out fixture (levels fixture out)))
+                out)) frame (range (alength changed)))))
+
 (defn scale-emission
-  "Apply fixture ID -> gain in [0,1] to one completed frame. Attenuates a
-  hardware dimmer once, otherwise attenuates each emitter. Rounds toward dark
-  in logical space so the packet stays within an allocated brightness budget."
+  "Apply fixture ID -> gain in [0,1] to one completed frame. Alternatively
+  supply a double-array of gains in patch target order. Attenuates a physical
+  dimmer once, otherwise each emitter, rounding toward lower delivered drive."
   [patch frame gains]
-  (rewrite patch frame gains
-           (fn [raw gain]
-             (let [g (unit! gain)]
-               (when (< g 1.0)
-                 (update-vals (if (contains? raw :dimmer) (select-keys raw [:dimmer]) raw) #(* % g)))))
-           true))
+  (rich-output patch (dense/scale (::frame/emission-layout patch) frame gains copy-projections)))
+
+(defn follow-frame
+  "Follow actual post-master light with asymmetric response coefficients.
+  A coefficient of one is immediate. Supply a scalar across the rig or a
+  double-array in fixture order per stage, with negative entries for bypass.
+  Include a prior frame from the same rig to initialize a new response;
+  thereafter pass the returned private :levels as immutable input. Hard
+  blackout and transport overrides are enforced by the caller."
+  [patch frame previous prior-frame attack release ceiling]
+  (let [result (dense/follow (::frame/emission-layout patch) frame previous prior-frame
+                             attack release ceiling copy-projections)]
+    {:frame (rich-output patch result) :levels (:levels result)}))
 
 (defn with-emitted-levels
   "Replace delivered per-emitter drive for selected fixtures using the same

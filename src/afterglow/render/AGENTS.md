@@ -132,3 +132,9 @@ Read actual emitter drive after the physical dimmer. Keep packed universes and
 rich/compact previews consistent and hold shutter, strobe and other discrete
 channels. When enforcing a budget, quantize toward lower delivered intensity,
 including on inverted and cross-universe fine channels.
+
+Compile output processors against the fixture order once per patch. A budget
+can supply one normalized gain per fixture in `double[]`. For asymmetric
+output response, keep the last unquantized emitter drives as immutable state
+and seed newly selected heads from their last committed output. Quantize only
+at publication. Compare compact and rich output against the same packed bytes.
