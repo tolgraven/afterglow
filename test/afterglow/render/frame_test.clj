@@ -722,3 +722,36 @@
                                                        :field-request {:group :x :env {} :scales scales}}}]
       (try (compute [block]) (is false "Expected an attributed field error")
            (catch clojure.lang.ExceptionInfo e (is (= :instance (:effect-source (ex-data e)))))))))
+
+(deftest named-emitters-use-dimmer-and-master-once-in-rich-and-dense-output
+  (doseq [[attribute tint] {:amber [1.0 0.55 0.0] :warm-white [1.0 0.8 0.62]
+                            :cold-white [0.82 0.9 1.0] :cool-white [0.82 0.9 1.0]
+                            :cyan [0.0 1.0 0.8] :lime [0.55 1.0 0.06] :uv [0.0 0.0 0.0]}
+          dimmer? [false true]
+          blackout? [false true]]
+    (let [fixture {:id :cell :address 1 :universe 0
+                   :channels (cond-> {attribute 1 :gobo 2} dimmer? (assoc :dimmer 3))}
+          rows [(assignment :cell attribute 0.8) (assignment :cell :dimmer 0.5) (assignment :cell :gobo 1)]
+          options {:master 0.5 :blackout? blackout? :compact-values? true}
+          rich (frame/resolve-frame [fixture] rows options)
+          dense (frame/resolve-frame [fixture] rows (assoc options :include-values? false))
+          expected (mapv #(* % (if blackout? 0.0 0.2)) tint)
+          ;; A hardware dimmer receives the combined master and dimmer.
+          expected-byte (cond blackout? 0 dimmer? 204 :else 51)
+          compact-color (:emitted-color (first (frame/project-compact (:compact dense))))]
+      (is (= [expected-byte 255 (if (and dimmer? (not blackout?)) 64 0)]
+             (bytes-at rich 0 1 2 3) (bytes-at dense 0 1 2 3)))
+      (is (== 0.8 (get-in rich [:values :cell :emitter-values attribute])))
+      (is (every? true? (map near? expected (get-in rich [:values :cell :emitted-color]))))
+      (is (every? true? (map near? expected compact-color))))))
+
+(deftest supplemental-tints-add-to-rgbw-before-saturation-and-dimming
+  (let [fixture (assoc rgb :channels {:red 1 :green 2 :blue 3 :white 4 :amber 5 :cold-white 6})
+        rows [(assignment :rgb :color [0.7 0.0 0.2]) (assignment :rgb :white 0.2)
+              (assignment :rgb :amber 0.6) (assignment :rgb :cold-white 0.2)]
+        opts {:master 0.5 :compact-values? true}
+        rich (frame/resolve-frame [fixture] rows opts)
+        dense (frame/resolve-frame [fixture] rows (assoc opts :include-values? false))]
+    (is (= (bytes-at rich 1 1 2 3 4 5 6) (bytes-at dense 1 1 2 3 4 5 6)))
+    (doseq [row [(get-in rich [:values :rgb]) (first (frame/project-compact (:compact dense)))]]
+      (is (every? true? (map near? [0.5 0.355 0.3] (:emitted-color row)))))))

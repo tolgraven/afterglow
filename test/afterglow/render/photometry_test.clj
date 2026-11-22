@@ -25,3 +25,11 @@
     (is (< (photometry/relative-brightness (-> spot (assoc :max-watts 100) (assoc-in [:channels :uv] 4))) 1))
     (is (zero? (photometry/relative-brightness {:max-watts 100 :channels {:uv 1 :dimmer 2}})))
     (is (== 2.2 (photometry/relative-brightness (assoc spot :max-watts 20 :measured-relative-brightness 2.2))))))
+
+(deftest fixture-spectrum-weights-every-configured-emitter
+  (let [estimate (fn [channels]
+                   (photometry/relative-brightness {:max-watts 100 :channels channels}))]
+    (is (> (estimate {:lime 1}) (estimate {:cyan 1})))
+    (is (> (estimate {:cyan 1}) (estimate {:blue 1})))
+    (is (== (estimate {:cold-white 1}) (estimate {:cool-white 1})))
+    (is (== (/ (estimate {:lime 1}) 2) (estimate {:lime 1 :uv 2})))))

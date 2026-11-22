@@ -11,14 +11,16 @@
             [afterglow.render.photometry :as photometry]
             [afterglow.runtime.faults :as faults]))
 
-(def ^:private emitter-attributes #{:red :green :blue :white :amber :uv})
+(def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
+(def ^:private extra-emitters (apply dissoc photometry/emitter-spectrum [:red :green :blue :white]))
 (def ^:private geometric-attributes #{:aim :direction})
 (def ^:private rgb-attributes [:red :green :blue])
 
 ;; Final fields, no mutable buffers: safe to share between render workers/frames.
 (deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot])
 (deftype DenseChannel [^long kind ^long slot ^long compactIndex scatter fallback])
-(deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels])
+(deftype EmitterTint [attribute ^long slot ^double red ^double green ^double blue])
+(deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints])
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
    [:emitted-color :vec3 3] [:intensity :number 1] [:aim :vec3 3] [:direction :vec3 3]])
@@ -174,7 +176,13 @@
                     compiled)
           base-attributes [:dimmer :red :green :blue :white :amber :uv]
           extra-attributes (sort (remove (set base-attributes) (set (mapcat (comp keys :channels) compiled))))
-          attribute-slots (zipmap (concat base-attributes extra-attributes) (range 3 (+ 10 (count extra-attributes))))]
+          attribute-slots (zipmap (concat base-attributes extra-attributes) (range 3 (+ 10 (count extra-attributes))))
+          compiled (mapv (fn [{:keys [channels] :as fixture}]
+                           (assoc fixture ::tints
+                                  (vec (for [[attr [response [r g b]]] extra-emitters
+                                             :when (and (pos? response) (contains? channels attr))]
+                                         (EmitterTint. attr (get attribute-slots attr) r g b)))))
+                         compiled)]
       {:type ::patch :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
        ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
        :target-order (mapv :id compiled) ::attribute-slots attribute-slots
@@ -185,10 +193,11 @@
                 (::emitter? fixture) (::dimmer? fixture) (= :extract-min (:rgbw-policy fixture))
                 (:emission-color fixture [1.0 1.0 1.0])
                 (mapv (fn [[attribute channel]]
-                        (DenseChannel. (long (case attribute :dimmer 0 :red 1 :green 2 :blue 3 :white 4 (:amber :uv) 5 6))
+                        (DenseChannel. (long (case attribute :dimmer 0 :red 1 :green 2 :blue 3 :white 4 (if (contains? extra-emitters attribute) 5 6)))
                                        (long (get attribute-slots attribute))
                                        (long (or (::compact-index channel) -1))
-                                       (::scatter channel) channel)) (:compiled-channels fixture)))) compiled)
+                                       (::scatter channel) channel)) (:compiled-channels fixture))
+                (::tints fixture))) compiled)
        ::common-attributes (if (seq compiled)
                              (reduce (fn [common fixture] (into #{} (filter (::supported fixture)) common))
                                      (::supported (first compiled)) (rest compiled)) #{})
@@ -454,6 +463,22 @@
               pan))
           target-ids)))
 
+(defn- write-emitter-tints!
+  "Add named emitters to RGBW before gamut limiting and the common dimmer.
+  The same compiled spectral weights serve general and dense frames."
+  [tints assigned ^doubles values base ^doubles out offset red green blue intensity]
+  (loop [i 0, r (double red), g (double green), b (double blue)]
+    (if (= i (count tints))
+      (do
+        (aset-double out (int offset) (* (double intensity) (min 1.0 r)))
+        (aset-double out (inc (int offset)) (* (double intensity) (min 1.0 g)))
+        (aset-double out (+ 2 (int offset)) (* (double intensity) (min 1.0 b)))
+        out)
+      (let [^EmitterTint tint (nth tints i)
+            level (if values (aget values (+ (int base) (.-slot tint)))
+                      (double (get assigned (.-attribute tint) 0.0)))]
+        (recur (inc i) (+ r (* level (.-red tint))) (+ g (* level (.-green tint))) (+ b (* level (.-blue tint))))))))
+
 (defn- pack-target! [fixture assigned {:keys [master blackout? include-values?] :as options} universes indexed compact]
   (let [id (:id fixture)
         source (when-let [^objects sources (::geometry-sources options)]
@@ -480,8 +505,8 @@
                                         :dimmer intensity
                                         :red (* scale red) :green (* scale green)
                                         :blue (* scale blue) :white (* scale white)
-                                        (:amber :uv) (* scale (get assigned attribute 0.0))
-                                        (get assigned attribute 0.0))]
+                                        (let [raw (get assigned attribute 0.0)]
+                                          (if (contains? extra-emitters attribute) (* scale raw) raw)))]
                             (if-let [scatter (::scatter channel)] (pack-scatter! indexed scatter (double value))
                                     (pack-value! universes channel value))
                             (when (and compact (some? (::compact-index channel)))
@@ -489,15 +514,19 @@
                             (if include-values? (assoc! values attribute value) values)))
                         (when include-values? (transient {})) (:compiled-channels fixture))]
     (when (or include-values? compact)
-      (let [emitted-color (if (and (not has-emitters?) (::dimmer? fixture))
+      (let [emitted-color (cond
+                            (and (not has-emitters?) (::dimmer? fixture))
                             (mapv #(* intensity %) (:emission-color fixture [1.0 1.0 1.0]))
-                            [(* intensity (min 1.0 (+ red white)))
+                            (seq (::tints fixture))
+                            (vec (write-emitter-tints! (::tints fixture) assigned nil 0 (double-array 3) 0
+                                                       (+ red white) (+ green white) (+ blue white) intensity))
+                            :else [(* intensity (min 1.0 (+ red white)))
                              (* intensity (min 1.0 (+ green white)))
                              (* intensity (min 1.0 (+ blue white)))])
             emitters (when include-values?
-                       (cond-> {:red red :green green :blue blue :white white}
-                         (contains? assigned :amber) (assoc :amber (:amber assigned))
-                         (contains? assigned :uv) (assoc :uv (:uv assigned))))]
+                       (reduce-kv (fn [levels attr level]
+                                    (if (contains? extra-emitters attr) (assoc levels attr level) levels))
+                                  {:red red :green green :blue blue :white white} assigned))]
         (when compact
           (compact-vector! compact 5 (::index fixture) emitted-color)
           (compact-scalar! compact 6 (::index fixture) intensity)
@@ -583,10 +612,15 @@
           (when compact
             (aset-double intensities index intensity)
             (let [color-base (* index 3)]
-              (if (and (not (.-emitter fixture)) (.-dimmer fixture))
+              (cond
+                (and (not (.-emitter fixture)) (.-dimmer fixture))
                 (let [emission (.-emission fixture)]
                   (dotimes [component 3]
                     (aset-double colors (+ color-base component) (* intensity (double (nth emission component))))))
+                (seq (.-tints fixture))
+                (write-emitter-tints! (.-tints fixture) nil values base colors color-base
+                                      (+ red white) (+ green white) (+ blue white) intensity)
+                :else
                 (do (aset-double colors color-base (* intensity (min 1.0 (+ red white))))
                     (aset-double colors (inc color-base) (* intensity (min 1.0 (+ green white))))
                     (aset-double colors (+ color-base 2) (* intensity (min 1.0 (+ blue white)))))))))))

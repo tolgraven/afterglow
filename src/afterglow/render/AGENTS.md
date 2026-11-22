@@ -11,6 +11,10 @@ and readback. Effect steps return data to the renderer.
   components are normalized to [0,1]; invalid values and overflowing blends fail.
   Color vectors and explicit emitter channels have distinct precedence. RGBW
   extraction is opt-in. Apply master/dimmer once, including real dimmer channels.
+  `photometry/emitter-spectrum` owns additive channel names, their approximate
+  photopic weights and linear RGB preview tints. Master, blackout and late
+  presentation apply to named emitter channels. A UV channel has no visible
+  RGB contribution. RGBW-only patches retain a specialized packing path.
 - Coarse/fine packing preserves the existing fractional-255 convention, not an
   assumed 0..65535 linear convention. Inversion and cross-universe fine offsets
   have dedicated tests. Change these semantics only with explicit migration.

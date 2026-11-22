@@ -165,3 +165,24 @@
     (is (= [51] (bytes-at half 0 14)))
     (is (= [0 0 0 0 0] (bytes-at dark 0 10 11 12 13 14)))
     (is (= (bytes-at blackout 0 15 16 17 18 19 20) (bytes-at dark 0 15 16 17 18 19 20)))))
+
+(deftest supplemental-emitters-interpolate-and-fade-in-semantic-space
+  (let [emitters [:warm-white :cold-white :cool-white :amber :cyan :lime :uv]
+        channels (zipmap emitters (range 1 8))
+        fixtures [{:id :bare :address 1 :universe 0 :channels (assoc channels :fog 8)}
+                  {:id :dimmer :address 10 :universe 0 :channels (assoc channels :dimmer 8)}]
+        plan (presentation/compile-plan fixtures)
+        make-frame (fn [id time level]
+                     (let [rows (vec (for [f fixtures, ch (keys (:channels f))] (a (:id f) ch level)))]
+                       (presentation/freeze-frame {:epoch 0 :frame-id id :time-ms time :completed-at-ms time}
+                                                  (frame/resolve-frame fixtures rows))))
+        full (make-frame 1 0 1.0)
+        faded (frame-at (admitted (presentation/new-state plan {:mode :hold-fade :fade-ms 100}) full) 75)
+        mid (frame-at (-> (presentation/new-state plan {:mode :buffered-interpolation})
+                          (admitted (make-frame 1 0 0.0)) (admitted (make-frame 2 25 1.0))) 37.5)]
+    (is (= (repeat 7 128) (apply bytes-at faded 0 (range 1 8))))
+    (is (= (repeat 7 255) (apply bytes-at faded 0 (range 10 17))))
+    (is (= [255 128] (bytes-at faded 0 8 17)))
+    (is (= (repeat 7 128) (apply bytes-at mid 0 (range 1 8))))
+    (is (= (repeat 8 128) (apply bytes-at mid 0 (range 10 18))))
+    (is (= [0] (bytes-at mid 0 8)))))
