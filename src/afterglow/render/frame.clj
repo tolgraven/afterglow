@@ -178,12 +178,19 @@
           extra-attributes (sort (remove (set base-attributes) (set (mapcat (comp keys :channels) compiled))))
           attribute-slots (zipmap (concat base-attributes extra-attributes) (range 3 (+ 10 (count extra-attributes))))
           compiled (mapv (fn [{:keys [channels] :as fixture}]
-                           (assoc fixture ::tints
+                           (cond-> (assoc fixture ::tints
                                   (vec (for [[attr [response [r g b]]] extra-emitters
                                              :when (and (pos? response) (contains? channels attr))]
-                                         (EmitterTint. attr (get attribute-slots attr) r g b)))))
+                                         (EmitterTint. attr (get attribute-slots attr) r g b))))
+                             (:fogger fixture)
+                             (update-in [:compiled-channels :fog] assoc
+                                        ::fog-off (atmosphere/off-bytes fixture)
+                                        ::fog-idle-level (atmosphere/physical-level
+                                                           (get-in fixture [:compiled-channels :fog])
+                                                           (first (get-in fixture [:fogger :dmx-range] [0 255]))))))
                          compiled)]
-      {:type ::patch :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
+      {:type ::patch :fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)
+       :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
        ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
        :target-order (mapv :id compiled) ::attribute-slots attribute-slots
        ::stride (+ 10 (count extra-attributes))
@@ -193,7 +200,7 @@
                 (::emitter? fixture) (::dimmer? fixture) (= :extract-min (:rgbw-policy fixture))
                 (:emission-color fixture [1.0 1.0 1.0])
                 (mapv (fn [[attribute channel]]
-                        (DenseChannel. (long (case attribute :dimmer 0 :red 1 :green 2 :blue 3 :white 4 (if (contains? extra-emitters attribute) 5 6)))
+                        (DenseChannel. (long (case attribute :dimmer 0 :red 1 :green 2 :blue 3 :white 4 :fog (if (::fog-off channel) 7 6) (if (contains? extra-emitters attribute) 5 6)))
                                        (long (get attribute-slots attribute))
                                        (long (or (::compact-index channel) -1))
                                        (::scatter channel) channel)) (:compiled-channels fixture))
@@ -377,6 +384,19 @@
   (let [indexed (object-array (map (fn [_] (byte-array 512)) (:universes patch)))]
     {:indexed indexed :universes (into (sorted-map) (map-indexed (fn [i u] [u (aget indexed i)]) (:universes patch)))}))
 
+(defn- write-off-bytes! [universes off-bytes]
+  (reduce-kv (fn [_ [u index] value]
+               (aset-byte ^bytes (get universes u) (int index) (unchecked-byte value))
+               nil) nil off-bytes))
+
+(defn idle-universes
+  "New, exclusively owned shutdown buffers. Fog uses its physical off endpoint.
+  Every other byte starts at zero."
+  [patch]
+  (let [buffers (:universes (create-buffers patch))]
+    (write-off-bytes! buffers (:fog-off-bytes patch))
+    buffers))
+
 (defn- pack-scatter! [^objects buffers ^ChannelScatter channel ^double level]
   (let [value (* 255.0 level)
         pivot (.-pivot channel)
@@ -501,14 +521,19 @@
         scale (if (and (not blackout?) (::dimmer? fixture)) 1.0 intensity)
         channel-values (reduce-kv
                         (fn [values attribute channel]
-                          (let [value (case attribute
+                          (let [fog-idle? (and (::fog-off channel)
+                                               (or blackout? (zero? master) (not (contains? assigned :fog))))
+                                value (case attribute
+                                        :fog (if fog-idle? (::fog-idle-level channel) (get assigned :fog 0.0))
                                         :dimmer intensity
                                         :red (* scale red) :green (* scale green)
                                         :blue (* scale blue) :white (* scale white)
                                         (let [raw (get assigned attribute 0.0)]
                                           (if (contains? extra-emitters attribute) (* scale raw) raw)))]
-                            (if-let [scatter (::scatter channel)] (pack-scatter! indexed scatter (double value))
-                                    (pack-value! universes channel value))
+                            (if fog-idle?
+                              (write-off-bytes! universes (::fog-off channel))
+                              (if-let [scatter (::scatter channel)] (pack-scatter! indexed scatter (double value))
+                                      (pack-value! universes channel value)))
                             (when (and compact (some? (::compact-index channel)))
                               (compact-scalar! compact (::compact-index channel) (::index fixture) value))
                             (if include-values? (assoc! values attribute value) values)))
@@ -598,14 +623,19 @@
               channels (.-channels fixture)]
           (dotimes [channel-index (count channels)]
             (let [^DenseChannel channel (nth channels channel-index)
-                  level (case (.-kind channel)
+                  kind (.-kind channel)
+                  fog-idle? (and (== 7 kind) (or blackout? (zero? master)
+                                                  (not (aget present (+ base (.-slot channel))))))
+                  level (case kind
                           0 intensity 1 (* scale red) 2 (* scale green)
                           3 (* scale blue) 4 (* scale white)
                           5 (* scale (aget values (+ base (.-slot channel))))
                           (aget values (+ base (.-slot channel))))
                   scatter (.-scatter channel), compact-index (.-compactIndex channel)]
-              (if scatter (pack-scatter! indexed scatter level)
-                  (pack-value! universes (.-fallback channel) level))
+              (if fog-idle?
+                (write-off-bytes! universes (::fog-off (.-fallback channel)))
+                (if scatter (pack-scatter! indexed scatter level)
+                    (pack-value! universes (.-fallback channel) level)))
               (when (and compact (>= compact-index 0))
                 (aset-double ^doubles (aget compact-arrays (int compact-index)) index level)
                 (aset-boolean ^booleans (aget compact-masks (int compact-index)) index true))))

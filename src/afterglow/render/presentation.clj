@@ -53,6 +53,9 @@
            (:fixtures patch)))
           indices (zipmap (:universes patch) (range))]
       {:type ::plan :universes (:universes patch) :channels channels
+       :idle-universes (reduce-kv (fn [buffers address value] (assoc-in buffers address value))
+                                  (zipmap (:universes patch) (repeat (vec (repeat 512 0))))
+                                  (:fog-off-bytes patch))
        ::packed (mapv (fn [{:keys [coarse fine inverted? fade?]}]
                         (PackedChannel. (long (get indices (first coarse))) (long (second coarse))
                                         (long (if fine (get indices (first fine)) -1))

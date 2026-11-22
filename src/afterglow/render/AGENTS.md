@@ -120,3 +120,9 @@ scratch fields, transforms and nontrivial blends need the typed field reducer.
 Test both paths, including ordered source attribution and later reads of
 previous values, before changing dispatch. The companion Tolglow profiler
 compares these cases on 64 animated moving heads.
+
+A profiled fog channel has [off full] endpoints in physical coarse DMX units.
+Its idle/blackout byte comes from the fixture definition, including reversed
+pumps and cross-universe fine channels. Explicit cue assignments still take a
+normalized logical value. Use atmosphere/physical-level to request a physical
+value through an inverted channel, and frame/idle-universes for shutdown.

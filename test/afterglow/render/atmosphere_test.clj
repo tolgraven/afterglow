@@ -52,3 +52,48 @@
     (is (= 0.5 (get-in (fog/present plan on 1000 {7 [0]}) [:sources 0 :flow-m3-s])))
     (is (thrown? Exception (fog/validate-fogger! (assoc-in fixture [:fogger :flow-m3-min] -1))))
     (is (thrown? Exception (fog/plan (assoc room :fog-half-life-s 0) (frame/compile-patch [fixture]))))))
+
+(deftest calibrated-fog-idles-at-its-physical-off-bytes
+  (doseq [[off pivot] [[255 0] [224.5 42] [128 41.3] [255 30.1] [201.25 nil]]]
+    (let [f (-> fixture (assoc-in [:fogger :dmx-range] [off 1])
+                (assoc-in [:channels :fog] (cond-> {:offset 1 :fine-offset 2} pivot (assoc :inverted-from pivot))))
+          patch (frame/compile-patch [f]) nozzle (first (:fixtures patch))
+          channel (get-in nozzle [:compiled-channels :fog])
+          level (fog/physical-level channel 85.5)
+          raw [{:target-id :jet :attribute :fog :value level}]
+          read-bytes (fn [packet] (mapv #(bit-and 255 (get-in packet %)) [[4 511] [5 0]]))
+          off-pair [(int off) (Math/round (* 255.0 (- off (int off))))]
+          run (fn [rows options] (:universes (frame/resolve-frame patch rows options)))]
+      (is (= (zipmap [[4 511] [5 0]] off-pair) (fog/off-bytes nozzle)))
+      (is (= off-pair (read-bytes (frame/idle-universes patch))))
+      (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]]
+        (is (= [85 128] (read-bytes (run raw options))))
+        (is (= off-pair (read-bytes (run [] options))))
+        (is (= off-pair (read-bytes (run raw (assoc options :blackout? true)))))
+        (is (= off-pair (read-bytes (run raw (assoc options :master 0)))))
+        (is (= off-pair (read-bytes (run [(assoc (first raw) :opacity 0)] options)))))))
+  (let [patch (frame/compile-patch [(dissoc fixture :fogger)])
+        raw [{:target-id :jet :attribute :fog :value 1.0}]]
+    (is (= {} (:fog-off-bytes patch)))
+    (is (= 255 (bit-and 255 (get-in (frame/resolve-frame patch raw {:blackout? true}) [:universes 4 511]))))))
+
+(deftest calibrated-endpoints-resolve-to-exact-flow-after-dmx-quantization
+  (doseq [channel [1 [1 2]], endpoints [[80.6 180.2] [180.2 80.6] [80.4001 80.8]]
+          :when (or (vector? channel) (not= (Math/round (double (first endpoints)))
+                                             (Math/round (double (second endpoints)))))]
+    (let [f (-> fixture (assoc-in [:channels :fog] channel) (assoc-in [:fogger :dmx-range] endpoints))
+          patch (frame/compile-patch [f])
+          nozzle (first (:fixtures patch)) channel (get-in nozzle [:compiled-channels :fog])
+          plan (fog/plan room patch) start (fog/initial plan 0 0)
+          idle (frame/idle-universes patch)
+          full (:universes (frame/resolve-frame patch [{:target-id :jet :attribute :fog
+                                                        :value (fog/physical-level channel (second endpoints))}]))
+          flow #(get-in % [:sources 0 :flow-m3-s])]
+      (is (zero? (flow (fog/present plan start 1 idle))))
+      (when (:fine channel)
+        (is (zero? (flow (fog/present plan start 1 (select-keys idle [4])))))
+        (is (zero? (flow (fog/present plan start 1 (select-keys idle [5]))))))
+      (is (== 1 (flow (fog/present plan start 1 full))))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (frame/compile-patch [(-> fixture (assoc-in [:channels :fog] 1)
+                                         (assoc-in [:fogger :dmx-range] [80.1 80.2]))]))))
