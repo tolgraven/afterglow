@@ -99,11 +99,11 @@
 (defn- reconcile! [system state]
   (let [state (if (:prune? state) (prune-state state) state)
         manager (:coeffects system)]
-    (when (seq (coeffects/active-ids manager))
-      (coeffects/retain! manager (into #{} (keep (fn [[[kind id] readers]]
-                                                  (when (and (= kind :cofx) (seq readers)) id)))
-                                       (:dependents state))))
-    state))
+    (let [live? (fn [id] (contains? (:dependents state) [:cofx id]))]
+      (when-let [active (seq (coeffects/active-ids manager))]
+        (coeffects/retain! manager (into #{} (filter live?) active)))
+      (reduce (fn [s id] (if (live? id) s (update s :cofx-snapshot dissoc id)))
+              state (keys (:cofx-snapshot state))))))
 
 (defn- transact! [system f]
   (locking (:lock system)

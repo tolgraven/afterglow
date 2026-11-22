@@ -475,6 +475,7 @@
         (is (some true? (for [_ (range 100)]
                           (do (reactive/publish! sys) (Thread/sleep 1) (<= 2 @(:signal lease))))))
         ((:close! lease))
+        (is (empty? (:cofx-snapshot @(:state sys))) "Released producers must drop their last sampled values.")
         (let [n @calls] (Thread/sleep 80) (is (= n @calls))))
       (finally (reactive/close! sys)))))
 
