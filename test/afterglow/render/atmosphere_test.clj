@@ -44,6 +44,24 @@
     (is (near? (/ (:mixed-m3 late) 200) (:mixed-density late)))
     (is (thrown? Exception (fog/advance plan late 8499)))
     (is (near? (total late) (total (fog/reconfigure (assoc plan :sources []) late 3 123 true))))))
+(deftest sightline-rate-follows-mixing-and-total-room-clearance
+  (let [measured (assoc room :measured-fog {:clearance-half-life-s 12.0 :reference-path-m 3})
+        calibrated (fog/plan measured (frame/compile-patch [fixture]))
+        clear (fog/initial calibrated 0 0)
+        start (fog/present calibrated clear 0 full)
+        stop (fog/present calibrated start 4000 off)
+        late (fog/advance calibrated stop 49000)]
+    (is (= 0.0 (:fog-level-change-per-s clear)))
+    (is (near? 12.0 (:clearance-half-life-s clear)))
+    (is (< (:clearance-half-life-s (fog/initial plan 0 0)) 60))
+    (is (pos? (:fog-level-change-per-s stop)) "A stopped nozzle can still thicken the haze")
+    (is (neg? (:fog-level-change-per-s late)))
+    (doseq [sample [stop late]]
+      (let [ms (:sample-time-ms sample)
+            after (fog/advance calibrated sample (+ ms 0.001))
+            numerical-rate (* 1.0e6 (- (:fog-level after) (:fog-level sample)))]
+        (is (near? numerical-rate (:fog-level-change-per-s sample)))))))
+
 (deftest partial-dmx-range-reversed-address-and-finite-fog-validation
   (let [plan (fog/plan room (frame/compile-patch [(assoc-in fixture [:fogger :dmx-range] [240 40])]))
         s (fog/initial plan 0 0)
@@ -114,3 +132,20 @@
               :when (not= expected actual)]
           {:pivot pivot :value value :expected expected :actual actual})]
     (is (empty? (take 1 mismatches)) (pr-str (first mismatches)))))
+
+(deftest released-plumes-forecast-the-peak-of-the-same-coasting-model
+  (let [other (-> fixture (assoc :id :slow :universe 7) (assoc-in [:fogger :mixing-seconds] 40))
+        plan (fog/plan room (frame/compile-patch [fixture other]))
+        state (-> (fog/initial plan 0 0) (assoc :mixed-m3 0.3)
+                  (assoc-in [:sources 0 :local-m3] 0.7) (assoc-in [:sources 1 :local-m3] 2.0))
+        peak (fog/coasting-peak plan state)
+        sample #(:mixed-m3 (fog/advance plan state (* 1000 %)))
+        t (:after-s peak)]
+    (is (pos? t))
+    (is (near? (:mixed-m3 peak) (sample t)))
+    (is (near? (:fog-level peak) (:fog-level (fog/advance plan state (* 1000 t)))))
+    (is (< (sample (dec t)) (:mixed-m3 peak)))
+    (is (< (sample (inc t)) (:mixed-m3 peak)))
+    (is (< (:mixed-m3 state) (:mixed-m3 peak) 3))
+    (let [clear (fog/initial plan 0 0)]
+      (is (= {:after-s 0.0 :mixed-m3 0.0 :fog-level 0.0} (fog/coasting-peak plan clear))))))
