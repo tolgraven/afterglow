@@ -245,7 +245,11 @@
   (when-let [validator (:validator (options handle))]
     (when-not (validator value) (fail! "Validator rejects reactive value" {:type ::invalid-value :id (-id handle)}))))
 (defn- notify-watches! [handle old new]
-  (doseq [[key f] (sort-by (comp pr-str key) (:watches (options handle)))]
+  (doseq [[key f] (sort-by (comp pr-str key) (:watches (options handle)))
+          :let [state (state-of (-system handle))
+                id (-id handle) kind (-kind handle)]
+          :when (and (identical? handle (get-in state [(if (= kind :source) :cell-handles :handles) id]))
+                     (identical? f (get-in state [:options [kind id] :watches key])))]
     (let [kind (-kind handle) id (-id handle) name (if (= kind :node) (node-name id) id)]
       (try
         (f key handle old new)
@@ -627,11 +631,14 @@
                              {:generation (:generation (state-of system)) :changed-sources (vec (sort-by str changed))
                               :values (into {} (map (fn [[id node]] [id (:value node)]) (:nodes (state-of system))))})))]
    ;; Watch callbacks observe an already committed batch, never a partial DAG.
-   (doseq [[id node] (:nodes @(:state system))
-           :let [old (get-in before [:nodes id :value])]
-           :when (and (:available? node)
-                      (or (not (get-in before [:nodes id :available?])) (not= old (:value node))))]
-     (notify-watches! (get-in @(:state system) [:handles id]) old (:value node)))
+   (let [committed (state-of system)]
+     (doseq [[id node] (:nodes committed)
+             :let [old (get-in before [:nodes id :value])
+                   handle (get-in committed [:handles id])]
+             :when (and handle (:available? node)
+                        (or (not (get-in before [:nodes id :available?])) (not= old (:value node)))
+                        (identical? handle (get-in (state-of system) [:handles id])))]
+       (notify-watches! handle old (:value node))))
    (let [state (state-of system)
          pending (filterv #(> (:sequence %) (get before :published-fault-sequence 0)) (:faults state))]
      (when (seq pending)

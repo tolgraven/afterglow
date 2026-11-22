@@ -534,3 +534,23 @@
     (is (thrown? clojure.lang.ExceptionInfo (registry/resolve-handler definition {})))
     (let [handler (registry/resolve-handler definition {:trusted-source? true})]
       (is (= 6 (handler {} [::level]))))))
+
+(deftest releasing-and-reacquiring-a-peer-during-delivery
+  (let [system (reactive/create-system {:value 1})
+        leases (atom {}) calls (atom [])]
+    (try
+      (reactive/reg-sub! system ::lease (fn [{:keys [db]} _] (:value @db)))
+      (doseq [id [0 1]]
+        (let [peer (- 1 id)
+              on-change (fn [value]
+                          (swap! calls conj [id value])
+                          ((:close! (get @leases peer)))
+                          (swap! leases assoc peer
+                                 (reactive/acquire! system [::lease peer]
+                                                    #(swap! calls conj [:replacement %]))))]
+          (swap! leases assoc id (reactive/acquire! system [::lease id] on-change))))
+      (is (integer? (:generation (reactive/publish! system {:value 2}))))
+      (is (= 1 (count @calls)))
+      (is (= 2 (second (first @calls))))
+      (is (every? #(= 2 @(:signal %)) (vals @leases)))
+      (finally (reactive/close! system)))))
