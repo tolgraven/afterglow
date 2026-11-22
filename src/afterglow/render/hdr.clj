@@ -57,6 +57,7 @@
     (when (or lamp? (seq attrs))
       (assoc (->Head id i position rgb? (= rgbw-policy :extract-min) (boolean lamp?)
                      (if lamp? [(->Lane :dimmer 3 (or emission-color [1 1 1]) :tint)] physical) virtual shutters)
+             :white? (contains? channels :white)
              :simple-rgb? (and rgb? (every? #{:red :green :blue :white} attrs))
              :scan-slots (int-array (into [0 1 2 3] (map :slot) physical))))))
 

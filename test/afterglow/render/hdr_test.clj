@@ -123,3 +123,24 @@
         incoming (native-and-rich [(block (row :near :color [3.0 0 0]))] opts)]
     (is (every? zero? hidden))
     (is (= [0 0 0 255] (subvec incoming 0 4)))))
+
+(deftest packed-physical-rgbw-matches-the-reference-emitter-mix
+  (doseq [policy [:none :extract-min]]
+    (let [rgbw (assoc-in (rgb-head :source 1 [0 0 0]) [:channels :white] 4)
+          patch (frame/compile-patch [(assoc rgbw :rgbw-policy policy)
+                                      (assoc-in (rgb-head :neighbor 5 [0 0 0]) [:channels :white] 4)])
+          render (fn [rows options]
+                   (let [rich (frame/resolve-frame patch rows options)
+                         compact (frame/resolve-frame patch rows (assoc options :include-values? false :compact-values? true))]
+                     (is (= (bytes-of rich) (bytes-of compact)))
+                     (is (= (mapv #(get-in rich [:values % :emitted-color]) (:target-order patch))
+                            (mapv :emitted-color (frame/project-compact (:compact compact)))))
+                     (bytes-of compact)))]
+      (is (= [0 0 0 255 102 102 102 0]
+             (subvec (render [(row :source :white 1.4)] {:hdr {:spill 1.0 :radius 1.0}}) 0 8)))
+      (doseq [primary [(row :source :red 0.8) (row :source :white 0.35) (row :source :white 1.7)]
+              gain [0.0 0.35 1.6]
+              options [{} {:master 0.7} {:blackout? true}]]
+        (render [(row :source :color [1.6 0.8 0.35]) primary (row :source :dimmer 0.6)
+                 (row :neighbor :color [0.2 0.4 0.6]) (row :neighbor :white 0.15)]
+                (assoc options :hdr {:gain gain :white-mix 0.7 :spill-white-mix 0.8 :spill 0.9 :radius 1.0}))))))
