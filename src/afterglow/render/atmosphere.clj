@@ -23,13 +23,22 @@
   "Compile the fog-capable part of a patch. Pass the room in metres and a
   frame/compile-patch result. DMX range is [off full] in physical byte units."
   [room patch]
-  (let [{:keys [width height depth air-changes-per-hour fog-half-life-s]
+  (let [{:keys [width height depth air-changes-per-hour fog-half-life-s measured-fog]
          :or {width 12 height 5 depth 10 air-changes-per-hour 0 fog-half-life-s 180}} room
-        volume (* (double width) (double height) (double depth))]
+        volume (* (double width) (double height) (double depth))
+        {:keys [clearance-half-life-s extinction-per-m reference-path-m]
+         :or {extinction-per-m 1.25 reference-path-m 1.0}} measured-fog]
     (require! (and (every? #(and (finite? %) (pos? %)) [width height depth volume fog-half-life-s])
                    (finite? air-changes-per-hour) (<= 0 air-changes-per-hour 3600))
               "Invalid fog room dimensions, ventilation or decay time" {:room room})
-    {:volume-m3 volume :loss-per-s (+ (/ air-changes-per-hour 3600.0) (/ (Math/log 2) fog-half-life-s))
+    (require! (and (or (nil? measured-fog)
+                       (and (map? measured-fog) (finite? clearance-half-life-s) (<= 0.1 clearance-half-life-s 86400)))
+                   (finite? extinction-per-m) (<= 0.001 extinction-per-m 1000)
+                   (finite? reference-path-m) (<= 0.1 reference-path-m 1000))
+              "Invalid measured fog clearance, extinction or sightline length" {:measured-fog measured-fog})
+    {:volume-m3 volume :extinction-per-m extinction-per-m :reference-path-m reference-path-m
+     :loss-per-s (if clearance-half-life-s (/ (Math/log 2) clearance-half-life-s)
+                     (+ (/ air-changes-per-hour 3600.0) (/ (Math/log 2) fog-half-life-s)))
      :sources
      (mapv (fn [{:keys [id position fogger compiled-channels] :as fixture}]
              (validate-fogger! fixture)
@@ -45,10 +54,16 @@
   (merge (select-keys spec [:fixture-id :position :direction])
          {:flow-m3-s 0.0 :emitted-m3 0.0 :local-m3 0.0}))
 
+(defn- mixed-state [state plan volume]
+  (let [density (/ volume (:volume-m3 plan))]
+    (assoc state :mixed-m3 volume :mixed-density density
+           :fog-level (- (Math/expm1 (- (* density (:extinction-per-m plan) (:reference-path-m plan))))))))
+
 (defn initial [plan epoch now]
   (require! (finite? now) "Expected a finite monotonic sample time" {:time now})
-  {:epoch epoch :sample-time-ms now :volume-m3 (:volume-m3 plan)
-   :mixed-m3 0.0 :mixed-density 0.0 :sources (mapv source-state (:sources plan))})
+  (mixed-state (merge (select-keys plan [:volume-m3 :extinction-per-m :reference-path-m])
+                      {:epoch epoch :sample-time-ms now :sources (mapv source-state (:sources plan))})
+               plan 0.0))
 
 (defn- integrate [volume flow decay seconds]
   ;; Exact solution for a held pump level and first-order losses. expm1
@@ -75,8 +90,7 @@
                                      (update :emitted-m3 + (* rate seconds)))))
                              sources (:sources plan))
           mixed (max 0.0 (- remaining (reduce + 0.0 (map :local-m3 next-sources))))]
-      (assoc state :sample-time-ms now :mixed-m3 mixed :mixed-density (/ mixed (:volume-m3 plan))
-             :sources next-sources))))
+      (mixed-state (assoc state :sample-time-ms now :sources next-sources) plan mixed))))
 
 (defn reconfigure
   "Keep existing fog on a rig change. Retired jets join the mixed room. Call
@@ -92,7 +106,7 @@
                             resume? (assoc :flow-m3-s 0.0)))) (:sources blank))
         retired (apply dissoc old (map :fixture-id sources))
         mixed (reduce + (double (:mixed-m3 state 0)) (map :local-m3 (vals retired)))]
-    (assoc blank :sources sources :mixed-m3 mixed :mixed-density (/ mixed (:volume-m3 plan)))))
+    (mixed-state (assoc blank :sources sources) plan mixed)))
 
 (defn- dmx-byte [universes [u i]]
   (when-let [data (get universes u)]
@@ -102,7 +116,7 @@
   "Advance the previous interval, then latch newly delivered coarse/fine DMX.
   A universe absent from a partial update retains its last received level."
   [plan state now universes]
-  (update (advance plan state now) :sources
+  (let [updated (update (advance plan state now) :sources
           (fn [sources]
             (mapv (fn [s {:keys [channel dmx-range max-flow-m3-s]}]
                     (let [{:keys [coarse fine]} channel
@@ -113,5 +127,8 @@
                               hi (or received-hi (:dmx-coarse s) (int off))
                               lo (if fine (or received-lo (:dmx-fine s) 0) 0)
                               amount (min 1.0 (max 0.0 (/ (- (+ hi (/ lo 255.0)) off) (- full off))))]
-                          (assoc s :flow-m3-s (* amount max-flow-m3-s) :dmx-coarse hi :dmx-fine lo))
-                        s))) sources (:sources plan)))))
+                          (assoc s :flow-m3-s (* amount max-flow-m3-s) :dmx-coarse hi :dmx-fine lo
+                                 :last-presented-ms now))
+                        s))) sources (:sources plan))))]
+    (cond-> updated (some #(= now (:last-presented-ms %)) (:sources updated))
+      (assoc :last-presented-ms now))))
