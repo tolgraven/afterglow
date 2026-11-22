@@ -28,11 +28,19 @@
          :when (and (contains? fixture key) (not (valid? (get fixture key))))]
      {:path [key] :message message})))
 
-;; Relative photopic sensitivity at representative emitter wavelengths (CIE Vλ).
-;; Broadband white assumes 300 lm per optical watt; UV contributes no visible light.
-(def ^:private white-response
-  {:red 0.321 :green 0.793 :blue 0.074 :amber 0.757 :white (/ 300.0 683.0) :warm-white (/ 300.0 683.0) :cold-white (/ 300.0 683.0) :uv 0.0})
+(def emitter-spectrum
+  "Additive emitter channels mapped to [relative photopic response, linear RGB
+  preview tint]. Responses approximate CIE Vλ at representative wavelengths,
+  including cyan at 505 nm and lime at 560 nm. Broadband white uses 300 lm per
+  optical watt. UV emits physical output with no visible contribution."
+  (let [white (/ 300.0 683.0)
+        cold [white [0.82 0.9 1.0]]]
+    {:red [0.321 [1.0 0.0 0.0]] :green [0.793 [0.0 1.0 0.0]] :blue [0.074 [0.0 0.0 1.0]]
+     :white [white [1.0 1.0 1.0]] :amber [0.757 [1.0 0.55 0.0]]
+     :warm-white [white [1.0 0.8 0.62]] :cold-white cold :cool-white cold
+     :cyan [0.407 [0.0 1.0 0.8]] :lime [0.995 [0.55 1.0 0.06]] :uv [0.0 [0.0 0.0 0.0]]}))
 
+(def ^:private white-response (into {} (map (fn [[k [response]]] [k response])) emitter-spectrum))
 (def ^:private rgb-white (/ (+ (:red white-response) (:green white-response) (:blue white-response)) 3))
 
 (defn relative-brightness

@@ -4,11 +4,12 @@
   The host owns completion admission and presentation scheduling. This namespace
   never evaluates effects or changes the canonical show state. Packet bytes are
   immutable vectors; materialize creates exclusively owned transport arrays."
-  (:require [afterglow.render.frame :as frame]))
+  (:require [afterglow.render.frame :as frame]
+            [afterglow.render.photometry :as photometry]))
 
 (deftype PackedChannel [^long coarseUniverse ^long coarseIndex ^long fineUniverse ^long fineIndex ^boolean inverted ^boolean fade])
 
-(def ^:private emitters #{:red :green :blue :white :amber :uv})
+(def ^:private emitters (set (keys photometry/emitter-spectrum)))
 (def ^:private continuous (into emitters #{:dimmer :pan :tilt :focus :zoom}))
 (def ^:private byte-array-class (class (byte-array 0)))
 

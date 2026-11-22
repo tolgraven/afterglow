@@ -77,3 +77,9 @@
     (is (= 1 (:epoch restarted)))
     (is (empty? (:instances restarted)))
     (is (= :stale-epoch (get-in (model/apply-command restarted (command paused {:op :instance/remove :instance-id "0:1"})) [:ack :code])))))
+
+(deftest supplemental-emitters-report-the-color-category-on-every-control-surface
+  (doseq [channel [:warm-white :cold-white :cool-white :cyan :lime :amber :uv]]
+    (is (= [:color] (categories/definition-categories {:outputs {channel 1}})))
+    (is (= [:color :intensity] (categories/definition-categories
+                                 {:outputs [{:attribute channel} {:attribute :dimmer}]})))))

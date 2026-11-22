@@ -1,6 +1,7 @@
 (ns afterglow.control.categories
   "Output-derived categories and explicit selectors shared by every control surface.
-  Category display colors describe controls; cue swatches describe emitted color.")
+  Category display colors describe controls; cue swatches describe emitted color."
+  (:require [afterglow.render.photometry :as photometry]))
 
 (def colors
   {:color "#c18be8" :intensity "#e8ca74" :movement "#70bedb"
@@ -13,7 +14,7 @@
     (vec (sort-by str
                   (into (set (:categories definition))
                         (cond-> []
-                          (some attributes [:color :red :green :blue :white :amber :uv]) (conj :color)
+                          (or (attributes :color) (some photometry/emitter-spectrum attributes)) (conj :color)
                           (attributes :dimmer) (conj :intensity)
                           (some attributes [:pan :tilt :aim :direction]) (conj :movement)
                           (some attributes [:zoom :focus :iris :gobo]) (conj :beam-shape)
