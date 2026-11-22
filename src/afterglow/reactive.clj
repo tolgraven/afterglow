@@ -768,8 +768,7 @@
   (let [locals (vec (mapcat identity bindings))
         data (into {} (map (fn [[name _]] [(str name) name]) bindings))]
     `(let [~@locals
-           descriptor# {:id ~id :kind :sub :implementation {:type :source :namespace ~(str (ns-name *ns*))
-                                                            :form ~(pr-str handler-form) :bindings ~data}}]
+           descriptor# {:id ~id :kind :sub :implementation (assoc ~(registry/source-description *ns* handler-form) :bindings ~data)}]
        (reg-sub! ~system ~id ~handler-form descriptor#))))
 
 (defmacro reg-fx [system id bindings handler-form]
@@ -779,6 +778,5 @@
   (let [locals (vec (mapcat identity bindings))
         data (into {} (map (fn [[name _]] [(str name) name]) bindings))]
     `(let [~@locals
-           descriptor# {:id ~id :kind :fx :implementation {:type :source :namespace ~(str (ns-name *ns*))
-                                                           :form ~(pr-str handler-form) :bindings ~data}}]
+           descriptor# {:id ~id :kind :fx :implementation (assoc ~(registry/source-description *ns* handler-form) :bindings ~data)}]
        (reg-fx! ~system ~id ~handler-form descriptor#))))

@@ -526,3 +526,11 @@
         (reactive/publish! system {:n 3})
         (is (= [8 9 3] [@a @b @independent])))
       (finally (reactive/close! system)))))
+
+(deftest previously-saved-detached-repl-can-restore-core-and-captured-values
+  (let [definition {:id ::level :kind :sub
+                    :implementation {:type :source :namespace "example.session_12345678_abcd_1234_abcd_123456789abc"
+                                     :form "(fn [_ _] (* factor 2))" :bindings {"factor" 3}}}]
+    (is (thrown? clojure.lang.ExceptionInfo (registry/resolve-handler definition {})))
+    (let [handler (registry/resolve-handler definition {:trusted-source? true})]
+      (is (= 6 (handler {} [::level]))))))
