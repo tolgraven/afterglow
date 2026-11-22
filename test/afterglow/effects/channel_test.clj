@@ -1,5 +1,10 @@
 (ns afterglow.effects.channel-test
-  (:require [clojure.test :refer :all]
+  (:require [afterglow.effects :as fx]
+            [afterglow.effects.fun :as fun]
+            [afterglow.effects.dimmer :as dimmer]
+            [afterglow.rhythm :as rhythm]
+            [afterglow.show-context :refer [with-show]]
+            [clojure.test :refer :all]
             [afterglow.effects :as fx]
             [afterglow.effects.channel :as channel]
             [afterglow.util :as util]))
@@ -40,3 +45,13 @@
     (is (= 80 (:value (fx/run-assigners {} {} (fx/generate htp {} {}) 20))))
     (is (= 80 (:value (fx/run-assigners {} {} (fx/generate ltp {} {}) 100))))
     (is (= 80 (:value (fx/run-assigners {} {} (fx/generate htp {} {}) nil))))))
+
+(deftest sparkle-addresses-the-dimmer-function-on-a-multipurpose-channel
+  (let [show {:grand-master (dimmer/master {}) :metronome (rhythm/metronome 120)}
+        head {:id :head :function-map {:dimmer [{:type :shutter} {}]}}]
+    (with-show show
+      (let [effect (fun/dimmer-sparkle [head] :chance 1)
+            now (rhythm/metro-snapshot (:metronome show))
+            [assigner] (fx/generate effect show now)]
+        (is (= [:head :dimmer] (:target-id assigner)))
+        (is (== 100 (fx/assign assigner show now head nil)))))))

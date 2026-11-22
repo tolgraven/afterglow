@@ -1,7 +1,9 @@
 (ns afterglow.effects.oscillators-test
   (:require [clojure.test :refer :all]
             [afterglow.effects.oscillators :as oscillator]
-            [afterglow.rhythm :as rhythm]))
+            [afterglow.rhythm :as rhythm]
+            [afterglow.effects.params :as params]
+            [afterglow.show-context :refer [with-show]]))
 
 (defn- snapshot [phase]
   (rhythm/->MetronomeSnapshot 0 120 4 4 (* phase 500) 1 1 1 phase (/ phase 4) (/ phase 16)))
@@ -30,3 +32,15 @@
   (is (= [1.0 1.0] (samples (oscillator/square :width 1) [0.0 0.9])))
   (doseq [width [-0.1 1.1]]
     (is (thrown? IllegalArgumentException (oscillator/square :width width)))))
+
+(deftest resolving-static-inputs-freezes-their-show-values
+  (let [show {:variables (atom {:down true :width 0.25 :phase 0.25})}]
+    (with-show show
+      (let [static (fn [id type default] (params/build-variable-param id :type type :default default :frame-dynamic false))
+            waves [(oscillator/sawtooth :down? (static :down Boolean false))
+                   (oscillator/square :width (static :width Number 0.5))
+                   (oscillator/sawtooth :phase (static :phase Number 0))]
+            fixed (mapv #(oscillator/resolve-non-frame-dynamic-elements % show (snapshot 0.25) nil) waves)]
+        (reset! (:variables show) {:down false :width 1.0 :phase 0.5})
+        (is (= [0.75 0.0 0.5]
+               (mapv #(oscillator/evaluate % show (snapshot 0.25) nil) fixed)))))))
