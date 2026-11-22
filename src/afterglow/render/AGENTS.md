@@ -113,3 +113,10 @@ Keep compound cue members in their declared order through native composition.
 Resolve fields and group opacity before edge tracking, pan/tilt solving, RGBW
 extraction and DMX packing. Preserve untouched attributes and the final
 contributing member's fault source. Cover both rich and compact output.
+
+A full-opacity compound containing only physical replacement writes can move
+the original typed buffers to its anchor in slot order. Native colors, musical
+scratch fields, transforms and nontrivial blends need the typed field reducer.
+Test both paths, including ordered source attribution and later reads of
+previous values, before changing dispatch. The companion Tolglow profiler
+compares these cases on 64 animated moving heads.
