@@ -96,3 +96,14 @@
     (is (= #{} (get-in r [:members :needle])))
     (is (= [:spatial/enter :spatial/exit] (mapv :type hits)))
     (is (< 0 (:time-ms (first hits)) (:time-ms (last hits)) 5))))
+
+(deftest reflected-path-reaches-a-fixture-even-when-the-ball-returns-to-its-start
+  (let [settings (scene {:fast (assoc ball :radius 0.02 :position [1.48 2 0]
+                                           :velocity [200 0 0])})
+        rig [{:id :edge :position [1.95 2 0]}]
+        start (spatial/advance nil settings {:time-ms 0} rig {})
+        frame (spatial/advance (:state start) settings {:time-ms 5} rig {})
+        hits (filter #(= :edge (:fixture-id %)) (:events frame))]
+    (is (= #{} (get-in frame [:members :fast])))
+    (is (= [:spatial/enter :spatial/exit :spatial/enter :spatial/exit] (mapv :type hits)))
+    (is (every? true? (map near [2.25 2.45 2.55 2.75] (map :time-ms hits))))))

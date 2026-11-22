@@ -63,26 +63,36 @@
                 (not= before after) (update :events into (transitions id before after now)))))
           state ids))
 
-(defn- observe-motion [out before ids volumes rig start]
+(defn- observe-segment [state id rig radius start finish p0 p1]
+  (if (every? true? (map == p0 p1)) state
+    (let [was (get-in state [:members id] #{})
+          hits (geometry/sweep rig p0 p1 radius)
+          event (fn [type fixture t]
+                  {:type type :volume-id id :fixture-id fixture :time-ms (+ start (* (- finish start) t))})
+          [inside events] (reduce (fn [[inside events] [fixture entry exit stays?]]
+                                    [(cond-> inside stays? (conj fixture))
+                                     (cond-> events
+                                       (not (was fixture)) (conj (event :spatial/enter fixture entry))
+                                       (not stays?) (conj (event :spatial/exit fixture exit)))])
+                                  [#{} (:events state)] hits)
+          ;; A fixture exactly on the starting surface can fall outside
+          ;; a tangent test by one floating-point unit.
+          leaving (set/difference was inside (into #{} (map first) hits))]
+      (-> state (assoc-in [:members id] inside)
+          (assoc :events (into events (map #(event :spatial/exit % 0.0)) (sort-by pr-str leaving)))))))
+
+(defn- observe-motion [out before ids volumes rig start wall-paths]
   (reduce
     (fn [state id]
-      (let [p0 (get-in before [:bodies id :position]) p1 (get-in state [:bodies id :position])]
-        (if (every? true? (map == p0 p1)) state
-          (let [was (get-in state [:members id] #{})
-                hits (geometry/sweep rig p0 p1 (:radius (volumes id)))
-                event (fn [type fixture t]
-                        {:type type :volume-id id :fixture-id fixture :time-ms (+ start (* motion/step-ms t))})
-                [inside events] (reduce (fn [[inside events] [fixture entry exit stays?]]
-                                          [(cond-> inside stays? (conj fixture))
-                                           (cond-> events
-                                             (not (was fixture)) (conj (event :spatial/enter fixture entry))
-                                             (not stays?) (conj (event :spatial/exit fixture exit)))])
-                                        [#{} (:events state)] hits)
-                ;; A fixture exactly on the starting surface can fall outside
-                ;; a tangent test by one floating-point unit.
-                leaving (set/difference was inside (into #{} (map first) hits))]
-            (-> state (assoc-in [:members id] inside)
-                (assoc :events (into events (map #(event :spatial/exit % 0.0)) (sort-by pr-str leaving))))))))
+      (let [p0 (get-in before [:bodies id :position]) p1 (get-in state [:bodies id :position])
+            radius (:radius (volumes id)) end (+ start motion/step-ms)]
+        (if-let [waypoints (get wall-paths id)]
+          (loop [state state t0 start p0 p0 remaining (seq waypoints)]
+            (if-let [[offset p] (first remaining)]
+              (let [t (+ start offset)]
+                (recur (observe-segment state id rig radius t0 t p0 p) t p (next remaining)))
+              (observe-segment state id rig radius t0 end p0 p1)))
+          (observe-segment state id rig radius start end p0 p1))))
     out ids))
 
 (defn- signals [{:keys [shape position radius min max]} body]
@@ -139,7 +149,7 @@
                               next (motion/step (:bodies current) (:contacts current) balls volumes scene t)]
                           (observe-motion (-> current (assoc :bodies (:bodies next) :contacts (:contacts next))
                                               (update :events into (:events next)))
-                                          current balls volumes rig t)))
+                                          current balls volumes rig t (:wall-paths next))))
                       initial (range steps))
         state (assoc (dissoc final :events) :epoch (:epoch clock) :time-ms now :playing? playing? :remainder-ms remainder)]
     {:state state :members (:members final) :dropped-ms dropped

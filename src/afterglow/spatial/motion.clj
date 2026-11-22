@@ -70,6 +70,25 @@
 (defn- squash [speed hardness]
   (* (- 1.0 hardness) (/ speed (+ speed 2.0))))
 
+(defn- coordinate-at [timeline instant]
+  (let [[[t0 x0] [t1 x1]] (first (drop-while (fn [[_ [t _]]] (< t instant))
+                                              (partition 2 1 timeline)))]
+    (if (= t0 t1) x1 (+ x0 (* (- x1 x0) (/ (- instant t0) (- t1 t0)))))))
+
+(defn- wall-waypoints [position axes radius bounds seconds]
+  ;; Motion is linear between wall contacts on each axis. Every distinct
+  ;; impact time splits the complete 3D path, including oblique corner bounces.
+  (let [timeline (fn [i [end _ hits]]
+                   (into [[0.0 (position i)]]
+                         (concat (for [{:keys [side offset]} hits]
+                                   [offset (case side
+                                             :min (+ (get-in bounds [:min i]) radius)
+                                             :max (- (get-in bounds [:max i]) radius))])
+                                 [[seconds end]])))
+        timelines (mapv timeline (range 3) axes)
+        at (into (sorted-set) (comp (mapcat #(nth % 2)) (map :offset) (filter #(< 0.0 % seconds))) axes)]
+    (mapv (fn [t] [(* 1000.0 t) (mapv #(coordinate-at % t) timelines)]) at)))
+
 (defn- move-body [id spec body acceleration bounds start]
   (let [seconds (/ step-ms 1000.0)
         r (:radius spec)
@@ -89,7 +108,8 @@
         decay (* (:deformation body) (Math/exp (* -14.0 seconds)))]
     [(assoc body :position (mapv first axes) :velocity (mapv second axes)
             :rotation (plus (:rotation body) (times (:angular-velocity spec zero3) seconds))
-            :deformation (reduce max decay (map :deformation events))) events]))
+            :deformation (reduce max decay (map :deformation events))) events
+     (when (seq events) (wall-waypoints position axes r bounds seconds))]))
 
 (defn- contact [bodies specs id other now previous]
   (let [a (bodies id) b (bodies other) sa (specs id) sb (specs other)
@@ -119,10 +139,11 @@
 
 (defn step [bodies contacts ids specs {:keys [gravity bounds]} now]
   (let [accelerations (accelerations ids specs bodies gravity)
-        [moved events] (reduce (fn [[out events] id]
-                                 (let [[body bounces] (move-body id (specs id) (bodies id) (accelerations id) bounds now)]
-                                   [(assoc out id body) (into events bounces)]))
-                               [{} []] ids)
+        [moved events paths] (reduce (fn [[out events paths] id]
+                                       (let [[body bounces waypoints] (move-body id (specs id) (bodies id) (accelerations id) bounds now)]
+                                         [(assoc out id body) (into events bounces)
+                                          (cond-> paths (seq waypoints) (assoc id waypoints))]))
+                                     [{} [] {}] ids)
         pairs (for [i (range (count ids)) j (range (inc i) (count ids))] [(ids i) (ids j)])
         [resolved next-contacts events]
         (reduce (fn [[bodies ongoing events] [a b]]
@@ -130,4 +151,4 @@
                     [bodies (cond-> ongoing pair (conj pair)) (into events impacts)]))
                 [moved #{} events] pairs)]
     {:bodies (reduce (fn [m id] (update-in m [id :position] #(constrain bounds (:radius (specs id)) %))) resolved ids)
-     :contacts next-contacts :events events}))
+     :contacts next-contacts :events events :wall-paths paths}))
