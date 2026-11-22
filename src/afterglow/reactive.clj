@@ -447,15 +447,27 @@
                           :watchers (mapv #(dissoc % :order) (sort-by :order (vals (:watchers state))))}}]
       (registry/validate-registry result))))
 
+(defn- existing-var-handler [system {:keys [kind id implementation]}]
+  (when (and system (= :var (:type implementation)))
+    (let [registration (get-in @(:state system) [:registrations [kind id]])]
+      (when (= implementation (get-in registration [:descriptor :implementation]))
+        (:handler registration)))))
+
 (defn restore!
   "Replace registrations/caches from validated data, retaining the owner's db.
-  Source code compilation requires {:trusted-source? true}. Validation and
+  Source compilation requires {:trusted-source? true}. Var references must
+  match a local registration (also checked in the optional :local-system), an
+  explicitly :allowed-vars set of qualified symbols, or a trusted file. Validation and
   compilation finish before graph replacement. Restore watcher last-values so
   loading at the same beat does not trigger the same action again."
   ([system data] (restore! system data {}))
   ([system data options]
    (registry/validate-registry data)
-   (let [resolved (mapv (fn [definition] [definition (registry/resolve-handler definition options)]) (:registrations data))]
+   (let [resolved (mapv (fn [definition]
+                          [definition (or (existing-var-handler system definition)
+                                          (existing-var-handler (:local-system options) definition)
+                                          (registry/resolve-handler definition options))])
+                        (:registrations data))]
      (locking (:lock system)
        (ensure-open! system)
        (when *transaction* (fail! "Restore only between owner batches" {:type ::mutation-during-evaluation}))
