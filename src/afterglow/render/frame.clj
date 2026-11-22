@@ -168,11 +168,15 @@
           universe-indices (zipmap universes (range))
           compiled (mapv
                     (fn [fixture]
-                      (update fixture :compiled-channels
-                              (fn [channels]
-                                (reduce-kv (fn [result attribute channel]
-                                             (assoc result attribute (compile-scatter universe-indices attribute channel)))
-                                           {} channels))))
+                      (let [channels (:compiled-channels fixture)
+                            channels (into {} (map (fn [[attr channel]]
+                                                     [attr (compile-scatter universe-indices attr channel)])) channels)
+                            emitters (select-keys channels emitter-attributes)
+                            lamp? (and (:dimmer channels)
+                                       (not-any? channels [:fog :haze :fan :relay :pump]))
+                            light (when (or (seq emitters) lamp?)
+                                    (cond-> emitters (:dimmer channels) (assoc :dimmer (:dimmer channels))))]
+                        (assoc fixture :compiled-channels channels ::emission-channels light)))
                     compiled)
           base-attributes [:dimmer :red :green :blue :white :amber :uv]
           extra-attributes (sort (remove (set base-attributes) (set (mapcat (comp keys :channels) compiled))))
