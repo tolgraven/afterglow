@@ -94,3 +94,21 @@
         (is (= 0.0 (:dimmer (emission/emitted-levels (head :spot) (:frame tail)))))
         (is (identical? src (:frame (emission/follow-frame patch src nil src 0.1 0.1 1)))))))
   (is (thrown? Exception (emission/scale-emission patch (frame/resolve-frame patch [] {}) (double-array [1])))))
+
+(deftest exact-ramps-track-each-emitter-independently-across-retargeting
+  (let [aim (fn [r b]
+              (frame/resolve-frame patch [{:target-id :strip :attribute :red :value r}
+                                          {:target-id :strip :attribute :blue :value b}]
+                                   {:include-values? false :compact-values? true}))
+        follow (fn [previous target step]
+                 (emission/follow-frame patch target (:levels previous) nil step step 1.0
+                                        {:attack true :release true :previous (:ramps previous)}))
+        levels #(emission/emitted-levels (head :strip) (:frame %))
+        next (follow nil (aim 1.0 0.0) 0.25)
+        first-levels (vec (:levels next))
+        mixed (follow next (aim 1.0 1.0) 0.25)
+        done (follow mixed (aim 1.0 1.0) 0.5)]
+    (is (= (levels mixed) {:red (/ 128.0 255) :blue (/ 64.0 255)}))
+    (is (= (levels done) {:red 1.0 :blue (/ 191.0 255)}))
+    (is (= {:red 1.0 :blue 1.0} (levels (follow done (aim 1.0 1.0) 0.25))))
+    (is (= first-levels (vec (:levels next))))))

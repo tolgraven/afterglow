@@ -144,17 +144,27 @@
 (defn follow
   "Track physical emitter products in a private, patch-ordered precision buffer.
   Changed DMX bytes and projection values use separate output-owned buffers."
-  [layout frame previous prior-frame attack release ceiling copy]
+  [layout frame previous prior-frame attack release ceiling copy ramps]
   (let [^objects heads (:heads layout)
         size (long (:size layout)) n (alength heads)
         ^doubles prior (column previous size)
         ^doubles next-levels (double-array size)
         ^doubles aa (column attack n) ^doubles rr (column release n)
         global-a (if aa 0.0 (double attack)) global-r (if rr 0.0 (double release))
+        linear-a (:attack ramps) linear-r (:release ramps)
+        ^booleans attack-flags (when (and linear-a (not (boolean? linear-a))) linear-a)
+        ^booleans release-flags (when (and linear-r (not (boolean? linear-r))) linear-r)
+        ^doubles old-goals (when ramps (column (get-in ramps [:previous :goals]) size))
+        ^doubles old-remaining (when ramps (column (get-in ramps [:previous :remaining]) size))
+        ^doubles goals (when ramps (double-array size))
+        ^doubles remaining (when ramps (double-array size))
         cap (unit! ceiling)
         source (packed frame layout)
         seed (when prior-frame (packed prior-frame layout))
         owned (delay (output frame layout copy))]
+    (when (or (and attack-flags (not= n (alength attack-flags)))
+              (and release-flags (not= n (alength release-flags))))
+      (throw (ex-info "Linear response columns must match the compiled fixture order" {})))
     (dotimes [i n]
       (when-let [^Head head (aget heads i)]
         (let [^objects es (.-emitters head) offset (.-start head) lamp? (zero? (alength es))
@@ -162,6 +172,8 @@
               d (if dimmer (level source dimmer) 1.0)
               d0 (if (and seed dimmer) (level seed dimmer) 1.0)
               a (if aa (aget aa i) global-a) r (if rr (aget rr i) global-r)
+              exact-a (if attack-flags (aget attack-flags i) (true? linear-a))
+              exact-r (if release-flags (aget release-flags i) (true? linear-r))
               active? (and (>= a 0) (>= r 0)) width (max 1 (alength es))
               known? (and prior (not (Double/isNaN (aget prior offset))))]
           (when (or (not (Double/isFinite a)) (not (Double/isFinite r)) (> a 1.0) (> r 1.0))
@@ -185,7 +197,20 @@
                     old (cond known? (aget prior idx)
                               seed (if lamp? d0 (* d0 (level seed lane)))
                               :else 0.0)
-                    x (filter-level old goal (if (> goal old) a r) cap)]
+                    rising? (> goal old)
+                    exact? (if rising? exact-a exact-r)
+                    step (if rising? a r)
+                    ;; A new target starts from the current precise level. While
+                    ;; held, consume the same duration even across uneven ticks.
+                    left (if (and exact? known? old-goals old-remaining
+                                  (== goal (aget old-goals idx)) (pos? (aget old-remaining idx)))
+                           (aget old-remaining idx) 1.0)
+                    amount (if exact? (min 1.0 (/ step left)) step)
+                    x (filter-level old goal amount cap)]
+                (when exact?
+                  (aset-double goals idx goal)
+                  (aset-double remaining idx (max 0.0 (- left step))))
                 (aset-double next-levels idx x)
                 (recur (inc j) (max peak x) (or changed? (not (== x goal)))))))))))
-    (assoc (if (realized? owned) @owned {:frame frame}) :levels next-levels)))
+    (cond-> (assoc (if (realized? owned) @owned {:frame frame}) :levels next-levels)
+      ramps (assoc :ramps {:goals goals :remaining remaining}))))
