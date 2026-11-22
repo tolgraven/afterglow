@@ -146,3 +146,9 @@
                        (assoc (update-vals desired #(/ % d)) :dimmer d)))
                    desired))))
            false))
+
+(defn falling-heads
+  "Boolean array, in patch target order, identifying a fall in at least one
+  emitted component between two frames. Both frames must use the same patch."
+  [patch previous frame]
+  (dense/falling-heads (::frame/emission-layout patch) previous frame))

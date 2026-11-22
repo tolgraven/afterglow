@@ -214,3 +214,26 @@
                 (recur (inc j) (max peak x) (or changed? (not (== x goal)))))))))))
     (cond-> (assoc (if (realized? owned) @owned {:frame frame}) :levels next-levels)
       ramps (assoc :ramps {:goals goals :remaining remaining}))))
+
+(defn falling-heads
+  "Mark fixtures with a delivered emitter that exceeds its newly requested
+  level. Compare the calibrated channel word including the physical dimmer."
+  [layout previous frame]
+  (let [^objects heads (:heads layout)
+        before (packed previous layout) after (packed frame layout)
+        falling (boolean-array (alength heads))]
+    (dotimes [i (alength heads)]
+      (when-let [^Head h (aget heads i)]
+        (let [dimmer (.-dimmer h)
+              d0 (if dimmer (level before dimmer) 1.0)
+              d1 (if dimmer (level after dimmer) 1.0)
+              ^objects es (.-emitters h)
+              width (alength es)]
+          (aset-boolean falling i
+                        (if (zero? width) (> d0 d1)
+                          (loop [j 0]
+                            (and (< j width)
+                                 (let [e (aget es j)]
+                                   (or (> (* d0 (level before e)) (* d1 (level after e)))
+                                       (recur (inc j)))))))))))
+    falling))

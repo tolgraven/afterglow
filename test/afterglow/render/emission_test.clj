@@ -112,3 +112,10 @@
     (is (= (levels done) {:red 1.0 :blue (/ 191.0 255)}))
     (is (= {:red 1.0 :blue 1.0} (levels (follow done (aim 1.0 1.0) 0.25))))
     (is (= first-levels (vec (:levels next))))))
+
+(deftest a-color-change-can-leave-a-release-tail-at-the-same-overall-level
+  (let [look (fn [attr] (frame/resolve-frame patch [{:target-id :strip :attribute attr :value 1.0}] {}))
+        red (look :red) blue (look :blue)
+        falling (emission/falling-heads patch red blue)]
+    (is (= #{:strip} (set (map first (filter second (map vector (:target-order patch) falling))))))
+    (is (not-any? true? (seq (emission/falling-heads patch blue blue))))))
