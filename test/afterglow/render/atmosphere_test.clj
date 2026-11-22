@@ -97,3 +97,20 @@
   (is (thrown? clojure.lang.ExceptionInfo
                (frame/compile-patch [(-> fixture (assoc-in [:channels :fog] 1)
                                          (assoc-in [:fogger :dmx-range] [80.1 80.2]))]))))
+
+(deftest released-plumes-forecast-the-peak-of-the-same-coasting-model
+  (let [other (-> fixture (assoc :id :slow :universe 7) (assoc-in [:fogger :mixing-seconds] 40))
+        plan (fog/plan room (frame/compile-patch [fixture other]))
+        state (-> (fog/initial plan 0 0) (assoc :mixed-m3 0.3)
+                  (assoc-in [:sources 0 :local-m3] 0.7) (assoc-in [:sources 1 :local-m3] 2.0))
+        peak (fog/coasting-peak plan state)
+        sample #(:mixed-m3 (fog/advance plan state (* 1000 %)))
+        t (:after-s peak)]
+    (is (pos? t))
+    (is (near? (:mixed-m3 peak) (sample t)))
+    (is (near? (:fog-level peak) (:fog-level (fog/advance plan state (* 1000 t)))))
+    (is (< (sample (dec t)) (:mixed-m3 peak)))
+    (is (< (sample (inc t)) (:mixed-m3 peak)))
+    (is (< (:mixed-m3 state) (:mixed-m3 peak) 3))
+    (let [clear (fog/initial plan 0 0)]
+      (is (= {:after-s 0.0 :mixed-m3 0.0 :fog-level 0.0} (fog/coasting-peak plan clear))))))

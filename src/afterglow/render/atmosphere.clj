@@ -173,3 +173,30 @@
                         s))) sources (:sources plan))))]
     (cond-> updated (some #(= now (:last-presented-ms %)) (:sources updated))
       (assoc :last-presented-ms now))))
+
+(defn coasting-peak
+  "Peak sightline attenuation from fog already delivered, assuming all pumps
+  stop now. Local plume mixes at its nozzle rate; clearance affects both local
+  and mixed mass. Uses the same first-order model as advance."
+  [plan state]
+  (let [jets (into [] (keep (fn [[spec source]]
+                              (when (pos? (:local-m3 source)) [(:local-m3 source) (:mix-per-s spec)])))
+                   (map vector (:sources plan) (:sources state)))
+        mixed (:mixed-m3 state)
+        total (reduce (fn [v [local _]] (+ v local)) mixed jets)
+        loss (:loss-per-s plan)
+        ;; After removing the positive exp(-loss*t) factor, the derivative of
+        ;; mixed mass is a monotonically decreasing sum of exponentials.
+        slope (fn [t] (reduce (fn [v [local mix]]
+                                (+ v (* local (+ mix loss) (Math/exp (- (* mix t))))))
+                              (- (* loss total)) jets))
+        t (if (or (empty? jets) (not (pos? (slope 0.0)))) 0.0
+            (let [hi (loop [t 1.0] (if (pos? (slope t)) (recur (* 2.0 t)) t))]
+              (loop [lo 0.0 hi (double hi) n 0]
+                (let [mid (* 0.5 (+ lo hi))]
+                  (cond (= n 28) mid
+                        (pos? (slope mid)) (recur mid hi (inc n))
+                        :else (recur lo mid (inc n)))))))
+        peak (* (Math/exp (- (* loss t)))
+                (reduce (fn [v [local mix]] (+ v (* local (- (Math/expm1 (- (* mix t))))))) mixed jets))]
+    {:after-s t :mixed-m3 peak :fog-level (:fog-level (mixed-state state plan peak))}))
