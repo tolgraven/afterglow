@@ -279,3 +279,25 @@
       (is (= {:mode :off} (:last-touch-strip (local h))))
       (is (empty? (filter #(and (= :command (first %)) (= :transport/set (:op (second %)))) @(:log h))))
       (finally (finish! h)))))
+
+(deftest browse-chooses-one-late-bound-launch-without-triggering-the-picker-pad
+  (let [searches (atom [])
+        selector {:volume-id :orbit}
+        search (fn [_ options] (swap! searches conj options) [{:label "Orbit" :kind :volume :selector selector}])
+        h (fixture/ready! (fixture/harness {:profile (push/profile {:target-search search})}))
+        launches #(for [[kind c] @(:log h) :when (and (= kind :command) (= :cue/launch (:op c)))] c)]
+    (try
+      (receive! h [0xb0 111 127])
+      (is (= ["Cue defaults" "Orbit"] (mapv :label (get-in (view h) [:target-picker :rows]))))
+      (receive! h [0x90 37 127])
+      (receive! h [0x90 37 127])
+      (is (empty? (launches)))
+      (is (= "Orbit" (get-in (view h) [:target-picker :armed :label])))
+      (receive! h [0x80 37 0])
+      (receive! h [0x90 36 100])
+      (is (= selector (get-in (first (launches)) [:launch :selector])))
+      (receive! h [0x90 37 100])
+      (is (nil? (get-in (last (launches)) [:launch :selector])))
+      (is (= 2 (count (launches))))
+      (is (= 1 (count @searches)))
+      (finally (finish! h)))))
