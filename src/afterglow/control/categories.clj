@@ -8,9 +8,13 @@
    :beam-shape "#7dcba5" :strobe "#ed8f96" :atmosphere "#91a4bb"
    :modulation "#a4a0ef"})
 
-(defn definition-categories [definition]
+(defn definition-categories
+  "Infer categories from the fields an effect writes, including its native
+  transforms. Reading a field as an expression operand does not control it."
+  [definition]
   (let [outputs (:outputs definition)
-        attributes (set (if (map? outputs) (keys outputs) (map :attribute outputs)))]
+        attributes (into (set (if (map? outputs) (keys outputs) (map :attribute outputs)))
+                         (keep :attribute) (get-in definition [:layer :transforms]))]
     (vec (sort-by str
                   (into (set (:categories definition))
                         (cond-> []
