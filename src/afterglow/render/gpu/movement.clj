@@ -135,12 +135,12 @@
      (when-not (and (integer? requested) (<= Long/MIN_VALUE requested Long/MAX_VALUE))
        (throw (ex-info "Movement deadline must use System/nanoTime" {})))
      (let [deadline (min budget-end requested)
-           {:keys [targets pack]} (frame/prepare-movement-frame patch contributions options)
+           {:keys [targets pack reference-ids]} (frame/prepare-movement-frame patch contributions options)
            ;; Compact arrays belong to the published frame. Detach only the
            ;; accepted scalar pans before a native job can outlive this call.
            ids (vec (keys targets))
            pans (when (seq ids) (zipmap ids (frame/previous-pans patch ids options)))
-           active (into {} (filter (fn [[id target]] (eligible? patch id target (get pans id)))) targets)
+           active (into {} (filter (fn [[id target]] (and (not (contains? reference-ids id)) (eligible? patch id target (get pans id))))) targets)
            history {:previous-values (into {} (map (fn [id] [id {:pan (get pans id)}])) (keys active))}
            result (cond (empty? targets) {:reason :no-geometry}
                         (empty? active) {:reason :cpu-input}
