@@ -97,3 +97,20 @@
   (is (thrown? clojure.lang.ExceptionInfo
                (frame/compile-patch [(-> fixture (assoc-in [:channels :fog] 1)
                                          (assoc-in [:fogger :dmx-range] [80.1 80.2]))]))))
+
+(deftest fractional-pivots-keep-the-requested-dmx-quantization-bin
+  (let [buffers {0 (byte-array 512)}
+        mismatches
+        (for [pivot [nil 0 0.7001 30.1 41.3 65.04260156355254 209.678 255]
+              fine [nil [0 1]]
+              :let [channel {:coarse [0 0] :fine fine :inverted-from pivot}]
+              value (concat [0.0 255.0 (double (or pivot 0))]
+                            (for [coarse (range 255) fraction [0.0 0.3 0.5 0.9999]] (+ coarse fraction)))
+              :let [level (fog/physical-level channel value)
+                    expected (if fine [(int value) (Math/round (* 255.0 (- value (int value))))]
+                                 [(Math/round value)])
+                    _ (frame/pack-value! buffers channel level)
+                    actual (mapv #(bit-and 255 (aget ^bytes (buffers 0) %)) (range (count expected)))]
+              :when (not= expected actual)]
+          {:pivot pivot :value value :expected expected :actual actual})]
+    (is (empty? (take 1 mismatches)) (pr-str (first mismatches)))))
