@@ -147,22 +147,26 @@
     (reactive/publish! system {:transport {:beat 3.1}})
     (is (= [] (reactive/drain-actions! system)))))
 
-(deftest failed-batches-do-not-publish-values-actions-or-watcher-comparisons
-  (let [system (reactive/create-system {:value 1}) fail? (atom false)]
+(deftest a-failed-effect-cannot-discard-sibling-actions-or-enqueue-a-partial-result
+  (let [reported (atom [])
+        system (reactive/create-system {:value 1} {:on-fault! (fn [entry _] (swap! reported conj entry))})]
     (reactive/reg-sub! system ::value value-sub)
-    (reactive/reg-fx! system ::first (fn [_ value _] {:op :master/set :value value}))
-    (reactive/reg-fx! system ::last (fn [_ _ _] (when @fail? (throw (ex-info "handler failed" {})))))
-    (reactive/watch! system ::first [::value] ::first)
-    (reactive/watch! system ::last [::value] ::last)
-    (reactive/publish! system) (reactive/drain-actions! system)
-    (reset! fail? true)
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"handler failed" (reactive/publish! system {:value 2})))
-    (is (= [] (reactive/drain-actions! system)))
-    (is (= 1 @(reactive/subscribe system [::value])))
-    (reset! fail? false)
+    (reactive/reg-fx! system ::broken (fn [{:keys [queue-action!]} _ _]
+                                        (queue-action! {:op :partial})
+                                        (throw (ex-info "handler failed" {}))))
+    (reactive/reg-fx! system ::good (fn [_ value _] {:op :master/set :value value}))
+    (reactive/watch! system ::a [::value] ::good)
+    (reactive/watch! system ::b [::value] ::broken)
+    (reactive/watch! system ::c [::value] ::good)
+    (let [batch (reactive/publish! system {:value 2})]
+      (is (= [{:op :master/set :value 2} {:op :master/set :value 2}] (reactive/drain-actions! system)))
+      (is (= @reported (:faults batch) (reactive/faults system)))
+      (is (= [[:effect-handler ::broken "handler failed"]]
+             (mapv (juxt :stage :id :message) (:faults batch))))
+      (is (seq (:stacktrace (first (:faults batch))))))
     (reactive/publish! system)
-    (is (= [{:op :master/set :value 2}] (reactive/drain-actions! system)))
-    (is (= 2 @(reactive/subscribe system [::value])))))
+    (is (= 1 (count @reported)))
+    (is (= [] (reactive/drain-actions! system)))))
 
 (deftest watch-callbacks-observe-an-already-committed-dag
   (let [system (reactive/create-system {:value 1}) observations (atom [])]
@@ -279,7 +283,8 @@
     (reactive/reg-sub! system ::value value-sub)
     (reactive/reg-fx! system ::self-remove (fn [_ _ _] (reactive/unwatch! system ::watcher) nil))
     (reactive/watch! system ::watcher [::value] ::self-remove)
-    (is (= ::reactive/mutation-during-evaluation (error-type #(reactive/publish! system))))
+    (is (= [:effect-handler ::self-remove]
+           ((juxt :stage :id) (first (:faults (reactive/publish! system))))))
     (is (= [] (reactive/drain-actions! system)))
     ;; The failed attempt cannot leave a malformed partial watcher behind.
     (reactive/reg-fx! system ::self-remove (fn [_ value _] {:op :master/set :value value}))
@@ -320,6 +325,194 @@
       (is (= 2 @hits))
       (is (not (contains? (reactive/publish! system {:value 7}) :delivery-trace))))))
 
+(deftest leased-dependency-trees-stop-producing-after-last-consumer
+  (let [system (reactive/create-system {})
+        input (atom {:x 1}) calls (atom [0 0]) changes (atom [])]
+    (reactive/reg-ref! system ::input input :x)
+    (reactive/reg-sub! system ::x (fn [{:keys [cofx]} _] (swap! calls update 0 inc) (cofx ::input)))
+    (reactive/reg-sub! system ::greater (fn [{:keys [subscribe]} _]
+                                         (swap! calls update 1 inc) (> @(subscribe [::x]) 1)))
+    (is (empty? (.getWatches input)))
+    (let [a (reactive/acquire! system [::greater] #(swap! changes conj [:a %]))
+          b (reactive/acquire! system [::greater] #(swap! changes conj [:b %]))]
+      (is (= false (:value a) (:value b)))
+      (is (= #{[::x] [::greater]} (reactive/demanded-queries system #{::greater ::x})))
+      (is (= [1 1] @calls))
+      (is (= 1 (count (.getWatches input))))
+      (swap! input assoc :y 2)
+      (reactive/publish! system)
+      (is (= [1 1] @calls))
+      ((:close! a))
+      (swap! input assoc :x 3)
+      (reactive/publish! system)
+      (is (= [[:b true]] @changes))
+      (swap! input assoc :x 5)
+      (reactive/publish! system)
+      (is (= [3 3] @calls))
+      (is (= [[:b true]] @changes))
+      ((:close! a)) ((:close! b))
+      (is (empty? (.getWatches input)))
+      (is (false? (reactive/demanded? system #{::x ::greater})))
+      (swap! input assoc :x -1)
+      (reactive/publish! system)
+      (is (= [3 3] @calls))
+      (let [again (reactive/acquire! system [::greater] identity)]
+        (is (false? (:value again))) ((:close! again))))
+    (reactive/close! system)))
+
+(deftest form-two-reacquires-sources-when-a-branch-returns
+  (let [system (reactive/create-system {:read? true}) ext (atom 10)]
+    (reactive/reg-ref! system ::input ext)
+    (reactive/reg-sub! system ::n (fn [{:keys [cofx]} _] (cofx ::input)))
+    (reactive/reg-sub! system ::switch
+                       (fn [{:keys [db subscribe]} _]
+                         (let [n (subscribe [::n])]
+                           #(when (:read? @db) @n))))
+    (let [lease (reactive/acquire! system [::switch] identity)]
+      (is (= 10 (:value lease)))
+      (reactive/publish! system {:read? false})
+      (is (empty? (.getWatches ext)))
+      (is (nil? @(:signal lease)))
+      (reset! ext 25)
+      (reactive/publish! system {:read? true})
+      (is (= 25 @(:signal lease)))
+      (is (= 1 (count (.getWatches ext))))
+      ((:close! lease))
+      (is (empty? (.getWatches ext))))))
+
+(deftest schema-failure-is-contained-and-recovers-on-next-valid-input
+  (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])}) events (atom [])]
+    (reactive/reg-sub! system ::positive value-sub {:validate pos-int? :fallback 7 :owner {:cue-id :red}})
+    (reactive/reg-sub! system ::default value-sub {:validate pos-int? :on-error :fallback :fallback 5})
+    (let [a (reactive/acquire! system [::positive] #(swap! events conj %))
+          b (reactive/acquire! system [::default] identity)]
+      (reactive/publish! system {:value -1})
+      (is (= [1 5] [@(:signal a) @(:signal b)]))
+      (is (= [] @events))
+      (is (= #{::positive ::default} (into #{} (map :id) (reactive/faults system))))
+      (is (= :red (:cue-id (first (filter #(= ::positive (:id %)) (reactive/faults system))))))
+      (reactive/publish! system {:value 3})
+      (is (= [3] @events))
+      ((:close! b)) ((:close! a)))
+    (reactive/close! system)))
+
+(deftest fallback-only-subscriptions-deliver-only-available-values
+  (doseq [[options expected] [[{:validate number?} []]
+                              [{:validate #(or (nil? %) (number? %)) :fallback nil} [nil]]]]
+    (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])})
+          observed (atom [])
+          effected (atom [])]
+      (try
+        (reactive/reg-sub! system ::value value-sub (assoc options :on-error :fallback))
+        (reactive/reg-fx! system ::record (fn [_ v _] (swap! effected conj v) nil))
+        (reactive/watch! system ::watch [::value] ::record)
+        (let [lease (reactive/acquire! system [::value] #(swap! observed conj %))]
+          (is (= 1 (:value lease)))
+          (reactive/publish! system)
+          (reactive/publish! system {:value :invalid})
+          (is (= expected @observed))
+          (is (= (into [1] expected) @effected))
+          (reactive/publish! system {:value 2})
+          (is (= (conj expected 2) @observed))
+          (is (= (into [1] (conj expected 2)) @effected)))
+        (finally (reactive/close! system))))))
+
+(deftest first-invalid-value-without-fallback-does-not-trigger-downstream-effects
+  (let [system (reactive/create-system {:value -1} {:on-fault! (fn [_ _])}) delivered (atom [])]
+    (reactive/reg-sub! system ::positive value-sub {:validate pos-int?})
+    (reactive/reg-sub! system ::times-two (fn [{:keys [subscribe]} _] (* 2 @(subscribe [::positive]))))
+    (reactive/reg-fx! system ::send (fn [_ v _] (swap! delivered conj v) nil))
+    (reactive/watch! system ::observe [::times-two] ::send)
+    (reactive/publish! system)
+    (is (empty? @delivered))
+    (is (= [::positive] (mapv :id (reactive/faults system))))
+    (reactive/publish! system {:value 4})
+    (is (= [8] @delivered))
+    (reactive/unwatch! system ::observe)
+    (is (false? (reactive/demanded? system #{::positive})))))
+
+(deftest explicitly-invalidated-and-per-frame-coeffects-have-independent-cadences
+  (let [sys (reactive/create-system {:value 1}) reads (atom 0) frames (atom 0)]
+    (reactive/reg-cofx! sys ::sample {:sample (fn [_] (swap! reads inc))})
+    (reactive/reg-cofx! sys ::frame {:mode :frame :sample (fn [_] (swap! frames inc))})
+    (reactive/reg-sub! sys ::s (fn [{:keys [cofx]} _] [(cofx ::sample) (cofx ::sample)]))
+    (reactive/reg-sub! sys ::f (fn [{:keys [cofx]} _] (cofx ::frame)))
+    (let [slow (reactive/acquire! sys [::s] identity) fast (reactive/acquire! sys [::f] identity)]
+      (is (= [1 1] (:value slow)))
+      (is (= 1 (:value fast)))
+      (reactive/publish! sys {:value 2})
+      (is (= [1 2] [@reads @frames]))
+      (is (true? (reactive/invalidate! sys [::s])))
+      (reactive/publish! sys {:value 3})
+      (is (= [2 2] @(:signal slow)))
+      ((:close! slow)) ((:close! fast))
+      (reactive/publish! sys)
+      (is (= [2 3] [@reads @frames])))))
+
+(deftest background-sampling-respects-musical-boundaries-and-stale-leases
+  (let [sys (reactive/create-system {:transport {:beat 0}}) seen (atom [])
+        started (CountDownLatch. 1) release (CountDownLatch. 1) ended (CountDownLatch. 1)
+        cycles (java.util.concurrent.LinkedBlockingQueue.)]
+    (try
+      (reactive/reg-cofx! sys ::remote
+                          {:mode :background :interval {:beats 1/2} :initial -1
+                           :sample (fn [db]
+                                     (.countDown started)
+                                     (try (.await release 3 TimeUnit/SECONDS)
+                                          (catch InterruptedException _ (.await release 3 TimeUnit/SECONDS)))
+                                     (let [beat (get-in db [:transport :beat])]
+                                       (.put cycles beat)
+                                       (.countDown ended)
+                                       beat))})
+      (reactive/reg-sub! sys ::r (fn [{:keys [cofx]} _] (cofx ::remote)))
+      (let [old (reactive/acquire! sys [::r] #(swap! seen conj %))]
+        (is (= -1 (:value old)))
+        (is (.await started 3 TimeUnit/SECONDS))
+        (reactive/publish! sys {:transport {:beat 1/4}})
+        ((:close! old))
+        (.countDown release)
+        (is (.await ended 3 TimeUnit/SECONDS))
+        (is (= 0 (.poll cycles 3 TimeUnit/SECONDS)))
+        (let [new (reactive/acquire! sys [::r] #(swap! seen conj %))]
+          (is (= 1/4 (.poll cycles 3 TimeUnit/SECONDS)))
+          ;; A finished sample is delivered at a publication, never by the IO worker.
+          (is (some true? (for [_ (range 100) :while (empty? @seen)]
+                            (do (Thread/sleep 1) (reactive/publish! sys) (= [1/4] @seen)))))
+          (reactive/publish! sys {:transport {:beat 0.49}})
+          (is (nil? (.poll cycles 20 TimeUnit/MILLISECONDS)))
+          (reactive/publish! sys {:transport {:beat 1/2}})
+          (is (= 1/2 (.poll cycles 3 TimeUnit/SECONDS)))
+          ((:close! new))))
+      (finally (.countDown release) (reactive/close! sys)))))
+
+(deftest wall-paced-coeffects-sample-without-an-owner-publication-and-stop-on-release
+  (let [sys (reactive/create-system {}) calls (atom 0) samples (CountDownLatch. 2)]
+    (try
+      (reactive/reg-cofx! sys ::remote
+                          {:mode :background :interval {:fps 50} :initial 0
+                           :sample (fn [_] (let [n (swap! calls inc)] (.countDown samples) n))})
+      (reactive/reg-sub! sys ::r (fn [{:keys [cofx]} _] (cofx ::remote)))
+      (let [lease (reactive/acquire! sys [::r] identity)]
+        (is (.await samples 3 TimeUnit/SECONDS))
+        (is (some true? (for [_ (range 100)]
+                          (do (reactive/publish! sys) (Thread/sleep 1) (<= 2 @(:signal lease))))))
+        ((:close! lease))
+        (is (empty? (:cofx-snapshot @(:state sys))) "Released producers must drop their last sampled values.")
+        (let [n @calls] (Thread/sleep 80) (is (= n @calls))))
+      (finally (reactive/close! sys)))))
+
+(deftest invalid-db-does-not-stop-independent-sources-or-drop-diagnostics
+  (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])}) src (reactive/ratom system ::x 1)]
+    (set-validator! (reactive/db-signal system) #(pos-int? (:value %)))
+    (reactive/reg-sub! system ::source (fn [_ _] @src))
+    (let [lease (reactive/acquire! system [::source] identity)]
+      (reset! src 2)
+      (let [batch (reactive/publish! system {:value -1})]
+        (is (= [:source] (mapv :stage (:faults batch))))
+        (is (= 2 @(:signal lease)))
+        (is (= {:value 1} @(reactive/db-signal system))))
+      (is (empty? (:faults (reactive/publish! system))))
+      ((:close! lease)))))
 (deftest untrusted-var-restoration-requires-local-registration-or-explicit-allowlist
   (let [empty (reactive/create-system {:value 2}) known (reactive/create-system {})
         data {:registrations [value-definition]}]
@@ -335,3 +528,50 @@
     (let [fresh (reactive/create-system {:value 4})]
       (reactive/restore! fresh data {:allowed-vars #{'afterglow.reactive-test/value-sub}})
       (is (= 4 @(reactive/subscribe fresh [::value]))))))
+
+(deftest replacing-a-live-query-with-a-cyclic-dependency-retains-healthy-siblings
+  (let [system (reactive/create-system {:n 1})]
+    (try
+      (reactive/reg-sub! system ::a (fn [_ _] 3))
+      (reactive/reg-sub! system ::b (fn [{:keys [subscribe]} _] (inc @(subscribe [::a]))))
+      (reactive/reg-sub! system ::independent (fn [{:keys [db]} _] (:n @db)))
+      (let [a (reactive/subscribe system [::a])
+            b (reactive/subscribe system [::b])
+            independent (reactive/subscribe system [::independent])]
+        (is (= [3 4 1] [@a @b @independent]))
+        (reactive/reg-sub! system ::a (fn [{:keys [subscribe]} _] (inc @(subscribe [::b]))))
+        (let [publication (reactive/publish! system {:n 2})]
+          (is (= [3 4 2] [@a @b @independent]))
+          (is (= ::a (:id (first (:faults publication))))))
+        (reactive/reg-sub! system ::a (fn [_ _] 8))
+        (reactive/publish! system {:n 3})
+        (is (= [8 9 3] [@a @b @independent])))
+      (finally (reactive/close! system)))))
+
+(deftest previously-saved-detached-repl-can-restore-core-and-captured-values
+  (let [definition {:id ::level :kind :sub
+                    :implementation {:type :source :namespace "example.session_12345678_abcd_1234_abcd_123456789abc"
+                                     :form "(fn [_ _] (* factor 2))" :bindings {"factor" 3}}}]
+    (is (thrown? clojure.lang.ExceptionInfo (registry/resolve-handler definition {})))
+    (let [handler (registry/resolve-handler definition {:trusted-source? true})]
+      (is (= 6 (handler {} [::level]))))))
+
+(deftest releasing-and-reacquiring-a-peer-during-delivery
+  (let [system (reactive/create-system {:value 1})
+        leases (atom {}) calls (atom [])]
+    (try
+      (reactive/reg-sub! system ::lease (fn [{:keys [db]} _] (:value @db)))
+      (doseq [id [0 1]]
+        (let [peer (- 1 id)
+              on-change (fn [value]
+                          (swap! calls conj [id value])
+                          ((:close! (get @leases peer)))
+                          (swap! leases assoc peer
+                                 (reactive/acquire! system [::lease peer]
+                                                    #(swap! calls conj [:replacement %]))))]
+          (swap! leases assoc id (reactive/acquire! system [::lease id] on-change))))
+      (is (integer? (:generation (reactive/publish! system {:value 2}))))
+      (is (= 1 (count @calls)))
+      (is (= 2 (second (first @calls))))
+      (is (every? #(= 2 @(:signal %)) (vals @leases)))
+      (finally (reactive/close! system)))))

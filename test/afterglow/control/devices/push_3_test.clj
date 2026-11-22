@@ -136,3 +136,26 @@
                     {:button-bindings {:blackout :invented}}]]
     (is (thrown? clojure.lang.ExceptionInfo (push/profile (merge options override)))))
   (is (thrown? clojure.lang.ExceptionInfo (push/connect! (assoc options :display {})))))
+
+(deftest captured-browse-button-routes-a-single-user-or-mpe-pad-launch
+  (doseq [[mode note-a note-b] [[:poly-aftertouch [0x93 12] [0x93 13]] [:mpe [0x91 40] [0x92 41]]]]
+    (let [selector {:group-id :wash}
+          settings (cond-> {:expression-mode mode :button-bindings {:right :target-picker}
+                            :target-search (fn [_ _] [{:label "Wash" :kind :group :selector selector}])}
+                     (= :mpe mode) (assoc :zone {:manager-channel 0 :member-channels [1 2]}
+                                          :mpe-note-cells {40 [0 0] 41 [1 0]}))
+          {:keys [show log receive device]} (harness settings)
+          launches #(filter (fn [c] (= :cue/launch (:op c))) @log)]
+      (try
+        (session/open! device)
+        (@receive [0xb4 23 127])
+        (@receive (conj note-b 127))
+        (@receive (conj note-b 127))
+        (is (empty? (launches)))
+        (is (= "Wash" (get-in (push/control-view (:local (session/snapshot device)) @show) [:target-picker :armed :label])))
+        (@receive (conj note-b 0))
+        (@receive (conj note-a 127))
+        (is (= selector (get-in (first (launches)) [:launch :selector])))
+        (is (nil? (:target-picker (push/control-view (:local (session/snapshot device)) @show))))
+        (is (empty? (:errors (session/snapshot device))))
+        (finally (session/close! device))))))

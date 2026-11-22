@@ -37,6 +37,33 @@
     (catch clojure.lang.ExceptionInfo e (throw e))
     (catch Exception e (throw (ex-info "Cannot read reactive function source" {:type ::invalid-registry} e)))))
 
+(defn source-description
+  "Capture names needed to compile a literal function after its REPL session
+  closes. Namespace aliases, refers and imported classes are names only. Local
+  def values must be supplied through the registration's explicit bindings."
+  [host form]
+  (cond-> {:type :source :namespace (str (ns-name host)) :form (pr-str form)}
+    (::temporary (meta host))
+    (assoc :environment
+           (let [symbols (filter symbol? (tree-seq coll? seq form))
+                 names (into #{} (mapcat (fn [s] [(str s) (namespace s) (str/replace (name s) #"\.$" "")])) symbols)
+                 used (fn [table describe]
+                        (into {} (keep (fn [[k v]] (when (names (str k)) [(str k) (describe v)]))) table))]
+             {:requires (->> symbols (keep namespace) distinct sort
+                             (filterv #(and (not= % (str (ns-name host))) (find-ns (symbol %)))))
+              :aliases (used (ns-aliases host) #(str (ns-name %)))
+              :refers (used (remove (fn [[_ v]] (= 'clojure.core (ns-name (:ns (meta v))))) (ns-refers host))
+                            #(str (symbol %)))
+              :imports (used (ns-imports host) #(.getName ^Class %))}))))
+
+(defn- valid-environment? [environment]
+  (and (map? environment)
+       (every? #{:aliases :refers :imports :requires} (keys environment))
+       (or (nil? (:requires environment))
+           (and (vector? (:requires environment)) (every? string? (:requires environment))))
+       (every? (fn [table] (and (map? table) (every? string? (keys table)) (every? string? (vals table))))
+               (vals (dissoc environment :requires)))))
+
 (defn validate-definition [definition]
   (when-not (and (map? definition) (keyword? (:id definition))
                  (#{:sub :fx} (:kind definition)))
@@ -48,6 +75,7 @@
              (invalid! "A reactive var reference must be namespace/name" {:id (:id definition)}))
       :source (do
                 (when-not (and (string? namespace) (re-matches #"[^\s/]+" namespace)
+                               (or (not (contains? implementation :environment)) (valid-environment? (:environment implementation)))
                                (map? bindings)
                                (every? (fn [[k v]] (and (string? k) (re-matches #"[A-Za-z_!?*+<>=$%-][A-Za-z0-9_!?*+<>=$%.\-]*" k)
                                                         (portable? v))) bindings))
@@ -82,6 +110,38 @@
   (when-not (portable? registry) (invalid! "Reactive registry contains nonportable values" {}))
   registry)
 
+(defn- compile-temporary [environment compile!]
+  ;; Reconstitute only compiler names. Each handler gets a fresh namespace,
+  ;; including during parallel restores. It never owns session vars or jobs.
+  (let [name (gensym "afterglow.reactive.restored__")
+        target (create-ns name)]
+    (try
+      (binding [*ns* target]
+        (refer 'clojure.core)
+        (doseq [library (:requires environment)] (require (symbol library)))
+        (doseq [[local library] (:aliases environment)]
+          (require (symbol library)) (alias (symbol local) (symbol library)))
+        (doseq [[local qualified] (:refers environment)]
+          (let [v (requiring-resolve (symbol qualified))]
+            (.refer target (symbol local) v)))
+        (doseq [[_ class-name] (:imports environment)]
+          (.importClass target (Class/forName class-name false (clojure.lang.RT/baseLoader))))
+        (compile!))
+      (finally (remove-ns name)))))
+
+(defn- compile-source [{:keys [namespace form bindings environment]}]
+  (let [library (symbol namespace)
+        local-bindings (mapcat (fn [[k v]] [(symbol k) (list 'quote v)]) (sort-by key bindings))
+        compile! #(eval (list 'let (vec local-bindings) (read-function form)))]
+    (cond
+      environment (compile-temporary environment compile!)
+      (find-ns library) (binding [*ns* (find-ns library)] (compile!))
+      ;; Older files record a generated session UUID without a namespace
+      ;; environment. Literal functions using core and captured values still load.
+      (re-find #"(?:_|-)[0-9a-f]{8}(?:[_-][0-9a-f]{4}){3}[_-][0-9a-f]{12}$" namespace)
+      (compile-temporary {} compile!)
+      :else (do (require library) (binding [*ns* (the-ns library)] (compile!))))))
+
 (defn resolve-handler
   "Resolve a var or compile trusted REPL source. Never call implicitly on an
   arbitrary imported document. The function body is not run during compilation."
@@ -100,11 +160,6 @@
                   (do
                     (when-not (true? trusted-source?)
                       (throw (ex-info "Restoring reactive source requires explicit trust" {:type ::untrusted-source :id (:id definition)})))
-                    (let [namespace-symbol (clojure.core/symbol namespace)
-                          target (or (find-ns namespace-symbol)
-                                     (do (require namespace-symbol) (find-ns namespace-symbol)))
-                          locals (mapcat (fn [[k v]] [(clojure.core/symbol k) (list 'quote v)]) (sort-by key bindings))]
-                      (binding [*ns* target]
-                        (eval (list 'let (vec locals) (read-function form)))))))]
+                    (compile-source (:implementation definition))))]
     (when-not (fn? handler) (invalid! "Reactive implementation did not resolve to a function" {:id (:id definition)}))
     handler))

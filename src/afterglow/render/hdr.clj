@@ -61,16 +61,24 @@
              :simple-rgb? (and rgb? (every? #{:red :green :blue :white} attrs))
              :scan-slots (int-array (into [0 1 2 3] (map :slot) physical))))))
 
-(defn layout
-  "Build the ordered photometric lane and spatial index for a patch once."
-  [fixtures slots]
-  (let [heads (into [] (keep-indexed #(head %1 %2 slots)) fixtures)
-        axis (if (seq heads)
+(defn- spatial-index [heads]
+  (let [axis (if (seq heads)
                (apply max-key (fn [axis]
                                 (let [xs (map #(nth (:position %) axis) heads)]
                                   (- (reduce max xs) (reduce min xs)))) [0 1 2]) 0)
         ordered (vec (sort-by #(nth (:position %) axis) heads))]
-    {:heads heads :spatial ordered :axis axis :coords (double-array (map #(nth (:position %) axis) ordered))}))
+    {:spatial ordered :axis axis :coords (double-array (map #(nth (:position %) axis) ordered))}))
+
+(defn layout
+  "Build the ordered photometric lane and spatial index for a patch once."
+  [fixtures slots]
+  (let [heads (into [] (keep-indexed #(head %1 %2 slots)) fixtures)]
+    (assoc (spatial-index heads) :heads heads
+           ;; A moving mirror or other utility can receive a field event even
+           ;; without emitting any light. Build its index only on observation.
+           :listeners (delay (spatial-index (map-indexed (fn [i fixture]
+                                                           (assoc (select-keys fixture [:id :position]) :index i))
+                                                         fixtures))))))
 
 (defn- lower-bound [^doubles coords x]
   (loop [lo 0 hi (alength coords)]
@@ -78,12 +86,12 @@
       (let [mid (unsigned-bit-shift-right (+ lo hi) 1)]
         (if (< (aget coords mid) (double x)) (recur (inc mid) hi) (recur lo mid))))))
 
-(defn- scatter! [{:keys [spatial axis coords]} head allowed ^doubles incident ^doubles excess settings]
+(defn- scatter! [{:keys [spatial axis coords]} head allowed ^doubles incident ^doubles excess settings contacts]
   (let [[x y z :as pos] (:position head)
         radius (double (:radius settings 1))
         center (double (nth pos axis))
         ^doubles coords coords
-        spill (double (:spill settings))
+        spill (double (:spill settings 0))
         falloff (:falloff settings :linear)]
     (when (pos? radius)
       (loop [k (long (lower-bound coords (- center radius)))]
@@ -94,10 +102,15 @@
                     dx (- (double a) (double x)) dy (- (double b) (double y)) dz (- (double c) (double z))
                     t (- 1.0 (/ (Math/sqrt (+ (* dx dx) (* dy dy) (* dz dz))) radius))]
                 (when (pos? t)
-                  (let [f (* spill (case falloff :linear t :quadratic (* t t) :smoothstep (* t t (- 3.0 (* 2.0 t)))))
+                  (let [weight (case falloff :linear t :quadratic (* t t) :smoothstep (* t t (- 3.0 (* 2.0 t))))
+                        f (* spill weight)
                         at (* 3 (long (:index other)))]
-                    (dotimes [c 3]
-                      (aset incident (+ at c) (min Double/MAX_VALUE (+ (aget incident (+ at c)) (* f (aget excess c)))))))))))
+                    (when contacts
+                      (vswap! contacts assoc! (:id other)
+                              (* weight (max (aget excess 0) (aget excess 1) (aget excess 2)))))
+                    (when (pos? f)
+                      (dotimes [c 3]
+                        (aset incident (+ at c) (min Double/MAX_VALUE (+ (aget incident (+ at c)) (* f (aget excess c))))))))))))
           (recur (inc k)))))))
 
 (defn- gate-open? [head read-value]
@@ -180,7 +193,7 @@
   "Read the composed native field of each emitter and write only normalized
   changes to the private frame scratch. Incoming spill is accumulated from the
   untouched first pass. No fixture can feed received energy back into the pass."
-  [layout settings read-at! write-at! high-at? fixture-count packed]
+  [layout settings read-at! write-at! high-at? fixture-count packed observe?]
   (let [allowed (some-> (:fixture-ids settings) set)
         scoped? #(or (nil? allowed) (contains? allowed (:id %)))
         default-white (if (seq settings) 1.0 0.0)
@@ -190,6 +203,7 @@
         gains (:source-gains settings)
         limit (:max-excess settings 1.0)
         spill? (and (pos? (:spill settings 0)) (pos? (:radius settings 1)))
+        contacts (when observe? (volatile! (transient {})))
         incident (double-array (* 3 fixture-count))
         sources (object-array fixture-count)
         gain-frame (double-array fixture-count 1.0)
@@ -211,7 +225,12 @@
             (aset gain-frame i g)
             (when (and (pos? peak) (scoped? head))
               (aset whites i (min 1.0 (* source-white-mix peak)))
-              (when (and spill? (gate-open? head read-value)) (scatter! layout head allowed incident excess settings)))))))
+              (when (and (or spill? observe?) (gate-open? head read-value))
+                (let [received (when observe? (volatile! (transient {})))]
+                  (scatter! (if observe? @(:listeners layout) layout) head allowed incident excess settings received)
+                  (when received
+                    (let [found (persistent! @received)]
+                      (when (seq found) (vswap! contacts assoc! (:id head) found)))))))))))
     (doseq [head (:heads layout)]
       (let [i (int (:index head)) at (* i 3)
             halo (max (aget incident at) (aget incident (inc at)) (aget incident (+ at 2)))]
@@ -221,7 +240,8 @@
             (if (packed/eligible? packed head)
               (packed/write! packed head incident [gain white spill-white])
               (let [row (or (aget sources i) (read-row head #(read-at! i %1 %2)))]
-                (write-at! i (write-row row head gain white incident at spill-white))))))))))
+                (write-at! i (write-row row head gain white incident at spill-white))))))))
+    (when contacts (persistent! @contacts))))
 
 (defn- contribution-gain [{:keys [source emission-gain]} {:keys [cue-gains instance-gains]}]
   (let [g (* (double (or emission-gain 1)) (double (get cue-gains (:cue-id source) 1))

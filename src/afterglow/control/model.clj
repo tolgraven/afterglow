@@ -3,6 +3,7 @@
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
             [afterglow.control.params :as params]
+            [afterglow.control.targets :as targets]
             [afterglow.time :as musical-time]
             [afterglow.control.categories :as categories]
             [afterglow.control.system :as system]))
@@ -107,6 +108,8 @@
                   :invalid-definition "Invalid parameter schema/default" {:param k})))
     :cues
     (let [effect (effect-definition model definition)]
+      (when (contains? definition :selector)
+        (require! (targets/selector? (:selector definition)) :invalid-targets "Invalid cue target selector"))
       (require! effect :unknown-effect "Cue refers to an unknown effect or version")
       (require! (params/finite-number? (get definition :priority 0))
                 :invalid-definition "Priority must be finite")
@@ -143,6 +146,15 @@
   (let [time (time! model command)
         launch (get command :launch {})
         _ (require! (map? launch) :invalid-launch "Launch options must be a map")
+        targets (:targets launch)
+        _ (when (contains? launch :targets)
+            (require! (and (vector? targets) (every? identifier? targets)
+                           (= (count targets) (count (distinct targets))))
+                      :invalid-targets "Launch targets must be distinct fixture IDs"))
+        _ (when (or (contains? launch :selector) (contains? cue :selector))
+            (require! (contains? launch :targets) :invalid-targets "Resolve the selector to fixture IDs before launch"))
+        priority (get launch :priority (get cue :priority 0))
+        _ (require! (params/finite-number? priority) :invalid-launch "Launch priority must be finite")
         mode (get launch :mode :persistent)
         _ (require! (#{:persistent :held :timed :one-shot} mode) :invalid-launch "Unknown launch mode")
         duration-option (timing-option [launch cue effect] :duration :duration-ms)
@@ -176,12 +188,13 @@
                           :source (:source command)
                           :params values :started-at-ms time :started-at-beat (:beat clock)
                           :timing-meter (musical-time/normalize-meter (:meter clock)) :state {}
-                          :priority (get cue :priority 0) :order order :phase :running
+                          :priority priority :order order :phase :running
                           :launch-mode mode :release-duration-ms release
                           :reload-policy reload-policy}
                    (and (#{:timed :one-shot} mode) (not musical-duration)) (assoc :duration-ms duration)
                    (and (#{:timed :one-shot} mode) musical-duration)
                    (assoc :duration musical-duration :duration-timer (musical-time/start musical-duration clock))
+                   (contains? launch :targets) (assoc :targets targets)
                    musical-release (assoc :release-duration musical-release)
                    (:gesture-id command) (assoc :gesture-id (:gesture-id command)))
         _ (doseq [source [effect cue launch] :when (contains? source :system)]

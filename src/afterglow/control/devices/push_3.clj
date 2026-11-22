@@ -6,6 +6,7 @@
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
             [afterglow.control.devices.session :as session]
+            [afterglow.control.devices.target-picker :as targets]
             [afterglow.control.params :as params]
             [afterglow.control.views :as views]))
 
@@ -20,7 +21,7 @@
   (when-not condition (throw (ex-info message (assoc data :type ::invalid-options)))))
 
 (defn- reset-interactions [state]
-  (assoc state :pads {} :holds {} :buttons #{} :touches #{}
+  (assoc (targets/clear-selection state) :pads {} :holds {} :buttons #{} :touches #{}
          :selected-instance nil :selected-cue nil :selection-token nil))
 
 (defn- cue-at [state model [x y]]
@@ -56,7 +57,7 @@
                           (assoc-in [:pads key :gesture-id] (:gesture-id hold)))
                :commands (mapv #(-> (merge % metadata)
                                     (assoc-in [:launch :velocity] (:value event))) (:commands hold))})
-            (and (= mode :persistent) active)
+            (and (= mode :persistent) active (nil? (:target-once state)))
             {:state (-> state (assoc :selected-instance (:id active))
                         (assoc-in [:pads key :instance-id] (:id active)))
              :commands [{:op :instance/end :instance-id (:id active)
@@ -120,8 +121,9 @@
       (case (get-in options [:button-bindings id])
         :blackout {:state state :commands [{:op :blackout/set :value (not (:blackout? model))}]}
         :transport {:state state :commands [{:op :transport/set :transport {:playing? (not (get-in model [:transport :playing?]))}}]}
-        :page-left {:state (assoc state :origin [(max 0 (- x 8)) y])}
-        :page-right {:state (assoc state :origin [(+ x 8) y])}
+        :target-picker {:state (targets/toggle state (:target-search options) model)}
+        :page-left {:state (if (:target-picker state) (targets/page state -1) (assoc state :origin [(max 0 (- x 8)) y]))}
+        :page-right {:state (if (:target-picker state) (targets/page state 1) (assoc state :origin [(+ x 8) y]))}
         :page-up {:state (assoc state :origin [x (+ y 8)])}
         :page-down {:state (assoc state :origin [x (max 0 (- y 8))])}
         :suspend {:state state :lifecycle :suspend}
@@ -130,8 +132,13 @@
 
 (defn- input [options state event model envelope]
   (case (:type event)
-    :pad (if (:pressed? event) (press-pad options state event model envelope)
-             (release-pad state (:gesture-key event) envelope))
+     :pad (let [key (:gesture-key event)]
+           (cond
+             (contains? (:picker-pads state) key)
+             {:state (if (:pressed? event) state (targets/release-pad state key))}
+             (not (:pressed? event)) (release-pad state key envelope)
+             (:target-picker state) {:state (targets/pad state key (:control-id event))}
+             :else (targets/launch state (press-pad options state event model envelope))))
     :encoder (encoder options state event model)
     :encoder-touch {:state (update state :touches (if (:pressed? event) conj disj) (:control-id event))}
     (:poly-pressure :mono-pressure :touch-strip) (expression options state event model)
@@ -147,6 +154,7 @@
                   (assoc :selected-instance (get-in state [:mpe :selected-instance]))) state)]
    {:page (:page-id state) :origin (:origin state)
    :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
+   :target-picker (targets/view state)
    :touches (:touches state) :master (:master model) :blackout? (:blackout? model)
    :parameters (get-in model [:instances (:selected-instance state) :params] {})
    :cells (mapv (fn [[x y]] {:x x :y y :cue (some->> (cue-at state model [x y]) :id (views/cue-view model))})
@@ -186,7 +194,7 @@
               "Encoder bindings need a captured ID, numeric parameter/master target and positive step" {:id id}))
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
-                   (#{:blackout :transport :page-left :page-right :page-up :page-down :suspend} action))
+                   (#{:blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
@@ -229,8 +237,20 @@
                                     (get-in state [:mpe :selected-instance])
                                     (assoc :selected-instance (get-in state [:mpe :selected-instance])))]
                 (cond
-                  member? (let [result ((:input notes) (:mpe state) bytes model envelope)]
-                            (assoc result :state (assoc state :mpe (:state result))))
+                  member? (let [note (second bytes) key [channel note]
+                                cell (get (:mpe-note-cells options) note)
+                                kind (bit-and status 0xf0)
+                                press? (and (= 0x90 kind) (pos? (nth bytes 2 0)))
+                                released? (or (= 0x80 kind) (and (= 0x90 kind) (not press?)))]
+                            (cond
+                              (contains? (:picker-pads control-state) key)
+                              {:state (assoc state :controls (if released? (targets/release-pad control-state key) control-state))}
+                              (and (:target-picker control-state) press? cell)
+                              {:state (assoc state :controls (targets/pad control-state key cell))}
+                              :else
+                              (let [result ((:input notes) (:mpe state) bytes model envelope)
+                                    routed (targets/launch control-state (assoc result :state control-state))]
+                                (assoc routed :state (assoc state :controls (:state routed) :mpe (:state result))))))
                   (and control-event (not (#{:pad :poly-pressure :mono-pressure} (:type control-event))))
                   (let [result ((:input controls) control-state control-event model envelope)]
                     (assoc result :state (assoc state :controls (:state result))))

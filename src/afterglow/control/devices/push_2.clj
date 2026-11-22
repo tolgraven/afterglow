@@ -6,7 +6,8 @@
             [afterglow.control.codecs.midi :as midi]
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.views :as views]
-            [afterglow.control.devices.session :as session]))
+            [afterglow.control.devices.session :as session]
+            [afterglow.control.devices.target-picker :as targets]))
 
 (def capabilities
   (assoc codec/capabilities :adapter :composable-session
@@ -188,7 +189,7 @@
                       (update :pressed-pads conj note)
                       (assoc-in [:pads note] (:gesture-id hold)))
            :commands (mapv #(assoc % :launch launch-data :pad-note note) (:commands hold))})
-        (and (= mode :persistent) active)
+        (and (= mode :persistent) active (nil? (:target-once state)))
         {:state (-> state (assoc :selected-cue (:id cue) :selected-instance (:id active))
                     (update :pressed-pads disj note) (update :pad-instances dissoc note))
          :commands [{:op :instance/end :instance-id (:id active)
@@ -301,6 +302,7 @@
      :master (:master model) :blackout? (:blackout? model)
      :bpm (get-in model [:transport :bpm])
      :selected (:selected-cue state)
+     :target-picker (targets/view state)
      :epoch (:epoch model) :frame-number (:frame-number model)
      :instance-id (:id instance) :definition-version (:effect-version instance)
      :parameter-bank (dissoc bank :ids)
@@ -370,12 +372,17 @@
         state (if (some? strip-messages) (assoc state :last-touch-strip strip) state)
         desired (into {} (for [y (range 8) x (range 8)]
                            (let [cue (cue-at state model (codec/pad-note x y))]
-                             [[x y] (case (:type schema)
+                             [[x y] (if-let [{:keys [offset rows]} (:target-picker state)]
+                                      (if (zero? y)
+                                        (case (:kind (get rows (+ offset x)))
+                                          :group [80 180 130] :volume [230 150 65] :fixture [55 130 195] :default [100 100 100] [0 0 0])
+                                        [0 0 0])
+                                      (case (:type schema)
                                       :color (mapv #(int (Math/round (* 255.0 %))) (parameter-edit/color-grid-value x y))
                                       :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
                                                   selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
                                               (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
-                                      (if cue (rgb (views/cue-view model (:id cue))) [0 0 0]))])))
+                                      (if cue (rgb (views/cue-view model (:id cue))) [0 0 0])))])))
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
                   (take batch-size (filter (fn [[xy color]] (not= color (get-in state [:last-leds xy])))
                                            (sort-by key desired))))
@@ -393,7 +400,7 @@
       (:fault state) (assoc :lifecycle :disconnect))))
 
 (defn- stop [device-id state _model _envelope disconnected?]
-  {:state (assoc state :pads {} :holds {} :ready? false :last-leds {} :last-display nil
+  {:state (assoc (targets/clear-selection state) :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                        :last-touch-strip nil
                        :touches {} :touch-order [] :shift? false :record? false :pressed-pads #{} :pad-instances {})
    :commands (mapv (fn [id] {:op :instance/end :instance-id id})
@@ -408,7 +415,7 @@
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
   Sequential palette acquisition precedes writes; LEDs use acknowledged batches.
   Missing responses are reported on refresh!, never guessed."
-  [{:keys [device-id page-id timeout-ms led-batch-size]
+  [{:keys [device-id page-id timeout-ms led-batch-size target-search]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8}}]
   (codec/palette-request device-id 0)
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
@@ -423,11 +430,21 @@
      :start (fn [state _model envelope]
               {:state (assoc state :palette-start-ms (:time-ms envelope))
                :midi [(codec/palette-request device-id 0)]})
-     :input (partial input device-id)
+     :input (fn [state event model envelope]
+              (let [cc (when (and (:ready? state) (= :control-change (:type event)) (pos? (:raw-value event))) (:controller event))
+                    [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
+                (cond
+                  (and target-search (= 111 cc)) {:state (targets/toggle state target-search model)}
+                  (and (:target-picker state) (#{62 63} cc)) {:state (targets/page state (if (= cc 62) -1 1))}
+                  (and (:target-picker state) cc (<= 20 cc 27)) {:state (targets/choose state (- cc 20))}
+                  (contains? (:picker-pads state) (:note event))
+                  {:state (if (= :note-off (:type event)) (targets/release-pad state (:note event)) state)}
+                  (and (:target-picker state) x) {:state (targets/pad state (:note event) [x y])}
+                  :else (targets/launch state (input device-id state event model envelope)))))
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc % :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
+     :reset-model #(assoc (targets/clear-selection %) :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
                            :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]

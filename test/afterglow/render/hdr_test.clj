@@ -150,3 +150,41 @@
         (render [(row :source :color [1.6 0.8 0.35]) primary (row :source :dimmer 0.6)
                  (row :neighbor :color [0.2 0.4 0.6]) (row :neighbor :white 0.15)]
                 (assoc options :hdr {:gain gain :white-mix 0.7 :spill-white-mix 0.8 :spill 0.9 :radius 1.0}))))))
+
+(deftest observed-excess-has-an-independent-lifetime-from-colored-spill
+  (let [p (frame/compile-patch [(rgb-head :red 1 [0 0 0])
+                                (rgb-head :near 4 [0.5 0 0])
+                                {:id :mirror :position [0.5 0 0] :universe 1 :address 7 :channels {:pan 1 :tilt 2}}
+                                (rgb-head :outside 9 [1.01 0 0])])
+        source (block (row :red :color [1.4 0 0]))
+        check (fn [blocks opts]
+                (let [rich (frame/resolve-contributions p blocks opts)
+                      compact (frame/resolve-contributions p blocks (assoc opts :include-values? false :compact-values? true))]
+                  (is (= (bytes-of rich) (bytes-of compact)))
+                  (is (= (:hdr-contacts rich) (:hdr-contacts compact)))
+                  rich))]
+    (is (nil? (:hdr-contacts (check [source] {:hdr {}}))))
+    (let [observed (check [source] {:observe-hdr? true})]
+      (is (= #{:near :mirror} (set (keys (get-in observed [:hdr-contacts :red])))))
+      (is (< (abs (- 0.2 (get-in observed [:hdr-contacts :red :mirror]))) 1e-8))
+      (is (= [255 0 0 0 0 0] (subvec (bytes-of observed) 0 6)))
+      (doseq [spill [0 0.5 1]]
+        (let [opts {:hdr {:spill spill :falloff :linear}}
+              enabled (check [source] (assoc opts :observe-hdr? true))]
+          (is (= (:hdr-contacts observed) (:hdr-contacts enabled)))
+          (is (= (bytes-of enabled) (bytes-of (check [source] opts)))))))
+    (is (= {} (:hdr-contacts (check [] {:observe-hdr? true}))))
+    (is (= {} (:hdr-contacts (check [source] {:hdr {} :observe-hdr? true :master 0}))))
+    (is (= {} (:hdr-contacts (check [source] {:hdr {} :observe-hdr? true :blackout? true}))))
+    (let [gain [(assoc (block (row :red :color [0.7 0 0])) :emission-gain 2)]]
+      (is (= (bytes-of (check gain {})) (bytes-of (check gain {:observe-hdr? true})))))
+    (is (= (:hdr-contacts (frame/resolve-contributions p [source] {:observe-hdr? true}))
+           (:hdr-contacts ((:pack (frame/prepare-movement-frame p [source] {:observe-hdr? true})) {}))))))
+
+(deftest closed-shutter-cannot-drive-a-spatial-event
+  (let [p (frame/compile-patch [(assoc-in (rgb-head :red 1 [0 0 0]) [:channels :shutter]
+                                         {:offset 4 :functions [{:type :shutter-closed :start 0 :end 30}]})
+                                (rgb-head :near 5 [0.2 0 0])])
+        run #(frame/resolve-frame p [(row :red :color [2 0 0]) (row :red :shutter %)] {:observe-hdr? true})]
+    (is (empty? (:hdr-contacts (run 0))))
+    (is (< (abs (- 0.8 (get-in (run 1) [:hdr-contacts :red :near]))) 1e-8))))
