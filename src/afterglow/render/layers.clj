@@ -149,14 +149,19 @@
     (if (zero? opacity)
       []
       (let [{:keys [fields sources]}
-            (reduce #(apply-member %1 %2 rows blend-value validate!) {:fields backdrop :sources {}} members)]
-        (into []
-            (for [[id attrs] (sort-by (comp pr-str key) sources)
-                  [field source] (sort-by key attrs)
-                  :when (not= :beat-ratio field)]
-              {:kind :assignments :source source
-               :assignments [{:target-id id :attribute field :value (rgb (get-in fields [id field]))
-                              :opacity opacity}]}))))))
+            (reduce #(apply-member %1 %2 rows blend-value validate!) {:fields backdrop :sources {}} members)
+            writes (for [[id attrs] (sort-by (comp pr-str key) sources)
+                         [field source] (sort-by key attrs)
+                         :when (not= :beat-ratio field)]
+                     [source {:target-id id :attribute field :value (rgb (get-in fields [id field]))
+                              :opacity opacity}])]
+        (mapv (fn [run] {:kind :assignments :source (ffirst run) :assignments (mapv second run)})
+              (partition-by first writes))))))
+
+(defn- update-backdrop [fields block targets rows apply-row]
+  (try
+    (reduce (fn [m a] (update m (:target-id a) apply-row a)) fields (rows block targets))
+    (catch Exception ex (throw (faults/attributed-error ex (:source block))))))
 
 (defn compose
   "Compose tagged blocks at the last member's position in the ordinary priority
@@ -172,6 +177,8 @@
                                  (do (try (layer-spec! l)
                                           (catch Exception ex (throw (faults/attributed-error ex (:source b)))))
                                      (assoc m (:id l) i)) m)) {} blocks)
+          last-anchor (apply max (vals anchors))
+          apply-row (partial set-assignment blend-value validate!)
           targets (into #{} (mapcat (fn [{:keys [kind assignments compiled]}]
                                       (if (= kind :batch) (:target-ids compiled) (map :target-id assignments)))) tagged)]
       (:out
@@ -182,13 +189,7 @@
                               (= i (get anchors (:id layer)))
                               (group-blocks backdrop (get groups (:id layer)) rows blend-value validate!)
                               :else [])]
-            (reduce (fn [s b]
-                      (try
-                        (-> s (update :out conj b)
-                            (update :backdrop (fn [prior]
-                                                (reduce (fn [m a]
-                                                          (update m (:target-id a) (partial set-assignment blend-value validate!) a))
-                                                        prior (rows b targets)))))
-                        (catch Exception ex (throw (faults/attributed-error ex (:source b))))))
-                    state entries)))
+            (cond-> (update state :out into entries)
+              (< i last-anchor)
+              (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
         {:backdrop {} :out []} blocks)))))
