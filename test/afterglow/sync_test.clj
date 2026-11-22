@@ -177,3 +177,20 @@
           (is (:stopped? (sync/stop! manager)))
           (is (= 2 @closes))))
       (finally (.countDown released) (sync/close! manager)))))
+
+(deftest midi-controls-use-capture-time-even-when-owner-runs-later
+  (let [received (atom []) events (atom [])
+        adapter {:defaults {:enabled? false :source-id :capture} :transport (constantly nil)
+                 :events #{:midi/control}
+                 :receive! (fn [_ _ {:keys [event]} at] (swap! received conj [(:time-ms event) at]))}
+        manager (sync/create-manager {:config midi-config :now-ms (constantly 900)
+                                      :midi-factory (fake-midi (atom 0) (atom 0) (atom nil) (atom []))
+                                      :adapters {:capture adapter}})]
+    (try
+      (sync/start! manager (callbacks (atom []) events))
+      (doseq [[t bytes] [[101 [0x90 60 100]] [104 [0xb0 7 14]] [110 [0x80 60 0]]]]
+        (send-midi! manager t bytes))
+      (is (session/flush! manager))
+      (is (= [[101 101] [104 104] [110 110]] @received))
+      (is (= [101 104 110] (keep #(get-in % [:observation :observed-at-ms]) @events)))
+      (finally (sync/close! manager)))))

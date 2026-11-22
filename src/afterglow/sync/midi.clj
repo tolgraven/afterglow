@@ -75,7 +75,8 @@
       (when (< (first (:bytes event)) 0xf0)
         (let [decoded (midi-codec/decode (:bytes event))
               captured-at (:time-ms event at)
-              event (merge decoded {:channel (inc (:channel decoded)) :source-id (:source-id event)}
+              event (merge decoded (select-keys event [:source-id :device-timestamp-us])
+                           {:channel (inc (:channel decoded)) :time-ms captured-at}
                            (when (= :control-change (:type decoded)) {:type :cc :value (:raw-value decoded)}))]
           (when (#{:note-on :note-off :cc} (:type event))
             (observe-midi! manager run event :midi :midi-input captured-at)
