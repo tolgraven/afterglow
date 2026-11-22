@@ -11,6 +11,21 @@
 (def off {4 (vec (repeat 512 0)) 5 [0]})
 (defn near? [a b] (< (abs (- a b)) 1e-8))
 (defn total [s] (+ (:mixed-m3 s) (reduce + 0 (map :local-m3 (:sources s)))))
+
+(deftest split-universe-controls-hold-each-byte-independently
+  (let [s (fog/initial plan 0 0)
+        high {4 (assoc (vec (repeat 512 0)) 511 120)}
+        send #(fog/present plan %1 %2 %3)
+        a (send s 1000 high)
+        b (send a 2000 {5 [128]})
+        c (send b 3000 {4 (vec (repeat 512 0))})
+        flow #(get-in % [:sources 0 :flow-m3-s])]
+    (is (near? (/ 120 255) (flow a)))
+    (is (near? (/ (+ 120 (/ 128 255)) 255) (flow b)))
+    (is (near? (/ 128 (* 255 255)) (flow c)))
+    (is (near? (+ (flow a) (flow b)) (get-in c [:sources 0 :emitted-m3])))
+    (is (= (:sources c) (:sources (send c 3000 {6 [0]}))))))
+
 (deftest flow-is-applied-to-the-correct-interval-and-diffuses-after-switch-off
   (let [s (fog/initial plan 2 0)
         on (fog/present plan s 500 full)
