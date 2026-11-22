@@ -126,3 +126,9 @@ Its idle/blackout byte comes from the fixture definition, including reversed
 pumps and cross-universe fine channels. Explicit cue assignments still take a
 normalized logical value. Use atmosphere/physical-level to request a physical
 value through an inverted channel, and frame/idle-universes for shutdown.
+
+Use `afterglow.render.emission` for changes to the light in a completed frame.
+Read actual emitter drive after the physical dimmer. Keep packed universes and
+rich/compact previews consistent and hold shutter, strobe and other discrete
+channels. When enforcing a budget, quantize toward lower delivered intensity,
+including on inverted and cross-universe fine channels.
