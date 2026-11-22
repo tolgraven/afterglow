@@ -1,6 +1,6 @@
 (ns afterglow.fixtures.{{manufacturer|sanitize}}
-  "Translated definition for the fixture {{model}}
-  from {{manufacturer}}.
+  "Translated definition for the fixture {{model|clj-text}}
+  from {{manufacturer|clj-text}}.
 
   This was created by Afterglow from the QLC+ Fixture Definintion
   (.qxf) file, and will almost certainly need some manual adjustment
@@ -23,14 +23,14 @@
   that's easier for you:
   https://deep-symmetry.zulipchat.com/#narrow/stream/318697-afterglow
 
-  The original fixture defintition was created by {{creator.author}}
-  using {{creator.name}} version {{creator.version}}.
-  QLC+ Fixture Type: {{type}}."
+  The original fixture defintition was created by {{creator.author|clj-text}}
+  using {{creator.name|clj-text}} version {{creator.version|clj-text}}.
+  QLC+ Fixture Type: {{type|clj-text}}."
   (:require [afterglow.channels :as chan]
             [afterglow.effects.channel :as chan-fx]))
 
-(defn {{model|sanitize}}
-  "{{model}}.
+(defn {{model|fixture-name}}
+  "{{model|clj-text}}.
 
   Please flesh out this documentation if you are submitting this for
   inclusion into Afterglow. See, for example, the Blizzard fixture
@@ -47,10 +47,10 @@
             {% endif %}{% if head.has-tilt-channel %}:tilt-center 128 :tilt-half-circle 128 ; TODO: Fix these values
             {% endif %}:channels [{% for ch in head.channels %}{% if not forloop.first %}
                               {% endif %}{% channel ch %}{% endfor %}]}{% endfor %}]{% endif %}
-   :name "{{model}}"}{% else %}([]
-   ({{model|sanitize}} :{{modes.0.name|sanitize}}))
+   :name "{{model|clj-text}}"}{% else %}([]
+   ({{model|fixture-name}} :{{modes.0.name|sanitize}}))
   ([mode]
-   (merge {:name "{{model}}"
+   (merge {:name "{{model|clj-text}}"
            :mode mode}
           (case mode{% for m in modes %}
                 :{{m.name|sanitize}}

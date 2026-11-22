@@ -26,6 +26,23 @@
       (clojure.string/replace #"[^a-zA-Z0-9]+" " ")
       csk/->kebab-case))
 
+(defn- fixture-name [name]
+  (let [slug (sanitize-name (str name))]
+    (when-not (re-matches #"[a-z0-9]+(?:-[a-z0-9]+)*" slug)
+      (throw (ex-info "Fixture model must contain a usable name" {})))
+    (if (Character/isDigit ^char (first slug)) (str "fixture-" slug) slug)))
+
+(defn- string-literal [value]
+  (binding [*print-readably* true *print-dup* false]
+    (pr-str (str value))))
+
+;; The template contains Clojure docstrings and literals. Selmer's HTML escaping
+;; does not implement Clojure's quoting of backslashes, quotes and newlines.
+(filters/add-filter! :clj-text
+                     (fn [s] (let [literal (string-literal s)]
+                               [:safe (subs literal 1 (dec (count literal)))])))
+(filters/add-filter! :fixture-name fixture-name)
+
 (filters/add-filter! :kebab csk/->kebab-case)
 (filters/add-filter! :sanitize sanitize-name)
 
@@ -76,8 +93,8 @@
           (some (partial define-named-channel specs offset fine-offset) ["focus" "frost" "iris" "zoom"])
           (str "(chan/fine-channel " (keyword (sanitize-name (:name specs))) " " offset
                (when fine-offset (str " :fine-offset " fine-offset))
-               "\n                                 :function-name \"" (:name specs)
-               "\"\n                                 :var-label \"" (:label (first caps)) "\")")))))
+               "\n                                 :function-name " (string-literal (:name specs))
+               "\n                                 :var-label " (string-literal (:label (first caps))) ")")))))
 
 (defn- check-capabilities
   "Makes sure a capability list is sorted in increasing order and has
@@ -111,8 +128,8 @@
   (str "\n" (clojure.string/join (repeat 30 " ")) (:min cap)
        (if (some? (:label cap))
          (str " {:type " (keyword (sanitize-name (str prefix (:label cap))))
-              "\n" (clojure.string/join (repeat (+ 32 (count (str (:min cap)))) " ")) ":label \"" (:label cap)
-              "\"\n" (clojure.string/join (repeat (+ 32 (count (str (:min cap)))) " ")) ":range :variable}")
+              "\n" (clojure.string/join (repeat (+ 32 (count (str (:min cap)))) " ")) ":label " (string-literal (:label cap))
+              "\n" (clojure.string/join (repeat (+ 32 (count (str (:min cap)))) " ")) ":range :variable}")
          " nil")))
 
 (defn- define-channel
@@ -313,13 +330,18 @@
   [path]
   (let [source (.getCanonicalFile (io/file path))
         qxf (parse-qxf source)
-        dest (io/file (.getParent source) (str (csk/->kebab-case (:model qxf)) ".clj"))]
-    (cond
-      (.exists dest) [1 (str "Will not replace existing file " (.getCanonicalPath dest))]
-      (not (.canWrite (.getParentFile dest))) [1 (str "Cannot write to " (.getCanonicalPath dest))]
-      :else (do
-              (spit dest (translate-definition qxf))
-              [0 (str "Translated fixture definition written to " (.getCanonicalPath dest))]))))
+        dest (io/file (.getParentFile source) (str (fixture-name (:model qxf)) ".clj"))]
+    (try
+      (let [code (translate-definition qxf)]
+        (java.nio.file.Files/write (.toPath dest) (.getBytes ^String code java.nio.charset.StandardCharsets/UTF_8)
+                                   (into-array java.nio.file.OpenOption
+                                               [java.nio.file.StandardOpenOption/CREATE_NEW
+                                                java.nio.file.StandardOpenOption/WRITE])))
+      [0 (str "Translated fixture definition written to " dest)]
+      (catch java.nio.file.FileAlreadyExistsException _
+        [1 (str "Will not replace existing file " dest)])
+      (catch java.io.IOException _
+        [1 (str "Cannot write to " dest)]))))
 
 ;; These functions were used to help analyze the contents of all QLC+ fixture definitions.
 ;; They are left here in case the format changes or expands in the future and they become
