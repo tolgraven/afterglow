@@ -13,7 +13,8 @@
   [[:beam-angle angle? "Full beam angle must be greater than 0 and less than 180 degrees"]
    [:zoom-range-deg #(and (vector? %) (= 2 (count %)) (every? angle? %))
     "Zoom needs two full beam angles in DMX order, each between 0 and 180 degrees"]
-   [:lens-radius-m positive-finite? "Lens radius must be positive finite metres"]
+   [:lens-radius-m #(or (positive-finite? %) (and (number? %) (zero? %)))
+    "Lens radius must be nonnegative finite metres"]
    [:max-watts positive-finite? "Maximum electrical power must be positive finite watts"]
    [:measured-relative-brightness positive-finite? "Measured full-white brightness must be a positive finite ratio"]
    [:pseudo-fixture boolean? "Pseudo-fixture must be true or false"]
