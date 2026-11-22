@@ -44,6 +44,24 @@
     (is (near? (/ (:mixed-m3 late) 200) (:mixed-density late)))
     (is (thrown? Exception (fog/advance plan late 8499)))
     (is (near? (total late) (total (fog/reconfigure (assoc plan :sources []) late 3 123 true))))))
+(deftest sightline-rate-follows-mixing-and-total-room-clearance
+  (let [measured (assoc room :measured-fog {:clearance-half-life-s 12.0 :reference-path-m 3})
+        calibrated (fog/plan measured (frame/compile-patch [fixture]))
+        clear (fog/initial calibrated 0 0)
+        start (fog/present calibrated clear 0 full)
+        stop (fog/present calibrated start 4000 off)
+        late (fog/advance calibrated stop 49000)]
+    (is (= 0.0 (:fog-level-change-per-s clear)))
+    (is (near? 12.0 (:clearance-half-life-s clear)))
+    (is (< (:clearance-half-life-s (fog/initial plan 0 0)) 60))
+    (is (pos? (:fog-level-change-per-s stop)) "A stopped nozzle can still thicken the haze")
+    (is (neg? (:fog-level-change-per-s late)))
+    (doseq [sample [stop late]]
+      (let [ms (:sample-time-ms sample)
+            after (fog/advance calibrated sample (+ ms 0.001))
+            numerical-rate (* 1.0e6 (- (:fog-level after) (:fog-level sample)))]
+        (is (near? numerical-rate (:fog-level-change-per-s sample)))))))
+
 (deftest partial-dmx-range-reversed-address-and-finite-fog-validation
   (let [plan (fog/plan room (frame/compile-patch [(assoc-in fixture [:fogger :dmx-range] [240 40])]))
         s (fog/initial plan 0 0)
