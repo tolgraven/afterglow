@@ -110,12 +110,18 @@
        (assoc fields attribute v)))
    base transforms))
 
+(defn- check-member! [blocks]
+  (let [{:keys [source native-layer]} (first blocks)]
+    (when-not (every? #(= native-layer (:native-layer %)) (next blocks))
+      (throw (faults/attributed-error
+              (ex-info "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer})
+              source)))))
+
 (defn- apply-member [state blocks rows blend-value validate!]
   (let [{:keys [source native-layer]} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
-      (when-not (every? #(= native-layer (:native-layer %)) blocks)
-        (fail! "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer}))
+      (check-member! blocks)
       (if (zero? member-opacity)
         state
         (let [inherited (when (= targets :previous)
@@ -141,14 +147,18 @@
            state inputs)))
       (catch Exception ex (throw (faults/attributed-error ex source))))))
 
-(defn- group-blocks [backdrop members rows blend-value validate!]
-  (let [ordered (sort-by #(get-in % [:native-layer :member]) members)
-        opacity (get-in (first ordered) [:native-layer :opacity] 1)
-        _ (doseq [block ordered]
-            (when-not (= opacity (get-in block [:native-layer :opacity] 1))
-              (throw (faults/attributed-error (ex-info "Layer opacity must agree across members" {})
-                                               (:source block)))))
-        members (partition-by (juxt #(get-in % [:native-layer :member]) :source) ordered)]
+(defn- ordered-members [blocks]
+  (let [ordered (sort-by #(get-in % [:native-layer :member]) blocks)
+        opacity (get-in (first ordered) [:native-layer :opacity] 1)]
+    (doseq [block ordered]
+      (when-not (= opacity (get-in block [:native-layer :opacity] 1))
+        (throw (faults/attributed-error (ex-info "Layer opacity must agree across members" {})
+                                        (:source block)))))
+    (partition-by (juxt #(get-in % [:native-layer :member]) :source) ordered)))
+
+(defn- group-blocks [backdrop blocks rows blend-value validate!]
+  (let [members (ordered-members blocks)
+        opacity (get-in (first blocks) [:native-layer :opacity] 1)]
     (if (zero? opacity)
       []
       (let [{:keys [fields sources]}
@@ -166,6 +176,43 @@
     (reduce (fn [m a] (update m (:target-id a) apply-row a)) fields (rows block targets))
     (catch Exception ex (throw (faults/attributed-error ex (:source block))))))
 
+(defn- opaque? [x] (and (number? x) (== 1 x)))
+
+(defn- direct-block?
+  "An opaque physical replacement is already in the downstream renderer's
+  representation. Musical fields, native colors and blends use the typed fold."
+  [{:keys [native-layer kind assignments compiled]}]
+  (and (opaque? (:opacity native-layer 1))
+       (opaque? (:member-opacity native-layer 1))
+       (empty? (:transforms native-layer))
+       (case kind
+         :batch (and (= :replace (:blend compiled))
+                     (opaque? (:opacity compiled))
+                     (not-any? #(= :beat-ratio (:attribute %)) (:columns compiled)))
+         :assignments (every? (fn [{:keys [attribute value blend opacity]
+                                   :or {blend :replace opacity 1}}]
+                                (and (= :replace blend) (opaque? opacity)
+                                     (not= :beat-ratio attribute)
+                                     ;; A native Color coerces RGB to doubles. Keep
+                                     ;; exact RGB literals on that same conversion path.
+                                     (or (not= :color attribute)
+                                         (and (vector? value) (every? double? value)))))
+                              assignments))))
+
+(defn- order-direct-blocks [blocks groups anchors]
+  (reduce-kv
+   (fn [result index {:keys [native-layer] :as block}]
+     (cond
+       (nil? native-layer) (conj result block)
+       (= index (get anchors (:id native-layer)))
+       (into result
+             (mapcat (fn [member]
+                       (check-member! member)
+                       (map #(dissoc % :native-layer) member)))
+             (ordered-members (get groups (:id native-layer))))
+       :else result))
+   [] blocks))
+
 (defn compose
   "Compose tagged blocks at the last member's position in the ordinary priority
   stream. Only affected target rows are read into the native backdrop. Each
@@ -179,23 +226,25 @@
                                (if-let [l (:native-layer b)]
                                  (do (try (layer-spec! l)
                                           (catch Exception ex (throw (faults/attributed-error ex (:source b)))))
-                                     (assoc m (:id l) i)) m)) {} blocks)
-          last-anchor (apply max (vals anchors))
-          apply-row (partial set-assignment blend-value validate!)
-          targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
-                    (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
-                                        (concat (:target-ids native-layer)
-                                                (if (= kind :batch) (:target-ids compiled)
-                                                    (map :target-id assignments))))) tagged))]
-      (:out
-       (reduce-kv
-        (fn [{:keys [backdrop] :as state} i block]
-          (let [layer (:native-layer block)
-                entries (cond (nil? layer) [block]
-                              (= i (get anchors (:id layer)))
-                              (group-blocks backdrop (get groups (:id layer)) rows blend-value validate!)
-                              :else [])]
-            (cond-> (update state :out into entries)
-              (< i last-anchor)
-              (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-        {:backdrop {} :out []} blocks)))))
+                                     (assoc m (:id l) i)) m)) {} blocks)]
+      (if (every? direct-block? tagged)
+        (order-direct-blocks blocks groups anchors)
+        (let [last-anchor (apply max (vals anchors))
+              apply-row (partial set-assignment blend-value validate!)
+              targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
+                        (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
+                                            (concat (:target-ids native-layer)
+                                                    (if (= kind :batch) (:target-ids compiled)
+                                                        (map :target-id assignments))))) tagged))]
+          (:out
+           (reduce-kv
+            (fn [{:keys [backdrop] :as state} i block]
+              (let [layer (:native-layer block)
+                    entries (cond (nil? layer) [block]
+                                  (= i (get anchors (:id layer)))
+                                  (group-blocks backdrop (get groups (:id layer)) rows blend-value validate!)
+                                  :else [])]
+                (cond-> (update state :out into entries)
+                  (< i last-anchor)
+                  (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
+            {:backdrop {} :out []} blocks)))))))

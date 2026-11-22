@@ -120,3 +120,39 @@
                                               identity))))
         m (-> show (launch :base) (launch :adjust))]
     (is (== 1/2 (get-in (frame/resolve-contributions patch (:contributions (advance m))) [:values :head :channels :focus])))))
+
+(deftest opaque-replacements-remain-typed-blocks-at-their-group-anchor
+  (let [prepared {:kind :batch :compiled {:target-ids [:head] :columns [{:attribute :focus}]
+                                          :blend :replace :opacity 1.0}}
+        last-slot (layer 1 1 [] (block (row :focus 0.75)))
+        first-slot (layer 0 1 [] prepared)
+        background (block (row :focus 0.25))
+        no-rows (fn [& _] (throw (ex-info "Opaque layers must retain typed buffers" {})))
+        arranged (layers/compose [last-slot background first-slot] no-rows no-rows no-rows)]
+    (is (= [background (dissoc first-slot :native-layer) (dissoc last-slot :native-layer)] arranged))
+    (is (identical? (:compiled prepared) (:compiled (second arranged))))
+    (let [actual (assoc (dissoc first-slot :compiled)
+                        :batch {:target-ids [:head] :outputs {:focus {:type :number :components 1
+                                                                     :values (double-array [0.5])}}})
+          full (frame/resolve-contributions patch [last-slot background actual])
+          compact (frame/resolve-contributions patch [last-slot background actual] {:include-values? false})]
+      (is (== 0.75 (get-in full [:values :head :channels :focus])))
+      (is (= (vec (get-in full [:universes 0])) (vec (get-in compact [:universes 0])))))))
+
+(deftest later-native-modifier-sees-the-reordered-opaque-group
+  (let [late (layer 1 1 [] (block (row :focus 0.25)))
+        first (layer 0 1 [] (block (row :focus 0.75)))
+        other (assoc-in (layer 0 1 [{:attribute :focus :value (expr :multiply (field :previous :focus) 2)}]
+                               (block (row :focus 0))) [:native-layer :id] :second-group)]
+    (is (== 0.5 (get-in (frame/resolve-contributions patch [late first other]) [:values :head :channels :focus])))))
+
+(deftest opaque-groups-still-handle-scratch-fields-native-colors-and-source-errors
+  (let [special (layer 0 1 [] (block (row :beat-ratio 1/3) (row :color (color/hsva 0 1 1))))
+        out (get-in (frame/resolve-contributions patch [special]) [:values :head])]
+    (is (= [1.0 0.0 0.0] (:emitted-color out)))
+    (is (not (contains? (:channels out) :beat-ratio))))
+  (let [member (layer 1 1 [] (block (row :focus 0.5)))
+        invalid (assoc-in member [:native-layer :targets] :previous)
+        error (try (frame/resolve-contributions patch [member invalid]) nil
+                   (catch clojure.lang.ExceptionInfo cause cause))]
+    (is (= (:source member) (:effect-source (ex-data error))))))
