@@ -3,6 +3,7 @@
 Afterglow owns the rendering path from ordered effect contributions to physical
 fixture channels. Tolglow supplies show configuration and authored effects.
 
+* [Native effect layers and typed transforms](native-layers.md)
 * [Beam footprints and live edge tracking](beam-footprints.md)
 * [Calibrated moving-head rotation after effect blending](moving-head-shaders.md#render-movement-after-effect-blending)
 * [Named fixture field expressions and their GLSL layout](numeric-shader-fields.md)

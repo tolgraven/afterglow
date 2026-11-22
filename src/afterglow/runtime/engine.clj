@@ -223,8 +223,17 @@
                    ;; contribution, preserving the kernel failure contract.
                    _ (when valid? (runtime/append-contributions result []))
                    result (if valid?
-                            (with-opacity result (* (get-in instance [:system :opacity] 1.0)
-                                                    (system/gain instance clock))) result)
+                            (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))]
+                              (if-let [layer (get-in instance [:source :native-layer])]
+                                (let [tag (assoc layer :member-opacity gain)
+                                      flushed (runtime/append-contributions result [])
+                                      blocks (cond-> (:contributions flushed)
+                                               (and (= :previous (:targets layer)) (not expired?)
+                                                    (not (:done? result)) (empty? (:contributions flushed)))
+                                               (conj {:kind :assignments :assignments []}))]
+                                  (assoc flushed :contributions (mapv #(assoc % :native-layer tag) blocks)))
+                                (with-opacity result gain)))
+                            result)
                    ;; Paused steps regenerate owned output buffers at the frozen
                    ;; input, but cannot advance state, fire intents or finish.
                    result (if (and paused? valid?)

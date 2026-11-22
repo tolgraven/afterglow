@@ -130,13 +130,13 @@
                          (map-indexed vector instances))
         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
         blocks (into [] (mapcat :contributions) contributions)
-        batch? (some #(= :batch (:kind %)) blocks)]
+        structured? (some #(or (:native-layer %) (= :batch (:kind %))) blocks)]
     (assoc context
            :effects (into [] (keep (fn [instance]
                                     (let [result (get results (:id instance))]
                                       (when-not (:done? result) (assoc instance :state (:state result)))))) instances)
            :contributions blocks
-           :assignments (when-not batch? (into [] (mapcat :assignments) blocks))
+           :assignments (when-not structured? (into [] (mapcat :assignments) blocks))
            :intents (into [] (mapcat :intents) contributions))))
 
 (defn render-frame

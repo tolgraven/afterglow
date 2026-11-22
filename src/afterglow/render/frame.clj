@@ -6,6 +6,7 @@
   positive elevation toward +Y. This is a new explicit fixture contract, not
   an implementation of all legacy fixture function ranges/optics."
   (:require [afterglow.render.optics :as optics]
+            [afterglow.render.layers :as layers]
             [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes #{:red :green :blue :white :amber :uv})
@@ -696,7 +697,7 @@
 
 (def ^:private doubles-class (class (double-array 0)))
 
-(defn- validate-batches [patch batches]
+(defn- validate-batches [patch batches & [layer?]]
   (when-not (vector? batches) (fail! "Batches must be an ordered vector" {}))
   (mapv
    (fn [{:keys [target-ids outputs blend count opacity] :or {blend :replace opacity 1} :as batch}]
@@ -719,7 +720,8 @@
                           (fail! "Invalid typed batch output field" {:attribute attribute}))
                         (when (and (geometric-attributes attribute) (not= :replace blend))
                           (fail! "Geometry assignments require :replace blend" {:attribute attribute}))
-                        (when-not (contains? (::common-attributes patch) attribute)
+                        (when-not (or (and layer? (= :beat-ratio attribute))
+                                      (contains? (::common-attributes patch) attribute))
                           (doseq [id target-ids]
                             (when-not (contains? (::supported (get (:by-id patch) id)) attribute)
                               (fail! "Fixture does not implement batch attribute" {:target-id id :attribute attribute}))))
@@ -769,12 +771,22 @@
             (write-packed-assignment! values present (+ base (int (get slots attribute))) value
                                       blend opacity target-id attribute)))))))
 
-(defn- expand-batch [{:keys [target-ids columns blend opacity]}]
-  (for [row (range (count target-ids))
-        {:keys [attribute components values]} columns]
-    {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity opacity
-     :value (if (= 1 components) (aget ^doubles values row)
-                (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))}))
+(defn- expand-batch
+  ([batch] (expand-batch batch nil))
+  ([{:keys [target-ids columns blend opacity]} selected]
+   (for [row (range (count target-ids))
+         :let [id (nth target-ids row)]
+         :when (or (nil? selected) (contains? selected id))
+         {:keys [attribute components values]} columns]
+     {:target-id id :attribute attribute :blend blend :opacity opacity
+      :value (if (= 1 components) (aget ^doubles values row)
+                 (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
+
+(defn- layer-rows [block targets]
+  (case (:kind block)
+    :batch (expand-batch (:compiled block) targets)
+    :assignments (if targets (filter #(contains? targets (:target-id %)) (:assignments block))
+                     (:assignments block))))
 
 (defn- general-targets
   "A target's entire ordered history must retain general arithmetic when any
@@ -949,8 +961,12 @@
                            (case (:kind block)
                              :assignments (do (when-not (vector? (:assignments block))
                                                 (fail! "Assignment contribution needs a vector" {})) block)
-                             :batch (assoc block :compiled (first (validate-batches patch [(:batch block)])))
+                             :batch (assoc block :compiled (first (validate-batches patch [(:batch block)] (:native-layer block))))
                              (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
+          blocks (layers/compose blocks layer-rows blend-value
+                                 (fn [{:keys [target-id attribute value] :as a}]
+                                   (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
+                                                         (:blend a :replace) a)))
           partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
       (if partitioned?
         (resolve-partitioned patch blocks options)
