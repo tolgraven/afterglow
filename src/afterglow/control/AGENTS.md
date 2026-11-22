@@ -23,3 +23,8 @@ without ports, clocks, worker pools or global show bindings.
   hardware lifecycle and Push 3 verification remain separate work.
 - Run all `afterglow.control.*-test` and codec test namespaces when modifying
   these contracts. Tests need no connected hardware or network listeners.
+
+Derive registry effect categories from direct output attributes and the
+destination attributes of native layer transforms. A reference to a previous
+field is an input. Reading dimmer to calculate an aim offset should let the
+movement selector control that effect while intensity controls stay independent.

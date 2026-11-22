@@ -83,3 +83,28 @@
     (is (= [:color] (categories/definition-categories {:outputs {channel 1}})))
     (is (= [:color :intensity] (categories/definition-categories
                                  {:outputs [{:attribute channel} {:attribute :dimmer}]})))))
+
+(deftest modifier-only-effect-joins-the-categories-of-its-write-targets
+  (let [definition {:id :aim-filter :version 1 :categories [:front]
+                    :layer {:targets :previous
+                            :transforms [{:attribute :aim :value {:op :multiply
+                                                                :args [{:op :previous :attribute :aim}
+                                                                       {:op :previous :attribute :dimmer}]}}
+                                         {:attribute :cyan :value 0.5}
+                                         {:attribute :beat-ratio :value 1/4}]}}
+        initial (-> (show)
+                    (apply! {:op :registry/publish :kind :effects :definition definition})
+                    (apply! {:op :cue/put :cue {:id :filter :effect-id :aim-filter}})
+                    (apply! {:op :cue/launch :cue-id :filter}))
+        wanted {:categories [:movement :color] :match :all}
+        members (categories/select-instances initial wanted)
+        paused (apply! initial {:op :group/apply :selector wanted :action {:op :instance/pause}})]
+    (is (= [:color :front :movement] (:categories (views/cue-view initial :filter))))
+    (is (= [:filter] (mapv :cue-id members)))
+    (is (= [:filter] (mapv :cue-id (filter #(get-in % [:system :paused?]) (vals (:instances paused))))))
+    (is (= [:intensity :movement]
+           (categories/definition-categories {:outputs {:dimmer 1}
+                                              :layer {:transforms [{:attribute :direction :value [0 1 0]}]}})))
+    (is (= [:atmosphere :beam-shape :intensity :strobe]
+           (categories/definition-categories {:layer {:transforms (mapv (fn [attr] {:attribute attr :value 0.5})
+                                                                      [:fog :focus :dimmer :strobe])}})))))
