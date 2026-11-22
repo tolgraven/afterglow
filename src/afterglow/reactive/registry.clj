@@ -85,16 +85,20 @@
 (defn resolve-handler
   "Resolve a var or compile trusted REPL source. Never call implicitly on an
   arbitrary imported document. The function body is not run during compilation."
-  [definition {:keys [trusted-source?]}]
+  [definition {:keys [trusted-source? allowed-vars]}]
   (validate-definition definition)
   (let [{:keys [type symbol namespace form bindings]} (:implementation definition)
         handler (case type
-                  :var (let [v (requiring-resolve (clojure.core/symbol symbol))]
+                  :var (let [name (clojure.core/symbol symbol)
+                             _ (when-not (or (true? trusted-source?) (contains? allowed-vars name))
+                                 (throw (ex-info "Restoring an unregistered reactive var requires explicit trust"
+                                                 {:type ::untrusted-var :id (:id definition) :symbol symbol})))
+                             v (requiring-resolve name)]
                          (when-not (var? v) (invalid! "Reactive var could not be resolved" {:symbol symbol}))
                          @v)
                   :source
                   (do
-                    (when-not trusted-source?
+                    (when-not (true? trusted-source?)
                       (throw (ex-info "Restoring reactive source requires explicit trust" {:type ::untrusted-source :id (:id definition)})))
                     (let [namespace-symbol (clojure.core/symbol namespace)
                           target (or (find-ns namespace-symbol)

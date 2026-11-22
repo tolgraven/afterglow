@@ -5,7 +5,8 @@
   (:require [afterglow.fixtures.qxf :as qxf]
             [afterglow.init]
             [afterglow.version :as version]
-            [afterglow.web.handler :refer [app]]
+            [afterglow.web.access :as access]
+            [afterglow.web.handler :as web]
             [afterglow.web.session :as session]
             [clojure.java.browse :as browse]
             [clojure.tools.cli :refer [parse-opts]]
@@ -140,6 +141,8 @@
     :default (or (when-let [default (env :web-port)] (Integer/parseInt default)) 16000)
     :parse-fn #(Integer/parseInt %)
     :validate [#(< 0 % 0x10000) "Must be a number between 0 and 65536"]]
+   [nil "--web-bind ADDRESS" "Web UI bind address (LAN requires AFTERGLOW_WEB_TOKEN)"
+    :default (or (env :web-bind) access/loopback-bind)]
    ["-n" "--no-browser" "Don't launch web browser"]
    ["-o" "--osc-port PORT" "Port number for OSC server"
     :default (or (when-let [default (env :osc-port)] (Integer/parseInt default)) 16001)
@@ -198,25 +201,23 @@
   (System/exit status))
 
 (defn start-web-server
-  "Start the embedded web UI server on the specified port. If a truthy
-  value is supplied for browser, opens a web browser window on the
-  newly launched server. If the server was already running, logs a
-  warning. Either way, makes sure the background thread which cleans
-  up expired sessions is running."
-  ([port]
-   (start-web-server port false))
-  ([port browser]
-   (swap! web-server #(if %
-                        (timbre/warn "Not starting web server because it is already running.")
-                        (do
-                          (.start (DeviceFinder/getInstance)) ; The web UI wants to know about DJ Link devices
-                          (http-kit/run-server app {:port port}))))
-
-   ;;Start the expired session cleanup job if needed
-   (swap! session-cleaner #(or % (session/start-cleanup-job!)))
-
-   ;; Launch the browser if requested
-   (when browser (browse/browse-url (str "http://localhost:" port)))))
+  "Start the embedded operator UI. Localhost is the default. For a LAN listener,
+  supply :bind and :token or set WEB_BIND and AFTERGLOW_WEB_TOKEN."
+  ([port] (start-web-server port false))
+  ([port browser] (start-web-server port browser {:bind (or (env :web-bind) access/loopback-bind)
+                                                  :token (env :afterglow-web-token)}))
+  ([port browser {:keys [bind] :as options}]
+   (locking web-server
+     (if @web-server
+       (timbre/warn "Not starting web server because it is already running.")
+       (let [app (web/application options)]
+         (.start (DeviceFinder/getInstance))
+         (reset! web-server (http-kit/run-server app {:ip (or bind access/loopback-bind) :port port}))))
+     (when-not @session-cleaner
+       (reset! session-cleaner (session/start-cleanup-job!))))
+   (when browser
+     (let [host (if (#{nil "0.0.0.0" "::"} bind) "localhost" bind)]
+       (browse/browse-url (str (java.net.URI. "http" nil host port nil nil nil)))))))
 
 (defn start-osc-server
   "Start the embedded OSC server on the specified port."
@@ -242,7 +243,7 @@
   "Start a network REPL for debugging or remote control."
   [port]
   (try
-    (swap! nrepl-server #(do (when % (nrepl/stop-server %)) (nrepl/start-server :port port)))
+    (swap! nrepl-server #(do (when % (nrepl/stop-server %)) (nrepl/start-server :bind access/loopback-bind :port port)))
     (timbre/info "nREPL server started on port" port)
     (catch Throwable t
       (timbre/error t "failed to start nREPL"))))
@@ -251,10 +252,11 @@
   "Shut down the embedded web UI, OSC and NREPL servers."
   []
   (timbre/info "shutting down embedded servers...")
-  (swap! web-server #(do (when % (% :timeout 100)) nil))
+  (locking web-server
+    (when-let [stop @web-server] (stop :timeout 100) (reset! web-server nil))
+    (when-let [cleanup @session-cleaner] (future-cancel cleanup) (reset! session-cleaner nil)))
   (stop-osc-server)
   (swap! nrepl-server #(do (when % (nrepl/stop-server %)) nil))
-  (swap! session-cleaner #(do (when % (future-cancel %)) nil))
   (timbre/info "shutdown complete!"))
 
 (defn -main
@@ -293,7 +295,8 @@
     (when-not (#{"localhost" "127.0.0.1"} @ola-client/olad-host) (ola-client/use-buffered-channel))
     (reset! ola-client/olad-port (:olad-port options))
     (timbre/info "Will find OLA daemon on host" @ola-client/olad-host ", port" @ola-client/olad-port)
-    (start-web-server (:web-port options) (not (:no-browser options)))
+    (start-web-server (:web-port options) (not (:no-browser options))
+                      {:bind (:web-bind options) :token (env :afterglow-web-token)})
     (timbre/info "Web UI server on port:" (:web-port options))
     (start-osc-server (:osc-port options))
     (timbre/info "OSC server on port:" (:osc-port options))

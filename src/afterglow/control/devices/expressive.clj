@@ -148,7 +148,8 @@
   ([schemas available] (plan schemas available {} {}))
   ([schemas available overrides] (plan schemas available overrides {}))
   ([schemas available overrides options]
-   (let [options (normalize-policy (assoc options :params overrides))
+   (let [options (assoc (normalize-policy (dissoc options :params)) :params
+                        (into {} (map (fn [[id binding]] [id (normalize-binding binding [:params id])])) overrides))
          available (set available)
          entries
          (mapcat

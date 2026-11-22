@@ -80,3 +80,7 @@
                             {:component component :mode :absolute}))))
   (is (= 0.5 (edit/position {:type :color} [0 1 1] {:component 0})))
   (is (= 0.0 (edit/position {:type :number :bounds [4 4]} 4 {}))))
+
+(deftest explicitly-unbounded-velocity-uses-normalized-range
+  (is (= {:level 0.5}
+         (edit/velocity-values {:params {:level {:type :number :bounds nil :default 0 :velocity true}}} 0.5))))

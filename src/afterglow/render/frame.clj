@@ -140,6 +140,7 @@
              (when (and (= :extract-min (:rgbw-policy fixture)) (not (contains? channels :white)))
                (fail! "White extraction requires a white channel" {:fixture-id id}))
              (assoc fixture :position (or position [0 0 0])
+                    :emission-color (or (:emission-color fixture) [1.0 1.0 1.0])
                     ::index index
                     ::emitter? (boolean (some #(contains? channels %) emitter-attributes))
                     ::dimmer? (contains? channels :dimmer)

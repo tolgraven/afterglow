@@ -146,6 +146,7 @@
       (.drawString graphics (str (:title view) "  " (:page view) "  " (:status view)) 16 28)
       (.setFont graphics (Font. "SansSerif" Font/PLAIN 14))
       (.drawString graphics (str "BPM " (:bpm view) "  Master " (:master view)
+                                 (when (= {:target :tempo :editable? false} (:touched-control view)) "  Tempo locked to sync")
                                  (when (:blackout? view) "  BLACKOUT")) 16 52)
       (doseq [[index {:keys [name value]}] (map-indexed vector (take 8 (:parameters view)))]
         (.setColor graphics (Color. 105 192 236))

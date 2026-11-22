@@ -3,6 +3,7 @@
   Results belong to the submitting frame. This owner never publishes a frame."
   (:require [afterglow.render.gpu.expressions :as expressions]
             [afterglow.render.gpu.native-context :as context]
+            [afterglow.render.gpu.lifecycle :as lifecycle]
             [afterglow.runtime.reuse :as reuse])
   (:import [java.io Closeable]
            [java.util LinkedHashMap]
@@ -50,10 +51,9 @@
        (let [executor (proxy [ThreadPoolExecutor]
                           [1 1 0 TimeUnit/MILLISECONDS queue factory (ThreadPoolExecutor$AbortPolicy.)]
                         (terminated []
-                          (let [failure (try (.close ^Closeable owner) nil (catch Throwable error error))]
-                            (.clear cache)
-                            (swap! stats assoc :resident 0)
-                            (deliver done failure))))]
+                          (lifecycle/finish! done #(try (.close ^Closeable owner)
+                                                        (finally (.clear cache)
+                                                                 (swap! stats assoc :resident 0))))))]
          (.prestartCoreThread executor)
          (->Session owner executor cache max-programs stats gate done))
        (catch Throwable error (.close ^Closeable owner) (throw error))))))
@@ -74,7 +74,7 @@
   (let [^ThreadPoolExecutor executor (:executor session)]
     (merge @stats (select-keys (:resources owner) [:renderer :version])
            {:queued (.size (.getQueue executor)) :closed? (.isShutdown executor)
-            :terminated? (.isTerminated executor)})))
+            :terminated? (realized? (:done session))})))
 
 (defn- enqueue! [{:keys [owner executor gate] :as session} task]
   (let [^ThreadPoolExecutor pool executor

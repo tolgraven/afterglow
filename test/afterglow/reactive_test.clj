@@ -491,3 +491,18 @@
         (is (= {:value 1} @(reactive/db-signal system))))
       (is (empty? (:faults (reactive/publish! system))))
       ((:close! lease)))))
+(deftest untrusted-var-restoration-requires-local-registration-or-explicit-allowlist
+  (let [empty (reactive/create-system {:value 2}) known (reactive/create-system {})
+        data {:registrations [value-definition]}]
+    (reactive/reg-sub! known ::value value-sub value-definition)
+    (is (= ::registry/untrusted-var (error-type #(reactive/restore! empty data))))
+    (is (= ::registry/untrusted-var
+           (error-type #(reactive/restore! empty (assoc-in data [:registrations 0 :id] ::other)
+                                          {:local-system known}))))
+    (reactive/restore! empty data {:local-system known})
+    (is (= 2 @(reactive/subscribe empty [::value])))
+    (reactive/restore! empty data)
+    (is (= 2 @(reactive/subscribe empty [::value])))
+    (let [fresh (reactive/create-system {:value 4})]
+      (reactive/restore! fresh data {:allowed-vars #{'afterglow.reactive-test/value-sub}})
+      (is (= 4 @(reactive/subscribe fresh [::value]))))))

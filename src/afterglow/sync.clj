@@ -101,7 +101,7 @@
       :barrier (deliver (:promise event) true)
       :midi/message (midi/receive! manager run event at
                                    (fn [manager run message]
-                                     (notify-adapters! manager run {:type :midi/control :event message} at)))
+                                     (notify-adapters! manager run {:type :midi/control :event message} (:time-ms message))))
       (:peer/found :peer/lost :beat-link/beat :beat-link/status) (dj/receive! manager run event at)
       (:link/lost :link/status) (link/receive! manager run event)
       (when-not (notify-adapters! manager run event at)

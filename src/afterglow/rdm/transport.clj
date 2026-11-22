@@ -44,40 +44,63 @@
    5 :unsupported-command-class 6 :data-out-of-range 7 :buffer-full 8 :packet-size-unsupported
    9 :sub-device-out-of-range 10 :proxy-buffer-full 11 :action-not-supported})
 
+(defn- matches? [command response]
+  (and (= (:pid command) (:pid response))
+       (= (:sub-device command) (:sub-device response))
+       (= (if (= :set (:command command)) 1 0) (:command-class response))))
+
+(defn- reply-word [response]
+  (when-not (= 2 (count (:data response)))
+    (codec/fail! "RDM timer or NACK must contain a 16-bit value" {}))
+  (codec/u16 (:data response) 0))
+
+(defn- wait-timer! [response check-current!]
+  (let [delay-ms (* 100 (reply-word response))
+        until (+ (System/nanoTime) (* delay-ms 1000000))]
+    (when (>= delay-ms (check-current!))
+      (throw (SocketTimeoutException. "RDM ACK_TIMER exceeds job deadline")))
+    ;; The transport socket may already have closed on cancellation. Check the
+    ;; session while waiting, too, so the IO worker is promptly released.
+    (loop []
+      (check-current!)
+      (let [remaining (- until (System/nanoTime))]
+        (when (pos? remaining)
+          (.sleep java.util.concurrent.TimeUnit/NANOSECONDS (min remaining 20000000))
+          (recur))))))
+
 (defn command!
   "Resolve ACK_TIMER by bounded QUEUED_MESSAGE polling. OLA owns ACK_OVERFLOW
   assembly and transport transaction validation. Never re-send a delayed SET."
   [request! request deadline current?]
   (let [request (codec/validate-command request)
-        expected-class (if (= :set (:command request)) 1 0)
+        query (assoc request :pid 0x20 :command :get :data [1] :sub-device 0)
         check-current! (fn []
                          (when-not (current?)
                            (throw (ex-info "RDM job cancelled or session changed" {:rdm/error :cancelled})))
-                         (remaining-ms deadline))
-        send! (fn [command]
-                (check-current!)
-                (request! "RDMCommand" command))]
-    (loop [response (send! request) attempts 0 queued? false]
+                         (remaining-ms deadline))]
+    (loop [attempt 0]
       (check-current!)
-      (when (>= attempts 32) (throw (ex-info "RDM queued reply limit exceeded" {:rdm/error :queue-limit})))
-      (if (not= 0 (:response-code response))
-        (assoc response :status :transport-error)
-        (case (:response-type response)
-          0 (if (and (= (:pid request) (:pid response)) (= expected-class (:command-class response))
-                     (= (:sub-device request) (:sub-device response)))
-              (assoc response :status :ack)
-              (if queued?
-                (recur (send! (assoc request :pid 0x20 :command :get :data [1] :sub-device 0)) (inc attempts) true)
-                (codec/fail! "RDM response does not match the command" {:response response})))
-          2 (do (when-not (= 2 (count (:data response))) (codec/fail! "Malformed RDM NACK" {}))
-                (assoc response :status :nack :nack-code (codec/u16 (:data response) 0)
-                       :reason (get nack-reasons (codec/u16 (:data response) 0) :unknown)))
-          1 (do
-              (when-not (= 2 (count (:data response))) (codec/fail! "Malformed RDM ACK_TIMER" {}))
-              (let [delay (* 100 (codec/u16 (:data response) 0))]
-                (when (>= delay (remaining-ms deadline))
-                  (throw (SocketTimeoutException. "RDM ACK_TIMER exceeds job deadline")))
-                ;; This owned IO worker is interruptible; the lighting loop never waits.
-                (Thread/sleep (long delay)))
-              (recur (send! (assoc request :pid 0x20 :command :get :data [1] :sub-device 0)) (inc attempts) true))
-          (codec/fail! "Unknown RDM response type" {:response response}))))))
+      (when (>= attempt 32)
+        (throw (ex-info "RDM queued reply limit exceeded" {:rdm/error :queue-limit})))
+      (let [queued? (pos? attempt)
+            response (request! "RDMCommand" (if queued? query request))
+            type (:response-type response)
+            original? (matches? request response)
+            queue-command? (and queued? (matches? query response))]
+        (check-current!)
+        (cond
+          (not= 0 (:response-code response)) (assoc response :status :transport-error)
+          (not (#{0 1 2} type)) (codec/fail! "Unknown RDM response type" {:response response})
+          (and (not queued?) (not original?))
+          (codec/fail! "RDM response does not match the command" {:response response})
+
+          (and original? (zero? type)) (assoc response :status :ack)
+          (and (= type 2) (or original? queue-command?))
+          (let [code (reply-word response)]
+            (assoc response :status (if original? :nack :queue-nack)
+                   :nack-code code :reason (get nack-reasons code :unknown)))
+
+          :else
+          (do (when (and (= type 1) (or original? queue-command?))
+                (wait-timer! response check-current!))
+              (recur (inc attempt))))))))

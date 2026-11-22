@@ -257,7 +257,7 @@
                                       blocks (cond-> (:contributions flushed)
                                                (and (or (= :previous (:targets layer)) (seq (:target-ids layer)))
                                                     (not expired?)
-                                                    (not (:done? result)) (empty? (:contributions flushed)))
+                                                    (empty? (:contributions flushed)))
                                                (conj {:kind :assignments :assignments []}))]
                                   (assoc flushed :contributions (mapv #(assoc % :native-layer tag) blocks)))
                                 (with-opacity result gain)))
@@ -293,7 +293,7 @@
         (let [fault (faults/diagnostic snapshot instance
                                        (get-in model [:registry :effects (:effect-id instance) :version]) :reload error)]
           (-> fallback
-              (assoc :before instance :fallback fallback :candidate? false)
+              (assoc :before instance :fallback fallback :candidate? false :prepare-failed? true)
               (assoc-in [:instance :reload-fault] fault)
               (update :intents conj (faults/event :effect/reload-failed fault))))))))
 
@@ -357,7 +357,7 @@
                      (assoc-in [:instance :fault] failure)
                      (update :intents conj (faults/event :effect/failed failure)))
                  result)
-        recovered? (and (nil? fault) succeeded? (not (:expired? prepared))
+        recovered? (and (not (:prepare-failed? prepared)) (nil? fault) succeeded? (not (:expired? prepared))
                         (or (and candidate? (or (:fault before) (:reload-fault before)))
                             (:retry-fault before)))
         result (cond-> (update result :instance dissoc :retry-fault)

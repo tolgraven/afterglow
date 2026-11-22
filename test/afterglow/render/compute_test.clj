@@ -2,6 +2,7 @@
   (:require [afterglow.render.compute :as compute]
             [afterglow.render.frame :as frame]
             [afterglow.render.fields :as fields]
+            [afterglow.render.gpu.movement :as movement]
             [afterglow.render.ir :as ir]
             [clojure.test :refer [deftest is]]))
 
@@ -47,3 +48,16 @@
                    {:compute-backend :native-gpu :gpu-options {:queue-capacity -1}}
                    {:compute-backend :native-gpu :gpu-options {:timeout-ms 11000}}]]
     (is (thrown? clojure.lang.ExceptionInfo (compute/open! options)))))
+
+(deftest moving-head-driver-teardown-honors-timed-close
+  (let [owner (movement/open!) entered (promise) release (promise)
+        solver (reify java.io.Closeable (close [_] (deliver entered true) @release))]
+    ;; With no worker running, shutdown enters the termination hook on the caller.
+    (vreset! (:resident owner) {:solver solver})
+    (let [closing (future (movement/close! owner 5))]
+      (try
+        (is (= true (deref entered 3000 ::timeout)))
+        (is (false? (deref closing 1000 ::timeout)))
+        (finally (deliver release true))))
+    (is (true? (movement/close! owner 3000)))
+    (is (nil? @(:resident owner)))))

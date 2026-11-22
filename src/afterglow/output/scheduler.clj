@@ -27,18 +27,23 @@
   "Capture a completion identity before evaluation. Epoch/patch/policy/darkness
   changes invalidate all older completions and buffered bright frames."
   [owner epoch patch options dark?]
-  (when-not @(:closed? owner)
-    (let [current @(:gate owner)
-          key [epoch patch options (boolean dark?)]
-          gate (if (= key (:key current)) current
-                   (let [plan (policy/compile-plan patch)
-                         options (dissoc (validate-options options) :epoch)
-                         gate {:key key :generation (inc (:generation current 0))
-                               :epoch epoch :plan plan :options options :dark? (boolean dark?)}]
-                     (reset! (:gate owner) gate)
-                     gate))]
-      {:generation (:generation gate) :epoch epoch :frame-id (swap! (:counter owner) inc)
-       :time-ms ((:now-ms owner))})))
+  (let [key [epoch patch options (boolean dark?)]
+        current @(:gate owner)]
+    (when-not @(:closed? owner)
+      (when-let [gate (if (= key (:key current))
+                        current
+                        (locking (:lock owner)
+                          (when-not @(:closed? owner)
+                            (let [latest @(:gate owner)]
+                              (if (= key (:key latest))
+                                latest
+                                (reset! (:gate owner)
+                                        {:key key :generation (inc (:generation latest 0))
+                                         :epoch epoch :plan (policy/compile-plan patch)
+                                         :options (dissoc (validate-options options) :epoch)
+                                         :dark? (boolean dark?)}))))))]
+        {:generation (:generation gate) :epoch epoch :frame-id (swap! (:counter owner) inc)
+         :time-ms ((:now-ms owner))}))))
 
 (defn complete!
   "Freeze an exclusively owned renderer result and offer without blocking the

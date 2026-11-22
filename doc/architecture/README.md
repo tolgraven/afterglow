@@ -11,6 +11,7 @@ fixture channels. Tolglow supplies show configuration and authored effects.
 * [Named fixture field expressions and their GLSL layout](numeric-shader-fields.md)
 * [Native execution and GPU readback for fixture fields](native-expression-shaders.md)
 * [Physical output and RDM](physical-output.md)
+* [Architecture review and historical fixes, 22 November 2026](reviews/2026-11-22.md)
 * [Documentation index](../../../tolglow/docs/README.md)
 * [Current code survey](../../../tolglow/docs/codebase-survey.md)
 * [Functional runtime](../../../tolglow/docs/architecture/functional-runtime.md)
