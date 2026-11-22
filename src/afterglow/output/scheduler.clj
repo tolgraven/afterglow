@@ -87,7 +87,7 @@
               packet (if (or (:dark? gate) (nil? packet))
                        {:frame-id (:frame-id packet 0) :epoch (:epoch gate)
                         :calibration (:calibration packet) :calibration-verified? false
-                        :universes (into {} (map (fn [u] [u (vec (repeat 512 0))])) (get-in gate [:plan :universes]))
+                        :universes (get-in gate [:plan :idle-universes])
                         :presentation {:mode (get-in gate [:options :mode]) :presented-at-ms now
                                        :blackout? (:dark? gate) :waiting? (nil? packet)}}
                        packet)]
@@ -147,7 +147,7 @@
 
 (defn close!
   "Fence late completions and wait only for an already sending transport, never
-  an effect worker. The host sends its final zero frame after this returns."
+  an effect worker. The host sends its final physical idle frame after this returns."
   [owner]
   (locking (:lock owner)
     (reset! (:closed? owner) true)

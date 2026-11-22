@@ -7,6 +7,14 @@
 (defn- require! [ok message data] (when-not ok (throw (ex-info message data))))
 (defn- flow? [x] (and (finite? x) (< 0 x 1e9)))
 
+(defn- physical-bytes [channel physical]
+  (if (:fine channel)
+    [(int physical) (Math/round (* 255.0 (- (double physical) (int physical))))]
+    [(Math/round (double physical))]))
+
+(defn- ticks [[coarse fine]]
+  (+ (* 255 coarse) (or fine 0)))
+
 (defn validate-fogger! [{:keys [id channels fogger]}]
   (let [{:keys [flow-m3-min direction mixing-seconds dmx-range]
          :or {mixing-seconds 8 direction [0 0 1] dmx-range [0 255]}} fogger]
@@ -17,7 +25,37 @@
                    (every? #(and (finite? %) (<= 0 % 255)) dmx-range)
                    (not (== (first dmx-range) (second dmx-range))))
               "Fogger needs a fog channel, positive rated m³/min, mixing time, nozzle direction and distinct DMX endpoints"
-              {:fixture-id id :fogger fogger})))
+              {:fixture-id id :fogger fogger})
+    (let [raw (:fog channels)
+          width {:fine (if (vector? raw) (second raw) (:fine-offset raw))}
+          endpoint-ticks (map #(ticks (physical-bytes width %)) dmx-range)]
+      (require! (apply not= endpoint-ticks) "Fog endpoints must resolve to distinct deliverable DMX levels"
+                {:fixture-id id :dmx-range dmx-range}))))
+
+(defn off-bytes
+  "Unsigned physical off bytes keyed by [universe zero-based-offset] for a compiled fixture."
+  [{:keys [fogger compiled-channels]}]
+  (if fogger
+    (let [channel (:fog compiled-channels)
+          off (first (:dmx-range fogger [0 255]))]
+      (zipmap (remove nil? [(:coarse channel) (:fine channel)]) (physical-bytes channel off)))
+    {}))
+
+(defn physical-level
+  "Convert a desired physical coarse-unit DMX value to a normalized effect input.
+  Inversion reflects the interval from its pivot upwards. On fractional pivots,
+  choose the representable level that reproduces the requested coarse/fine bytes."
+  [{:keys [inverted-from] :as channel} physical]
+  (require! (and (finite? physical) (<= 0 physical 255)) "Physical fog level must be in [0,255]" {:value physical})
+  (let [pivot (some-> inverted-from double)
+        inverted? (and pivot (>= (double physical) pivot))
+        level (/ (if inverted? (+ pivot (- 255.0 (double physical))) (double physical)) 255.0)
+        target (physical-bytes channel physical)
+        matches? (fn [v]
+                   (let [raw (* 255.0 v)
+                         out (if (and pivot (>= raw pivot)) (- 255.0 (- raw pivot)) raw)]
+                     (and (<= 0.0 v 1.0) (= target (physical-bytes channel out)))))]
+    (or (some #(when (matches? %) %) [level (Math/nextDown level) (Math/nextUp level)]) level)))
 
 (defn plan
   "Compile the fog-capable part of a patch. Pass the room in metres and a
@@ -43,11 +81,14 @@
      (mapv (fn [{:keys [id position fogger compiled-channels] :as fixture}]
              (validate-fogger! fixture)
              (let [v (:direction fogger [0 0 1])
+                   channel (:fog compiled-channels)
+                   endpoints (mapv #(physical-bytes channel %) (:dmx-range fogger [0 255]))
                    length (Math/hypot (Math/hypot (double (first v)) (double (second v))) (double (nth v 2)))]
                {:fixture-id id :position (or position [0 0 0]) :direction (mapv #(/ % length) v)
                 :max-flow-m3-s (/ (:flow-m3-min fogger) 60.0)
                 :mix-per-s (/ 1.0 (:mixing-seconds fogger 8.0))
-                :dmx-range (:dmx-range fogger [0 255]) :channel (:fog compiled-channels)}))
+                :dmx-range (:dmx-range fogger [0 255]) :channel channel
+                :off-bytes (first endpoints) :endpoint-ticks (mapv ticks endpoints)}))
            (filter :fogger (:fixtures patch)))}))
 
 (defn- source-state [spec]
@@ -118,15 +159,15 @@
   [plan state now universes]
   (let [updated (update (advance plan state now) :sources
           (fn [sources]
-            (mapv (fn [s {:keys [channel dmx-range max-flow-m3-s]}]
+            (mapv (fn [s {:keys [channel off-bytes endpoint-ticks max-flow-m3-s]}]
                     (let [{:keys [coarse fine]} channel
                           received-hi (dmx-byte universes coarse)
                           received-lo (when fine (dmx-byte universes fine))]
                       (if (or (some? received-hi) (some? received-lo))
-                        (let [[off full] dmx-range
-                              hi (or received-hi (:dmx-coarse s) (int off))
-                              lo (if fine (or received-lo (:dmx-fine s) 0) 0)
-                              amount (min 1.0 (max 0.0 (/ (- (+ hi (/ lo 255.0)) off) (- full off))))]
+                        (let [[off full] endpoint-ticks
+                              hi (or received-hi (:dmx-coarse s) (first off-bytes))
+                              lo (if fine (or received-lo (:dmx-fine s) (second off-bytes)) 0)
+                              amount (min 1.0 (max 0.0 (/ (double (- (+ (* 255 hi) lo) off)) (- full off))))]
                           (assoc s :flow-m3-s (* amount max-flow-m3-s) :dmx-coarse hi :dmx-fine lo
                                  :last-presented-ms now))
                         s))) sources (:sources plan))))]
