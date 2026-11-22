@@ -283,7 +283,8 @@
     (reactive/reg-sub! system ::value value-sub)
     (reactive/reg-fx! system ::self-remove (fn [_ _ _] (reactive/unwatch! system ::watcher) nil))
     (reactive/watch! system ::watcher [::value] ::self-remove)
-    (is (= ::reactive/mutation-during-evaluation (error-type #(reactive/publish! system))))
+    (is (= [:effect-handler ::self-remove]
+           ((juxt :stage :id) (first (:faults (reactive/publish! system))))))
     (is (= [] (reactive/drain-actions! system)))
     ;; The failed attempt cannot leave a malformed partial watcher behind.
     (reactive/reg-fx! system ::self-remove (fn [_ value _] {:op :master/set :value value}))
@@ -506,3 +507,22 @@
     (let [fresh (reactive/create-system {:value 4})]
       (reactive/restore! fresh data {:allowed-vars #{'afterglow.reactive-test/value-sub}})
       (is (= 4 @(reactive/subscribe fresh [::value]))))))
+
+(deftest replacing-a-live-query-with-a-cyclic-dependency-retains-healthy-siblings
+  (let [system (reactive/create-system {:n 1})]
+    (try
+      (reactive/reg-sub! system ::a (fn [_ _] 3))
+      (reactive/reg-sub! system ::b (fn [{:keys [subscribe]} _] (inc @(subscribe [::a]))))
+      (reactive/reg-sub! system ::independent (fn [{:keys [db]} _] (:n @db)))
+      (let [a (reactive/subscribe system [::a])
+            b (reactive/subscribe system [::b])
+            independent (reactive/subscribe system [::independent])]
+        (is (= [3 4 1] [@a @b @independent]))
+        (reactive/reg-sub! system ::a (fn [{:keys [subscribe]} _] (inc @(subscribe [::b]))))
+        (let [publication (reactive/publish! system {:n 2})]
+          (is (= [3 4 2] [@a @b @independent]))
+          (is (= ::a (:id (first (:faults publication))))))
+        (reactive/reg-sub! system ::a (fn [_ _] 8))
+        (reactive/publish! system {:n 3})
+        (is (= [8 9 3] [@a @b @independent])))
+      (finally (reactive/close! system)))))

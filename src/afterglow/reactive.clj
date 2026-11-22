@@ -17,6 +17,7 @@
 (def ^:dynamic ^:private *stack* [])
 (def ^:dynamic ^:private *delivery-trace* nil)
 (def ^:dynamic ^:private *managed-query* false)
+(def ^:dynamic ^:private *publishing?* false)
 
 (defn- node-name [[kind id]]
   (if (= kind :subscription) (first id) id))
@@ -84,11 +85,29 @@
   (when *transaction* (fail! "Change reactive graph structure only between owner batches" {:type ::mutation-during-evaluation})))
 (defn- write-state! [system state]
   (if (same-transaction? system) (vreset! (:working *transaction*) state) (reset! (:state system) state)))
+(defn- reaches-node? [nodes start target]
+  (loop [pending [start] seen #{}]
+    (if-let [id (peek pending)]
+      (cond
+        (= id target) true
+        (seen id) (recur (pop pending) seen)
+        :else (recur (into (pop pending) (keep (fn [[kind child]] (when (= :node kind) child)))
+                           (:deps (get nodes id)))
+                     (conj seen id)))
+      false)))
+
 (defn- dependency! [system dependency]
   (when *transaction*
     (when-not (same-transaction? system)
       (fail! "A reaction cannot read a different reactive system" {:type ::cross-system}))
     (when *dependencies*
+      (when (= :node (first dependency))
+        ;; Cached nodes can close a cycle without recursively evaluating either
+        ;; handler. Check the topology only when a compute adds a new edge.
+        (let [nodes (:nodes (state-of system)) parent (peek *stack*) child (second dependency)]
+          (when (and (not (contains? (:deps (get nodes parent)) dependency))
+                     (reaches-node? nodes child parent))
+            (fail! "Reactive dependency cycle" {:type ::cycle :path (conj *stack* child)}))))
       (vswap! *dependencies* conj dependency)
       (when (and *delivery-trace* (seq *stack*))
         (let [[kind id] dependency]
@@ -143,8 +162,9 @@
 
 (defn- recover! [system stage id owner error]
   (when (or (:restoring? *transaction*) (not (runtime-faults/recoverable? error))
-            (#{::cycle ::depth ::cross-system ::mutation-during-evaluation ::restore-mutation
-               ::disposed ::closed ::drain-during-evaluation} (:type (ex-data error))))
+            (and (not *publishing?*)
+                 (#{::cycle ::depth ::cross-system ::mutation-during-evaluation ::restore-mutation
+                    ::disposed ::closed ::drain-during-evaluation} (:type (ex-data error)))))
     (throw error))
   (let [state (state-of system)
         db (get @(:sources system) :db)
@@ -433,6 +453,11 @@
     (reset! (:state system)
             (-> @(:state system)
                 (assoc-in [:registrations [kind id]] {:handler handler :descriptor descriptor :options options})
+                (cond-> (= kind :fx)
+                  (update :watchers update-vals
+                          (fn [watcher]
+                            (if (and (:failed? watcher) (= id (:effect-id watcher)))
+                              (-> watcher (assoc :initialized? false) (dissoc :failed?)) watcher))))
                 (update :nodes (fn [nodes]
                                  (into {} (map (fn [[node-id node]]
                                                 [node-id (if (and (= :sub kind) (= :subscription (first node-id))
@@ -540,6 +565,7 @@
                       (write-state! system (assoc-in (state-of system) path (fn [_ _ _ value] (on-change value))))
                       signal))]
       {:signal signal :value @signal
+       :available? (boolean (get-in (state-of system) [:nodes (-id signal) :available?]))
        :close! (fn []
                  (locking (:lock system)
                    (let [state (state-of system) id (-id signal) path [:options [:node id] :watches]]
@@ -555,6 +581,7 @@
                  (or (not initialized?) (not= value new)))
         (let [reg (get-in (state-of system) [:registrations [:fx effect-id]])
               before (:actions (state-of system))]
+          (write-state! system (update-in (state-of system) [:watchers id] dissoc :failed?))
           (try
             (let [actions ((:handler reg) (context system) new (when initialized? value))]
               (cond
@@ -566,7 +593,8 @@
               (delivered! :reactive/dispatch :subscription (first query) id {:watcher-id id :registration-id effect-id}))
             (catch Throwable error
               (recover! system :effect-handler effect-id (get-in reg [:options :owner]) error)
-              (write-state! system (assoc (state-of system) :actions before))))
+              (write-state! system (-> (state-of system) (assoc :actions before)
+                                       (assoc-in [:watchers id :failed?] true)))))
           (write-state! system (update-in (state-of system) [:watchers id] assoc :initialized? true :value new)))))))
 
 (defn- refresh-coeffects! [system]
@@ -578,47 +606,51 @@
       (when (not= marker (get-in state [:cofx-snapshot id]))
         (write-state! system (-> state (assoc-in [:cofx-snapshot id] marker) (mark-dependents [:cofx id])))))))
 
+(defn- publish-current! [system]
+  (let [before @(:state system)
+       result (transact! system
+                         (fn []
+                           (let [captured (:sources *transaction*)
+                                 state (state-of system)
+                                 changed (for [[id value] captured
+                                               :when (not= (get (:source-snapshot state) id ::absent) value)] id)]
+                             (write-state! system
+                                           (-> (reduce #(mark-dependents %1 [:source %2]) state changed)
+                                               (assoc :source-snapshot captured) (update :generation inc)))
+                             (refresh-coeffects! system)
+                             (loop []
+                               (when (:prune? (state-of system))
+                                 (write-state! system (reconcile! system (state-of system))))
+                               (when-let [[id _] (first (sort-by (comp :order val) (filter (comp :dirty? val) (:nodes (state-of system)))))]
+                                 (evaluate-node! system id) (recur)))
+                             (run-watchers! system)
+                             {:generation (:generation (state-of system)) :changed-sources (vec (sort-by str changed))
+                              :values (into {} (map (fn [[id node]] [id (:value node)]) (:nodes (state-of system))))})))]
+   ;; Watch callbacks observe an already committed batch, never a partial DAG.
+   (doseq [[id node] (:nodes @(:state system))
+           :let [old (get-in before [:nodes id :value])]
+           :when (and (:available? node)
+                      (or (not (get-in before [:nodes id :available?])) (not= old (:value node))))]
+     (notify-watches! (get-in @(:state system) [:handles id]) old (:value node)))
+   (let [state (state-of system)
+         pending (filterv #(> (:sequence %) (get before :published-fault-sequence 0)) (:faults state))]
+     (when (seq pending)
+       (write-state! system (assoc state :published-fault-sequence (:fault-sequence state))))
+     (assoc result :faults pending))))
+
 (defn publish!
   "Freeze source values and commit a complete derived/action batch. With db,
   update the canonical db source first. Changes enqueued by handlers are for the
   owner's next cycle; source writes during evaluation are seen next publish!."
   ([system]
-   (locking (:lock system)
-    (let [before @(:state system)
-         result (transact! system
-                           (fn []
-                             (let [captured (:sources *transaction*)
-                                   state (state-of system)
-                                   changed (for [[id value] captured
-                                                 :when (not= (get (:source-snapshot state) id ::absent) value)] id)]
-                               (write-state! system
-                                             (-> (reduce #(mark-dependents %1 [:source %2]) state changed)
-                                                 (assoc :source-snapshot captured) (update :generation inc)))
-                               (refresh-coeffects! system)
-                               (loop []
-                                 (when (:prune? (state-of system))
-                                   (write-state! system (reconcile! system (state-of system))))
-                                 (when-let [[id _] (first (sort-by (comp :order val) (filter (comp :dirty? val) (:nodes (state-of system)))))]
-                                   (evaluate-node! system id) (recur)))
-                               (run-watchers! system)
-                               {:generation (:generation (state-of system)) :changed-sources (vec (sort-by str changed))
-                                :values (into {} (map (fn [[id node]] [id (:value node)]) (:nodes (state-of system))))})))]
-     ;; Watch callbacks observe an already committed batch, never a partial DAG.
-     (doseq [[id node] (:nodes @(:state system))
-             :let [old (get-in before [:nodes id :value])]
-             :when (and (:available? node)
-                        (or (not (get-in before [:nodes id :available?])) (not= old (:value node))))]
-       (notify-watches! (get-in @(:state system) [:handles id]) old (:value node)))
-     (let [state (state-of system)
-           pending (filterv #(> (:sequence %) (get before :published-fault-sequence 0)) (:faults state))]
-       (when (seq pending)
-         (write-state! system (assoc state :published-fault-sequence (:fault-sequence state))))
-       (assoc result :faults pending)))))
+   (binding [*publishing?* true]
+     (locking (:lock system) (publish-current! system))))
   ([system db]
-   (locking (:lock system)
-     (try (reset! (db-signal system) db)
-          (catch Throwable e (recover! system :source :db nil e)))
-     (publish! system))))
+   (binding [*publishing?* true]
+     (locking (:lock system)
+       (try (reset! (db-signal system) db)
+            (catch Throwable e (recover! system :source :db nil e)))
+       (publish-current! system)))))
 
 (defn publish-traced!
   "Publish normally and return named reads and completed watcher deliveries from
