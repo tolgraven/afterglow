@@ -1,5 +1,6 @@
 (ns afterglow.runtime.engine-test
   (:require [afterglow.runtime.engine :as engine]
+            [afterglow.runtime.reuse :as reuse]
             [afterglow.runtime.executor :as executor]
             [afterglow.control.model :as control]
             [clojure.test :refer [deftest is testing]]))
@@ -278,3 +279,28 @@
     (is (= 3.5 (get-in released [:model :instances id :release-at-beat])))
     (is (= 1750.0 (get-in released [:model :instances id :release-at-ms])))
     (is (empty? (get-in finished [:model :instances])))))
+
+(deftest reused-steps-observe-current-inputs-and-rebind-on-hot-reload
+  (let [calls (atom [])
+        step (fn [version]
+               (reuse/step {:pure? true :inputs [[:frame :variables :global] [:instance :params :level]]}
+                          (fn [inputs]
+                            (swap! calls conj version)
+                            {:assignments [{:target-id :spot :attribute :dimmer
+                                            :value (* (get-in inputs [:frame :variables :global])
+                                                      (get-in inputs [:instance :params :level]))
+                                            :version version}]})))
+        steps {1 (step 1) 2 (step 2)}
+        compile #(get steps (:version %))
+        start (model (instance "a" :reload-policy :preserve-state))]
+    (with-open [pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 2000})]
+      (let [advance #(engine/advance %1 {:time-ms %2} compile (executor/mapper pool))
+            first-frame (advance start 1)
+            second-frame (advance (:model first-frame) 2)
+            changed (advance (assoc-in (:model second-frame) [:variables :global] 0.5) 3)
+            reloaded (advance (assoc-in (:model changed) [:registry :effects :pulse :version] 2) 4)]
+        (is (= [1 1 2] @calls))
+        (is (= [0.75 0.75 0.375 0.375]
+               (mapv #(get-in % [:assignments 0 :value]) [first-frame second-frame changed reloaded])))
+        (is (= 2 (get-in reloaded [:assignments 0 :version])))
+        (is (= [:effect/reloaded] (mapv :type (:intents reloaded))))))))

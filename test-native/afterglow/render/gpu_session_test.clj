@@ -89,3 +89,16 @@
         (is (thrown? clojure.lang.ExceptionInfo (session/evaluate! owner bad env)))
         (is (= [0.25] (levels (session/evaluate! owner g env))))
         (is (= [1 0] ((juxt :resident :evictions) (session/status owner))))))))
+
+(deftest equal-captured-uniforms-reuse-the-result-and-own-independent-readbacks
+  (with-open [owner (session/open!)]
+    (let [g (session/group spatial [[0 0 0]])
+          result (session/evaluate! owner g env)]
+      (aset-double ^doubles (get-in result [:outputs :level :values]) 0 0.9)
+      (is (= [0.25] (levels (session/evaluate! owner g (assoc env :time-ms 15)))))
+      (is (= 1 (:draws (session/status owner))))
+      (is (= [0.75] (levels (session/evaluate! owner g {:params {:level 0.75}}))))
+      (is (= 2 (:draws (session/status owner))))
+      (session/evict! owner g)
+      (is (= [0.75] (levels (session/evaluate! owner g {:params {:level 0.75}}))))
+      (is (= 3 (:draws (session/status owner)))))))
