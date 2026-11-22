@@ -42,8 +42,9 @@
   [{:keys [retired overlays]} universes]
   (let [packet (reduce-kv (fn [m u ^bytes data] (assoc m u (aclone data))) universes retired)]
     (reduce-kv (fn [m u entries]
-                 (let [^bytes old (get m u)
-                       ^bytes data (if old (aclone old) (byte-array 512))]
-                   (doseq [[i value] entries] (aset-byte data (int i) (unchecked-byte value)))
-                   (assoc m u data)))
+                 (if-let [^bytes old (get m u)]
+                   (let [^bytes data (aclone old)]
+                     (doseq [[i value] entries] (aset-byte data (int i) (unchecked-byte value)))
+                     (assoc m u data))
+                   m))
                packet overlays)))
