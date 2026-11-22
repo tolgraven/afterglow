@@ -3,6 +3,7 @@
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
             [afterglow.control.params :as params]
+            [afterglow.control.targets :as targets]
             [afterglow.time :as musical-time]
             [afterglow.control.categories :as categories]
             [afterglow.control.system :as system]))
@@ -107,6 +108,8 @@
                   :invalid-definition "Invalid parameter schema/default" {:param k})))
     :cues
     (let [effect (effect-definition model definition)]
+      (when (contains? definition :selector)
+        (require! (targets/selector? (:selector definition)) :invalid-targets "Invalid cue target selector"))
       (require! effect :unknown-effect "Cue refers to an unknown effect or version")
       (require! (params/finite-number? (get definition :priority 0))
                 :invalid-definition "Priority must be finite")
@@ -148,7 +151,7 @@
             (require! (and (vector? targets) (every? identifier? targets)
                            (= (count targets) (count (distinct targets))))
                       :invalid-targets "Launch targets must be distinct fixture IDs"))
-        _ (when (contains? launch :selector)
+        _ (when (or (contains? launch :selector) (contains? cue :selector))
             (require! (contains? launch :targets) :invalid-targets "Resolve the selector to fixture IDs before launch"))
         priority (get launch :priority (get cue :priority 0))
         _ (require! (params/finite-number? priority) :invalid-launch "Launch priority must be finite")
