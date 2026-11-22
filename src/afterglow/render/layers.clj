@@ -94,7 +94,8 @@
 (defn- layer-spec! [{:keys [id member opacity member-opacity transforms]
                       :or {opacity 1 member-opacity 1 transforms []} :as spec}]
   (when-not (and (some? id) (nat-int? member) (unit? opacity) (unit? member-opacity)
-                 (or (nil? (:targets spec)) (= :previous (:targets spec))))
+                 (or (nil? (:targets spec)) (= :previous (:targets spec)))
+                 (or (nil? (:target-ids spec)) (vector? (:target-ids spec))))
     (fail! "Native layer needs an identity, a nonnegative member index and unit opacities" {:layer spec}))
   (validate-transforms! transforms)
   spec)
@@ -117,11 +118,13 @@
         (fail! "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer}))
       (if (zero? member-opacity)
         state
-        (let [inherited (when (= targets :previous) (zipmap (keys (:sources state)) (repeat [])))
+        (let [inherited (when (= targets :previous)
+                          (keys (if (:inherit-backdrop? native-layer) (:fields state) (:sources state))))
+              initial (zipmap (concat (:target-ids native-layer) inherited) (repeat []))
               inputs (reduce (fn [acc block]
                                (reduce (fn [m a] (update m (:target-id a) (fnil conj []) a))
                                        acc (rows block nil)))
-                             (or inherited {}) blocks)
+                             initial blocks)
               apply-row (partial set-assignment blend-value validate!)]
           (reduce-kv
            (fn [st id assignments]
@@ -179,8 +182,11 @@
                                      (assoc m (:id l) i)) m)) {} blocks)
           last-anchor (apply max (vals anchors))
           apply-row (partial set-assignment blend-value validate!)
-          targets (into #{} (mapcat (fn [{:keys [kind assignments compiled]}]
-                                      (if (= kind :batch) (:target-ids compiled) (map :target-id assignments)))) tagged)]
+          targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
+                    (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
+                                        (concat (:target-ids native-layer)
+                                                (if (= kind :batch) (:target-ids compiled)
+                                                    (map :target-id assignments))))) tagged))]
       (:out
        (reduce-kv
         (fn [{:keys [backdrop] :as state} i block]

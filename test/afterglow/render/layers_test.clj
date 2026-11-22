@@ -102,3 +102,21 @@
                                        :value (expr :multiply (field :previous :focus) 2)}] (block))
                            [:native-layer :targets] :previous)]
     (is (== 2/3 (get-in (frame/resolve-contributions patch [leader modifier]) [:values :head :channels :focus])))))
+
+(deftest standalone-transform-only-definition-reads-lower-live-fields
+  (let [base {:id :base :version 1 :params {}}
+        modifier {:id :adjust :version 1 :params {}
+                  :layer {:targets :previous
+                          :transforms [{:attribute :focus :value (expr :multiply (field :previous :focus) 2)}]}}
+        show (control/new-show {:registry {:effects {:base base :adjust modifier}
+                                           :cues {:base {:id :base :version 1 :effect-id :base}
+                                                  :adjust {:id :adjust :version 1 :effect-id :adjust}}}})
+        launch (fn [m id]
+                 (:model (control/apply-command m {:op :cue/launch :cue-id id :command-id (name id) :source {:adapter :test}
+                                                    :show-id (:show-id m) :epoch (:epoch m) :time-ms 0})))
+        advance (fn [m]
+                  (engine/advance m {:time-ms 0}
+                                  (fn [d] (if (= :base (:id d)) #(update % :assignments conj (row :focus 1/4))
+                                              identity))))
+        m (-> show (launch :base) (launch :adjust))]
+    (is (== 1/2 (get-in (frame/resolve-contributions patch (:contributions (advance m))) [:values :head :channels :focus])))))

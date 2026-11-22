@@ -203,6 +203,21 @@
        (vector? (:intents result)) (instance? Boolean (:done? result))
        (or (not (contains? result :contributions)) (vector? (:contributions result)))))
 
+(defn- native-layer [instance]
+  (let [program (get-in instance [:definition :layer])
+        slot (get-in instance [:source :native-layer])]
+    (when (or program slot)
+      (cond-> (or slot {:id [::standalone (:id instance)] :member 0})
+        (seq (:transforms program))
+        (update :transforms #(into (vec (:transforms program)) %))
+        (= :previous (:targets program))
+        (assoc :targets :previous)
+        (and program (seq (get-in instance [:definition :targets])))
+        (assoc :target-ids (get-in instance [:definition :targets]))
+        (and program (nil? slot) (= :previous (:targets program))
+             (empty? (get-in instance [:definition :targets])))
+        (assoc :inherit-backdrop? true)))))
+
 (defn- descriptor
   [compiled {:keys [instance intents expired? clock paused? input-state delta-ms number]}]
   (let [step (get compiled (:definition instance))]
@@ -224,11 +239,12 @@
                    _ (when valid? (runtime/append-contributions result []))
                    result (if valid?
                             (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))]
-                              (if-let [layer (get-in instance [:source :native-layer])]
+                              (if-let [layer (native-layer instance)]
                                 (let [tag (assoc layer :member-opacity gain)
                                       flushed (runtime/append-contributions result [])
                                       blocks (cond-> (:contributions flushed)
-                                               (and (= :previous (:targets layer)) (not expired?)
+                                               (and (or (= :previous (:targets layer)) (seq (:target-ids layer)))
+                                                    (not expired?)
                                                     (not (:done? result)) (empty? (:contributions flushed)))
                                                (conj {:kind :assignments :assignments []}))]
                                   (assoc flushed :contributions (mapv #(assoc % :native-layer tag) blocks)))

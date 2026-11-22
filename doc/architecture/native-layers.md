@@ -70,3 +70,12 @@ responsible effect's identity for the existing show fault handler. Native
 operations are deterministic. Caches of independent input field evaluations
 can be reused while the actual composition is reevaluated against the current
 lower members and their captured values.
+
+A reusable effect definition can declare a `:layer` map with `:transforms` and
+optional `:targets :previous`. Its program executes before the slot-specific
+transforms. The runtime uses the active definition revision on each frame.
+Definitions may supply their own explicit fixture `:targets`, including for a
+member that only transforms an earlier result. If launched separately, the
+effect gets a layer at its ordinary priority. With `:targets :previous` and no
+explicit fixture IDs, that standalone effect applies to heads with prior
+writes in the current frame.
