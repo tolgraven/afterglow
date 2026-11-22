@@ -47,11 +47,11 @@
   "Estimate the full-white visible output of one fixture relative to a 100 W
   RGB fixture. The wattage model assumes equal electrical shares per emitter
   and equal conversion efficiencies. A calibrated ratio wins. With neither
-  measurement nor power, preserve the preview's unit gain."
+  measurement nor power, share unit fixture output among its heads."
   [{:keys [max-watts measured-relative-brightness channels emission-share] :or {emission-share 1.0}}]
   (cond
     (some? measured-relative-brightness) (* emission-share (double measured-relative-brightness))
-    (nil? max-watts) 1.0
+    (nil? max-watts) (double emission-share)
     :else
     (let [weights (keep white-response (keys channels))
           response (if (seq weights) (/ (reduce + weights) (count weights)) (:white white-response))]

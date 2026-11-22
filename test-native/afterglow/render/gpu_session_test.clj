@@ -1,6 +1,7 @@
 (ns afterglow.render.gpu-session-test
   (:require [afterglow.render.gpu.expressions :as expressions]
             [afterglow.render.gpu.session :as session]
+            [afterglow.render.gpu.native-context :as context]
             [clojure.test :refer [deftest is]])
   (:import [java.util.concurrent CancellationException Future]))
 
@@ -102,3 +103,28 @@
       (session/evict! owner g)
       (is (= [0.75] (levels (session/evaluate! owner g {:params {:level 0.75}}))))
       (is (= 3 (:draws (session/status owner)))))))
+
+(deftest a-blocked-driver-destruction-preserves-timed-close-and-admission
+  (let [started (promise) release (promise)
+        native (reify java.io.Closeable
+                 (close [_] (deliver started true) @release))]
+    (with-redefs [context/open! (constantly native)]
+      (let [owner (session/open!)
+            pool ^java.util.concurrent.ThreadPoolExecutor (:executor owner)]
+        ;; No live worker means shutdown calls terminated on the closing caller.
+        ;; Arrange that interleaving explicitly instead of racing an idle thread.
+        (.setCorePoolSize pool 0)
+        (is (loop [attempts 300]
+              (cond (zero? (.getPoolSize pool)) true
+                    (zero? attempts) false
+                    :else (do (Thread/sleep 10) (recur (dec attempts))))))
+        (let [closing (future (session/close! owner 10))]
+          (try
+            (is (= true (deref started 3000 ::timeout)))
+            (is (false? (deref closing 1000 ::timeout)))
+            (is (false? (deref (future (session/close! owner 0)) 1000 ::timeout)))
+            (is (= {:closed? true :terminated? false}
+                   (select-keys (deref (future (session/status owner)) 1000 {}) [:closed? :terminated?])))
+            (finally (deliver release true))))
+        (is (true? (session/close! owner 3000)))
+        (is (:terminated? (session/status owner)))))))

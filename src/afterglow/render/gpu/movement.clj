@@ -2,6 +2,7 @@
   "Show-owned boundary for calibrated moving-head output. The native solver is
   loaded on demand. Each call packs only its own post-blend movement results."
   (:require [afterglow.render.frame :as frame]
+            [afterglow.render.gpu.lifecycle :as lifecycle]
             [afterglow.runtime.faults :as faults])
   (:import [java.io Closeable]
            [java.util.concurrent ArrayBlockingQueue Callable ExecutionException Future RejectedExecutionException
@@ -29,14 +30,14 @@
          worker (proxy [ThreadPoolExecutor]
                     [1 1 0 TimeUnit/MILLISECONDS (ArrayBlockingQueue. 1) factory]
                   (terminated []
-                    (deliver done (try (when-let [solver (:solver @resident)] (.close ^Closeable solver))
-                                       nil (catch Throwable error error)))
-                    (vreset! resident nil)))]
+                    (lifecycle/finish! done #(try (when-let [solver (:solver @resident)]
+                                                    (.close ^Closeable solver))
+                                                  (finally (vreset! resident nil))))))]
      (->Movement worker (Semaphore. 1) resident {:budget-ms budget-ms :timeout-ms timeout-ms} done))))
 
 (defn close!
   "Stop admissions and retire the last context after any pending native call.
-  With a timeout, return false while cleanup continues on the worker."
+  With a timeout, return false while native cleanup continues."
   ([^Movement owner] (.close owner) true)
   ([owner timeout-ms]
    (when-not (and (integer? timeout-ms) (<= 0 timeout-ms Long/MAX_VALUE))

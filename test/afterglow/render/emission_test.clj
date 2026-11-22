@@ -19,6 +19,27 @@
 (defn near? [a b] (< (abs (- a b)) 0.005))
 (defn freeze [f] (update-vals (:universes f) vec))
 
+(deftest absent-and-nil-inversions-produce-identical-frames
+  (doseq [attr [:red :dimmer] fine [nil 2]]
+    (let [channel (cond-> {:offset 1} fine (assoc :fine-offset fine))
+          render (fn [spec]
+                   (let [p (frame/compile-patch [{:id :lamp :address 512 :universe 0
+                                                  :channels {attr spec}}])
+                         source (frame/resolve-frame p [(row :lamp attr 0.75)] {})]
+                     [(freeze source) (freeze (emission/scale-emission p source {:lamp 0.4}))]))]
+      (is (= (render channel) (render (assoc channel :inverted-from nil)))))))
+
+(deftest uncolored-lamps-use-white-in-every-output-projection
+  (let [fixture {:id :lamp :address 1 :universe 0 :channels {:dimmer 1}}
+        render (fn [f]
+                 (let [patch (frame/compile-patch [f])
+                       input (frame/resolve-frame patch [(row :lamp :dimmer 1)] {:compact-values? true})
+                       scaled (emission/scale-emission patch input {:lamp 0.5})]
+                   [(freeze scaled) (get-in scaled [:values :lamp :emitted-color])
+                    (:emitted-color (first (frame/project-compact (:compact scaled))))]))]
+    (is (= (render fixture) (render (assoc fixture :emission-color nil))
+           (render (assoc fixture :emission-color [1.0 1.0 1.0]))))))
+
 (deftest scaled-output-meets-budget-without-changing-other-channels
   (doseq [compact? [false true]]
     (let [source (frame/resolve-frame patch rows {:master 0.65 :include-values? (not compact?) :compact-values? compact?})

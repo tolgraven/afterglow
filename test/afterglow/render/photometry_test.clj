@@ -22,6 +22,8 @@
     (is (== 1 (estimate 100)))
     (is (== 0.5 (estimate 50)))
     (is (== 1 (photometry/relative-brightness spot)))
+    (doseq [share [0 0.25 1]]
+      (is (== share (photometry/relative-brightness (assoc spot :emission-share share)))))
     (is (< (photometry/relative-brightness (-> spot (assoc :max-watts 100) (assoc-in [:channels :uv] 4))) 1))
     (is (zero? (photometry/relative-brightness {:max-watts 100 :channels {:uv 1 :dimmer 2}})))
     (is (== 2.2 (photometry/relative-brightness (assoc spot :max-watts 20 :measured-relative-brightness 2.2))))))
