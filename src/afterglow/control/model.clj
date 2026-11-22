@@ -268,7 +268,7 @@
         {:model (update model :instances dissoc (:instance-id command))
          :events [{:type :instance/removed :instance-id (:instance-id command)}]
          :result {:instance-id (:instance-id command)}})
-    (:instance/pause :instance/resume :instance/opacity-set :instance/opacity-toggle :instance/envelope-set)
+    (:instance/pause :instance/resume :instance/opacity-set :instance/gain-set :instance/opacity-toggle :instance/envelope-set)
     (let [id (:instance-id command), instance (instance! model id)
           changed (system/apply-control instance command (clock model (time! model command)))]
       {:model (assoc-in model [:instances id] changed)
@@ -278,7 +278,7 @@
     (let [action (:action command)
           _ (require! (and (map? action)
                            (#{:instance/pause :instance/resume :instance/remove :instance/end
-                              :instance/opacity-set :instance/opacity-toggle :instance/envelope-set} (:op action))
+                              :instance/opacity-set :instance/gain-set :instance/opacity-toggle :instance/envelope-set} (:op action))
                            (every? #{:op :value :envelope :force?} (keys action)))
                       :invalid-action "Group actions accept only instance system/lifecycle operations")
           _ (time! model command)

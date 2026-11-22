@@ -8,6 +8,7 @@
   (:require [afterglow.render.atmosphere :as atmosphere]
             [afterglow.render.emission.dense :as emission]
             [afterglow.render.layers :as layers]
+            [afterglow.render.hdr :as hdr]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
             [afterglow.runtime.faults :as faults]))
@@ -194,7 +195,8 @@
                                                            (get-in fixture [:compiled-channels :fog])
                                                            (first (get-in fixture [:fogger :dmx-range] [0 255]))))))
                          compiled)]
-      {:type ::patch ::emission-layout (emission/compile-layout compiled universes ::emission-channels)
+      {:type ::patch ::hdr-layout (delay (hdr/layout compiled attribute-slots))
+       ::emission-layout (emission/compile-layout compiled universes ::emission-channels)
        :fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)
        :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
        ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
@@ -230,16 +232,18 @@
       (mapv composite (or previous (vec (repeat (count value) 0))) value)
       (composite (or previous 0) value))))
 
-(defn- assignment-value? [attribute value]
-  (case attribute
-    :color (and (vec3? value) (every? unit? value))
-    (:aim :direction) (vec3? value)
-    (unit? value)))
+(defn- assignment-value? [attribute value hdr?]
+  (let [level? (if (and hdr? (hdr/light-attributes attribute))
+                 #(and (finite? %) (not (neg? %))) unit?)]
+    (case attribute
+      :color (and (vec3? value) (every? level? value))
+      (:aim :direction) (vec3? value)
+      (level? value))))
 
-(defn- validate-assignment! [fixture target-id attribute value blend assignment]
+(defn- validate-assignment! [fixture target-id attribute value blend assignment hdr?]
   (when-not (and (map? assignment) fixture
                  (keyword? attribute) (#{:replace :max :add} blend)
-                 (assignment-value? attribute value) (unit? (:opacity assignment 1)))
+                 (assignment-value? attribute value (and hdr? (::emission-channels fixture))) (unit? (:opacity assignment 1)))
     (fail! "Invalid assignment target, attribute, blend or value" {:assignment assignment}))
   (when (and (= attribute :color) (not (::rgb? fixture)))
     (fail! "Color assignment requires red, green and blue channels" {:target-id target-id}))
@@ -253,13 +257,13 @@
   (let [by-id (:by-id patch)]
     (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
       (let [fixture (get by-id target-id)]
-        (validate-assignment! fixture target-id attribute value blend assignment)
+        (validate-assignment! fixture target-id attribute value blend assignment (::hdr? patch))
         (when (pos? opacity)
           (let [index (int (::index fixture))
                 attributes (or (aget targets index) (transient {}))
                 previous (get attributes attribute)
                 blended (blend-value previous value blend opacity)]
-            (when-not (assignment-value? attribute blended)
+            (when-not (assignment-value? attribute blended (and (::hdr? patch) (::emission-channels fixture)))
               (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
             (aset targets index (assoc! attributes attribute blended))
             (when (and geometry-sources (geometric-attributes attribute))
@@ -588,16 +592,51 @@
       (put-byte! universes coarse (Math/round value)))))
 
 (defn- write-packed-assignment!
-  [^doubles values ^booleans present index value blend opacity target-id attribute]
+  [^doubles values ^booleans present index value blend opacity target-id attribute extended?]
   (when (pos? opacity)
    (let [index (int index)
         before (aget values index)
         blended (case blend :replace value :add (+ before value) :max (max before value))
         next-value (double (if (== 1 opacity) blended (+ before (* opacity (- blended before)))))]
-    (when-not (unit? next-value)
+    (when-not (if extended? (and (Double/isFinite next-value) (not (neg? next-value))) (unit? next-value))
       (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value next-value}))
     (aset-double values index next-value)
     (aset-boolean present index true))))
+
+(defn- apply-hdr! [patch options ^doubles values ^booleans present ^objects general]
+  (when-let [settings (:hdr options)]
+    (let [slots (::attribute-slots patch)
+          stride (long (::stride patch))
+          rich? (fn [i] (or (nil? values) (and general (some? (aget general (int i))))))
+          read-at! (fn [i attr fallback]
+                     (if (rich? i) (get (aget general (int i)) attr fallback)
+                       (let [base (* (long i) stride)]
+                         (if (= attr :color)
+                           (if (aget present base) [(aget values base) (aget values (inc base)) (aget values (+ base 2))] fallback)
+                           (if-let [slot (slots attr)]
+                             (let [at (+ base (long slot))] (if (aget present at) (aget values at) fallback))
+                             fallback)))))
+          high-at? (fn [head]
+                     (let [i (int (:index head))]
+                       (if (rich? i)
+                         (some (fn [[a v]] (and (hdr/light-attributes a)
+                                                (if (= :color a) (some #(> (double %) 1.0) v) (> (double v) 1.0))))
+                               (aget general i))
+                         (let [base (* i stride) ^ints scan (:scan-slots head)]
+                           (loop [j 0]
+                             (when (< j (alength scan))
+                               (if (> (aget values (+ base (aget scan j))) 1.0) true (recur (inc j)))))))))
+          write-at! (fn [i updates]
+                      (if (rich? i) (aset general (int i) (merge (aget general (int i)) updates))
+                        (let [base (* (long i) stride)]
+                          (doseq [[attr v] updates]
+                            (if (= attr :color)
+                              (dotimes [c 3]
+                                (aset values (+ base c) (double (nth v c)))
+                                (aset present (+ base c) true))
+                              (let [at (+ base (long (slots attr)))]
+                                (aset values at (double v)) (aset present at true)))))))]
+      (hdr/process! @(::hdr-layout patch) settings read-at! write-at! high-at? (count (:fixtures patch))))))
 
 (defn- pack-dense-state
   [patch ^doubles values ^booleans present {:keys [master blackout? compact-values?] :as options}]
@@ -675,14 +714,14 @@
         by-id (:by-id patch)]
     (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
       (let [fixture (get by-id target-id)]
-        (validate-assignment! fixture target-id attribute value blend assignment)
+        (validate-assignment! fixture target-id attribute value blend assignment (::hdr? patch))
         (let [base (* stride (int (::index fixture)))]
           (if (= :color attribute)
             (dotimes [component 3]
               (write-packed-assignment! values present (+ base component) (nth value component)
-                                        blend opacity target-id attribute))
+                                        blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute))))
             (write-packed-assignment! values present (+ base (int (get slots attribute))) value
-                                      blend opacity target-id attribute)))))
+                                      blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute)))))))
     (pack-dense-state patch values present options)))
 
 (defn- packed-assignment? [assignment]
@@ -739,7 +778,7 @@
        (fail! "Invalid render options" {:options options}))
      (when-not (vector? assignments) (fail! "Assignments must be a vector" {}))
      (cond
-       (seq (:edge-tracking options))
+       (or (:hdr options) (seq (:edge-tracking options)))
        (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
 
        (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
@@ -812,20 +851,23 @@
    (let [stride (int (::stride patch))]
      (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
              {:keys [attribute components values slot]} columns]
-       (let [^doubles source values, row-count (count target-ids), components (int components)]
+       (let [^doubles source values, row-count (count target-ids), components (int components)
+             high? (and (::hdr? patch) (hdr/light-attributes attribute))]
          (dotimes [row row-count]
            (let [index (long (if target-indices (aget ^ints target-indices row) row))
                  base (* index stride)]
              (when-not (and excluded (aget excluded (int index)))
                (dotimes [component components]
-                 (let [value (aget source (+ (* row components) component))]
-                   (when-not (and (Double/isFinite value) (<= 0.0 value) (<= value 1.0))
+                 (let [value (aget source (+ (* row components) component))
+                       permitted? (and high? (or (not= :dimmer attribute)
+                                                  (::emission-channels (nth (:fixtures patch) index))))]
+                   (when-not (and (Double/isFinite value) (<= 0.0 value) (or permitted? (<= value 1.0)))
                      (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
                    (let [destination (+ base (int slot) component)
                          before (aget target-values destination)
                          blended (case blend :replace value :add (+ before value) :max (max before value))
                          level (if (== 1 opacity) blended (+ before (* opacity (- blended before))))]
-                     (when-not (and (Double/isFinite level) (<= 0.0 level) (<= level 1.0))
+                     (when-not (and (Double/isFinite level) (<= 0.0 level) (or permitted? (<= level 1.0)))
                        (fail! "Blended assignment exceeds its finite attribute range"
                               {:target-id (nth target-ids row) :attribute attribute :value level}))
                      (when (pos? opacity)
@@ -837,14 +879,14 @@
   (let [stride (int (::stride patch)), slots (::attribute-slots patch), by-id (:by-id patch)]
     (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
       (let [fixture (get by-id target-id)]
-        (validate-assignment! fixture target-id attribute value blend assignment)
+        (validate-assignment! fixture target-id attribute value blend assignment (::hdr? patch))
         (let [base (* stride (int (::index fixture)))]
           (if (= :color attribute)
             (dotimes [component 3]
               (write-packed-assignment! values present (+ base component) (nth value component)
-                                        blend opacity target-id attribute))
+                                        blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute))))
             (write-packed-assignment! values present (+ base (int (get slots attribute))) value
-                                      blend opacity target-id attribute)))))))
+                                      blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute)))))))))
 
 (defn- expand-batch
   ([batch] (expand-batch batch nil))
@@ -980,6 +1022,7 @@
                                      :batch (expand-batch (:compiled block)))
                                    sources (:source block))))
     (persist-assignments! assigned)
+    (apply-hdr! patch options nil nil assigned)
     (finish-contributions patch assigned (assoc options ::geometry-sources sources)
                           #(pack-general-state patch assigned %))))
 
@@ -994,6 +1037,7 @@
               (case (:kind block)
                 :assignments (merge-packed-assignments! patch values present (:assignments block))
                 :batch (merge-packed-batches! patch values present [(:compiled block)]))))
+          (apply-hdr! patch options values present nil)
           (finish-contributions patch nil options #(pack-dense-state patch values present %)))
       (let [general (boolean-array (count (:fixtures patch)))
             assigned (object-array (count (:fixtures patch)))
@@ -1017,6 +1061,7 @@
         (dotimes [index (alength general)]
           (when (and (aget general index) (nil? (aget ^objects assigned index)))
             (aset ^objects assigned index {})))
+        (apply-hdr! patch options values present assigned)
         (finish-contributions patch assigned
                               (assoc (prepare-previous-compact patch options)
                                      ::general-assigned assigned ::geometry-sources sources)
@@ -1024,12 +1069,15 @@
 
 (defn- reduce-contributions [fixtures contributions options]
   (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
-        options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)]
+        options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)
+        options (if (and (nil? (:hdr options)) (some :emission-gain contributions)) (assoc options :hdr {}) options)
+        patch (if (:hdr options) (assoc patch ::hdr? true) patch)]
     (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
                    (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))
                    (map? (:previous-values options)))
       (fail! "Invalid render options" {:options options}))
     (when-not (vector? contributions) (fail! "Contributions must be an ordered vector" {}))
+    (when (:hdr options) (hdr/validate! (:hdr options)))
     (let [blocks (mapv (fn [block]
                          (when-not (map? block) (fail! "Invalid contribution block" {}))
                          (with-effect-source (:source block)
@@ -1038,10 +1086,11 @@
                                                 (fail! "Assignment contribution needs a vector" {})) block)
                              :batch (assoc block :compiled (first (validate-batches patch [(:batch block)] (:native-layer block))))
                              (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
+          blocks (hdr/apply-contribution-gains blocks (:hdr options) #(get-in patch [:by-id % ::emission-channels]))
           blocks (layers/compose blocks layer-rows blend-value
                                  (fn [{:keys [target-id attribute value] :as a}]
                                    (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
-                                                         (:blend a :replace) a)))
+                                                         (:blend a :replace) a (::hdr? patch))) (::hdr? patch))
           partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
       (if partitioned?
         (resolve-partitioned patch blocks options)

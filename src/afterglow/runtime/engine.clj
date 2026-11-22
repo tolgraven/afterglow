@@ -316,7 +316,9 @@
               source (assoc (select-keys instance [:effect-id :effect-version :cue-id]) :instance-id (:id instance))]
           (-> value
               (assoc :instance instance)
-              (update :contributions #(mapv (fn [block] (assoc block :source source)) %))))
+              (update :contributions #(mapv (fn [block] (cond-> (assoc block :source source)
+                                                       (not (== 1.0 (get-in instance [:system :gain] 1.0)))
+                                                       (assoc :emission-gain (get-in instance [:system :gain])))) %))))
         (catch Throwable error
           {:failure (faults/diagnostic snapshot instance (:effect-version instance)
                                        (if (some #(#{:afterglow.runtime/invalid-result :afterglow.runtime/invalid-contributions}

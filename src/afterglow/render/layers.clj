@@ -13,10 +13,10 @@
   (if (color? x)
     (let [c (color/as-rgba x)] [(:r c) (:g c) (:b c)])
     x))
-(defn- typed [attribute value]
+(defn- typed [high? attribute value]
   (if (= attribute :color)
     (let [v (rgb value)]
-      (when-not (and (xyz? v) (every? unit? v))
+      (when-not (and (xyz? v) (if high? (not-any? neg? v) (every? unit? v)))
         (fail! "A light color requires three normalized components" {:attribute attribute :value v}))
       (if (color? value) value (color/rgba v)))
     value))
@@ -43,7 +43,7 @@
     (validate-expr! value 0))
   steps)
 
-(defn- arithmetic [op a b]
+(defn- arithmetic [high? op a b]
   (let [f (case op :add + :multiply * :divide /)
         x (rgb a) y (rgb b)
         result (cond
@@ -52,31 +52,31 @@
                  (and (xyz? x) (finite? y)) (mapv #(f % y) x)
                  (and (finite? x) (xyz? y)) (mapv #(f x %) y)
                  :else (fail! "Expected scalar, color or vector operands" {:op op}))]
-    (if (or (color? a) (color? b)) (typed :color result) result)))
+    (if (or (color? a) (color? b)) (typed high? :color result) result)))
 
-(defn- evaluate [expr env]
+(defn- evaluate [high? expr env]
   (if (or (not (map? expr)) (color? expr))
     expr
     (let [{:keys [op attribute args]} expr]
       (if (reads op)
         (if-some [x (get-in env [op attribute])]
           x
-          (if (contains? expr :default) (evaluate (:default expr) env)
+          (if (contains? expr :default) (evaluate high? (:default expr) env)
               (fail! "Native layer field has no value for this target" {:op op :attribute attribute})))
-        (let [[a b] (mapv #(evaluate % env) args)]
+        (let [[a b] (mapv #(evaluate high? % env) args)]
           (case op
-            (:add :multiply :divide) (arithmetic op a b)
+            (:add :multiply :divide) (arithmetic high? op a b)
             :rotate-y (do (when-not (and (xyz? a) (finite? b)) (fail! "rotate-y needs a vector and radians" {}))
                           (let [[x y z] a c (Math/cos b) s (Math/sin b)]
                             [(+ (* x c) (* z s)) y (- (* z c) (* x s))]))
             :rotate-hue (do (when-not (finite? b) (fail! "rotate-hue needs a color and turns" {}))
-                            (color/rotate-hue (typed :color a) (* 2.0 Math/PI b)))))))))
+                            (color/rotate-hue (typed high? :color a) (* 2.0 Math/PI b)))))))))
 
-(defn- over [blend-value field before value blend opacity]
-  (typed field (blend-value (rgb before) (rgb value) blend opacity)))
+(defn- over [high? blend-value field before value blend opacity]
+  (typed high? field (blend-value (rgb before) (rgb value) blend opacity)))
 
-(defn- set-assignment [blend-value validate! fields {:keys [attribute value blend opacity] :as a}]
-  (let [value (typed attribute value)
+(defn- set-assignment [high? blend-value validate! fields {:keys [attribute value blend opacity] :as a}]
+  (let [value (typed high? attribute value)
         opacity (get a :opacity 1)
         blend (get a :blend :replace)]
     (if (= :beat-ratio attribute)
@@ -85,7 +85,7 @@
       (validate! (assoc a :value (rgb value))))
     (if (zero? opacity)
       fields
-      (let [result (over blend-value attribute (get fields attribute) value blend opacity)]
+      (let [result (over high? blend-value attribute (get fields attribute) value blend opacity)]
         (if (= :beat-ratio attribute)
           (when-not (finite? result) (fail! "Beat-ratio arithmetic overflow" {:assignment a}))
           (validate! (assoc a :value (rgb result))))
@@ -100,10 +100,10 @@
   (validate-transforms! transforms)
   spec)
 
-(defn- transform-fields [id prior incoming base transforms validate!]
+(defn- transform-fields [high? id prior incoming base transforms validate!]
   (reduce
    (fn [fields {:keys [attribute value]}]
-     (let [v (typed attribute (evaluate value {:previous prior :incoming incoming :field fields}))]
+     (let [v (typed high? attribute (evaluate high? value {:previous prior :incoming incoming :field fields}))]
        (if (= attribute :beat-ratio)
          (when-not (finite? v) (fail! "Expected a finite beat ratio" {:value v}))
          (validate! {:target-id id :attribute attribute :value (rgb v)}))
@@ -117,7 +117,7 @@
               (ex-info "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer})
               source)))))
 
-(defn- apply-member [state blocks rows blend-value validate!]
+(defn- apply-member [high? state blocks rows blend-value validate!]
   (let [{:keys [source native-layer]} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
@@ -131,18 +131,18 @@
                                (reduce (fn [m a] (update m (:target-id a) (fnil conj []) a))
                                        acc (rows block nil)))
                              initial blocks)
-              apply-row (partial set-assignment blend-value validate!)]
+              apply-row (partial set-assignment high? blend-value validate!)]
           (reduce-kv
            (fn [st id assignments]
              (let [prior (get-in st [:fields id] {})
                    incoming (reduce apply-row {} assignments)
                    base (reduce apply-row prior assignments)
-                   post (transform-fields id prior incoming base transforms validate!)
+                   post (transform-fields high? id prior incoming base transforms validate!)
                    written (into (set (keys incoming)) (map :attribute) transforms)]
                (reduce (fn [acc field]
                          (-> acc
                              (assoc-in [:fields id field]
-                                       (over blend-value field (get prior field) (get post field) :replace member-opacity))
+                                       (over high? blend-value field (get prior field) (get post field) :replace member-opacity))
                              (assoc-in [:sources id field] source))) st written)))
            state inputs)))
       (catch Exception ex (throw (faults/attributed-error ex source))))))
@@ -156,13 +156,13 @@
                                         (:source block)))))
     (partition-by (juxt #(get-in % [:native-layer :member]) :source) ordered)))
 
-(defn- group-blocks [backdrop blocks rows blend-value validate!]
+(defn- group-blocks [high? backdrop blocks rows blend-value validate!]
   (let [members (ordered-members blocks)
         opacity (get-in (first blocks) [:native-layer :opacity] 1)]
     (if (zero? opacity)
       []
       (let [{:keys [fields sources]}
-            (reduce #(apply-member %1 %2 rows blend-value validate!) {:fields backdrop :sources {}} members)
+            (reduce #(apply-member high? %1 %2 rows blend-value validate!) {:fields backdrop :sources {}} members)
             writes (for [[id attrs] (sort-by (comp pr-str key) sources)
                          [field source] (sort-by key attrs)
                          :when (not= :beat-ratio field)]
@@ -217,7 +217,8 @@
   "Compose tagged blocks at the last member's position in the ordinary priority
   stream. Only affected target rows are read into the native backdrop. Each
   target/field result retains the source of its final contributing member."
-  [blocks rows blend-value validate!]
+  ([blocks rows blend-value validate!] (compose blocks rows blend-value validate! false))
+  ([blocks rows blend-value validate! high?]
   (if-not (some :native-layer blocks)
     blocks
     (let [tagged (filterv :native-layer blocks)
@@ -230,7 +231,7 @@
       (if (every? direct-block? tagged)
         (order-direct-blocks blocks groups anchors)
         (let [last-anchor (apply max (vals anchors))
-              apply-row (partial set-assignment blend-value validate!)
+              apply-row (partial set-assignment high? blend-value validate!)
               targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
                         (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
                                             (concat (:target-ids native-layer)
@@ -242,9 +243,9 @@
               (let [layer (:native-layer block)
                     entries (cond (nil? layer) [block]
                                   (= i (get anchors (:id layer)))
-                                  (group-blocks backdrop (get groups (:id layer)) rows blend-value validate!)
+                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-value validate!)
                                   :else [])]
                 (cond-> (update state :out into entries)
                   (< i last-anchor)
                   (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks)))))))
+            {:backdrop {} :out []} blocks))))))))

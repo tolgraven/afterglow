@@ -169,3 +169,13 @@
            (mapv #(dissoc % :source) (:contributions result))))
     (is (= {:instance-id "0:1" :effect-id :light :effect-version 1 :cue-id :light}
            (get-in result [:contributions 0 :source])))))
+
+(deftest emission-gain-is-a-live-control-without-changing-parameters-or-opacity
+  (let [show (launched {:system {:gain 1.5}})
+        id "0:1"
+        low (apply! show {:op :instance/gain-set :instance-id id :value 0.5})]
+    (is (= 255 (first (render-bytes (advance show 0 0)))))
+    (is (= 102 (first (render-bytes (advance low 0 0)))))
+    (is (= {:level 0.8} (get-in low [:instances id :params])))
+    (is (= 1.0 (get-in low [:instances id :system :opacity])))
+    (is (thrown? Exception (apply! low {:op :instance/gain-set :instance-id id :value -1})))))
