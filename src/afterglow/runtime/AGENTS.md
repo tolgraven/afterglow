@@ -38,3 +38,8 @@ of this runtime alone.
   attempted state/intents and discard its blocks, then resolve healthy results
   without running their code twice. Never retain typed results in saved state or
   silently hold stale emission. See doc/architecture/effect-fault-isolation.md.
+
+Use `afterglow.runtime.reuse` for declared pure calculations. Fold only captured
+inputs and immutable bindings into their results. Preserve per-frame intent
+delivery and distinct caller-owned output arrays. See
+[the declaration and cache contract](../../../doc/architecture/pure-effect-reuse.md).
