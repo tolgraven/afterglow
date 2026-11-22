@@ -96,14 +96,24 @@
          {:flow-m3-s 0.0 :emitted-m3 0.0 :local-m3 0.0}))
 
 (defn- mixed-state [state plan volume]
-  (let [density (/ volume (:volume-m3 plan))]
+  (let [density (/ volume (:volume-m3 plan))
+        optical-depth (* density (:extinction-per-m plan) (:reference-path-m plan))
+        ;; The nozzle first fills a local plume. Only material mixing into
+        ;; the room changes its attenuation along the reference sightline.
+        mixing (reduce-kv (fn [flow i source]
+                            (+ flow (* (:local-m3 source) (:mix-per-s (nth (:sources plan) i)))))
+                          0.0 (:sources state))
+        net-flow (- mixing (* volume (:loss-per-s plan)))
+        depth-rate (* (/ net-flow (:volume-m3 plan)) (:extinction-per-m plan) (:reference-path-m plan))]
     (assoc state :mixed-m3 volume :mixed-density density
-           :fog-level (- (Math/expm1 (- (* density (:extinction-per-m plan) (:reference-path-m plan))))))))
+           :fog-level (- (Math/expm1 (- optical-depth)))
+           :fog-level-change-per-s (* (Math/exp (- optical-depth)) depth-rate))))
 
 (defn initial [plan epoch now]
   (require! (finite? now) "Expected a finite monotonic sample time" {:time now})
   (mixed-state (merge (select-keys plan [:volume-m3 :extinction-per-m :reference-path-m])
-                      {:epoch epoch :sample-time-ms now :sources (mapv source-state (:sources plan))})
+                      {:epoch epoch :sample-time-ms now :sources (mapv source-state (:sources plan))
+                       :clearance-half-life-s (/ (Math/log 2.0) (:loss-per-s plan))})
                plan 0.0))
 
 (defn held-volume
