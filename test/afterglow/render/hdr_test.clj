@@ -108,3 +108,11 @@
     (is (= 128 (bit-and 255 (nth (get bytes 1) 3))))
     ;; B is saturated from incident light and lies within range of C. Only A casts spill.
     (is (zero? (nth (get bytes 1) 6)))))
+
+(deftest native-transform-only-cue-can-overdrive-a-prior-layer
+  (let [base (assoc (block (row :source :color [0.4 0 0])) :native-layer {:id :scene :member 0})
+        modifier (assoc (block) :source {:cue-id :lift}
+                        :native-layer {:id :scene :member 1 :targets :previous
+                                       :transforms [{:attribute :color :value {:op :previous :attribute :color}}]})
+        bytes (native-and-rich [base modifier] {:hdr {:cue-gains {:lift 3.0} :spill 1 :radius 1}})]
+    (is (= [255 0 0 26] (subvec bytes 0 4)))))

@@ -1072,7 +1072,7 @@
 (defn- reduce-contributions [fixtures contributions options]
   (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
         options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)
-        options (if (and (nil? (:hdr options)) (some :emission-gain contributions)) (assoc options :hdr {}) options)
+        options (if (and (nil? (:hdr options)) (some :emission-gain contributions)) (assoc options :hdr {:white-mix 1.0}) options)
         patch (if (:hdr options) (assoc patch ::hdr? true) patch)]
     (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
                    (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))

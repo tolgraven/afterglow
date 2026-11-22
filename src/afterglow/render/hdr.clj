@@ -274,8 +274,12 @@
   [blocks settings emitting?]
   (if-not (and settings (or (seq (:cue-gains settings)) (seq (:instance-gains settings)) (some :emission-gain blocks)))
     blocks
-    (let [dimmers (dimmer-targets blocks) selected (some-> (:fixture-ids settings) set)]
+    (let [dimmers (dimmer-targets blocks) selected (some-> (:fixture-ids settings) set)
+          applies? #(and (emitting? %) (or (nil? selected) (contains? selected %)))]
       (mapv (fn [block]
               (let [g (contribution-gain block settings)]
-                (if (== 1.0 g) block
-                  (scale-block block (dimmers (gain-owner block)) selected emitting? g)))) blocks))))
+                (cond
+                  (== 1.0 g) block
+                  (seq (get-in block [:native-layer :transforms]))
+                  (assoc block ::member-gain g ::gain-target? applies?)
+                  :else (scale-block block (dimmers (gain-owner block)) selected emitting? g)))) blocks))))

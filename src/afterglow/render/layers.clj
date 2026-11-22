@@ -2,6 +2,7 @@
   "Pure composition of native fixture fields. The frame renderer supplies validated
   assignment/batch rows and performs geometry and channel packing after composition."
   (:require [afterglow.runtime.faults :as faults]
+            [afterglow.render.hdr :as hdr]
             [thi.ng.color.core :as color]))
 
 (defn- fail! [msg data] (throw (ex-info msg data)))
@@ -118,7 +119,7 @@
               source)))))
 
 (defn- apply-member [high? state blocks rows blend-value validate!]
-  (let [{:keys [source native-layer]} (first blocks)
+  (let [{:keys [source native-layer] :as first-block} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
       (check-member! blocks)
@@ -138,7 +139,17 @@
                    incoming (reduce apply-row {} assignments)
                    base (reduce apply-row prior assignments)
                    post (transform-fields high? id prior incoming base transforms validate!)
-                   written (into (set (keys incoming)) (map :attribute) transforms)]
+                   written (into (set (keys incoming)) (map :attribute) transforms)
+                   ;; A native transform can synthesize a value independent of
+                   ;; its input. Apply member gain after the transform, once.
+                   gain (::hdr/member-gain first-block)
+                   post (if (and gain ((::hdr/gain-target? first-block) id))
+                          (reduce (fn [m field]
+                                    (if (and (hdr/light-attributes field)
+                                             (or (= field :dimmer) (not (contains? written :dimmer))))
+                                      (update m field #(arithmetic high? :multiply % gain)) m))
+                                  post written)
+                          post)]
                (reduce (fn [acc field]
                          (-> acc
                              (assoc-in [:fields id field]
