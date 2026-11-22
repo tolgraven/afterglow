@@ -20,3 +20,9 @@ A locked camera observes a steady bright target and adjacent dark reference thro
 Call `afterglow.render.atmosphere.calibration/fit` with ordered `:samples` containing elapsed milliseconds, `:bright`, `:dark` and `:phase` (baseline, active or clearing), held `:flows` as timestamped `:flow-m3-s`, room `:volume-m3` and sightline `:path-m`. The full fit accounts for both retained plume and mixed room fog. Fitting belongs outside the live renderer.
 
 Store the accepted `:clearance-half-life-s`, `:extinction-per-m` and `:reference-path-m` under the room’s `:measured-fog` map and any fitted `:mixing-seconds` on the measured nozzle. The effective clearance already includes deposition and air exchange under the scanned conditions. The published mixed-room `:fog-level` is the fraction of contrast lost at that sightline, from 0 to 1. The last successfully presented fog address supplies `:last-presented-ms`, which remains fixed if observation time advances through missed packets.
+
+## How much of a delivered plume will still reach the room?
+
+Call `(coasting-peak plan state)` to estimate the greatest room-wide attenuation if all pumps stop at this sample. It returns `:fog-level`, the mixed volume in `:mixed-m3` and the time to the peak in `:after-s`. A controller can use that forecast to avoid repeatedly pulsing a machine while a slow jet is still localized.
+
+For initial mixed volume `M`, local plume volumes `Lᵢ`, mixing rates `kᵢ` and the venue clearance rate `d`, the mixed volume after stopping is `exp(−d t) × [M + Σ Lᵢ (1 − exp(−kᵢ t))]`. The derivative has at most one positive root. The implementation brackets that root and solves for it, using the current time as the peak when the room is already clearing. The sightline calculation uses the same room volume and calibrated coefficients as `advance`.
