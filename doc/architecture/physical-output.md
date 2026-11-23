@@ -104,3 +104,11 @@ survive. Closing the mailbox fences workers still freezing output. The
 publisher also retains the original lower source from its last physical
 send so three future samples cannot displace a held level, fade origin or
 buffered interpolation endpoint.
+
+
+Hosts can supply `:prepare-output` to apply final channel corrections before
+the sender checks its deadline. This includes retired-fixture output and fog
+cutoffs. A sink call may itself span a scheduling interruption. The next
+publication leaves at least half a period after the preceding call returned.
+A capture sink can timestamp its own entry to measure the remaining gap
+between application admission and actual delivery.

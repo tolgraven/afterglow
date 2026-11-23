@@ -378,3 +378,31 @@
           (is (= 1 (:frame-id packet)) (name mode))
           (is (= expected (get-in packet [:universes 0 0])) (name mode)))
         (finally (scheduler/close! owner))))))
+
+(deftest sender-includes-final-channel-preparation-and-spaces-from-completed-handoff
+  (let [clock (atom 0) next-call (atom nil) sent (atom [])
+        owner (scheduler/create {:now-ms #(deref clock)
+                                 :prepare-output (fn [buffers id]
+                                                   (when (= id 1) (reset! clock 59))
+                                                   buffers)
+                                 :send! (fn [_ id]
+                                          ;; A transport can start working after the caller's
+                                          ;; final clock sample because its thread was preempted.
+                                          (swap! clock + 15)
+                                          (swap! sent conj [id @clock]))})
+        offer! (fn [id] (scheduler/complete! owner (scheduler/begin-frame! owner 1 @patch {} false)
+                                            (frame id 0 0)))]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due f] (reset! next-call [due f]))]
+        (offer! 1)
+        (scheduler/start! owner 25)
+        (reset! clock 25)
+        ((second @next-call))
+        (is (empty? @sent) "A stall in host channel preparation expires the old packet")
+        (is (== 75 (first @next-call)))
+        (offer! 2)
+        (reset! clock 75)
+        ((second @next-call))
+        (is (= [[2 90]] @sent))
+        (is (== 125 (first @next-call)) "A 100 ms callback could be only ten ms after the last entry"))
+      (finally (scheduler/close! owner)))))

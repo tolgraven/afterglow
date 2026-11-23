@@ -77,7 +77,8 @@
 
 (defn next-output-slot
   "Stay on the common grid. After an overrun or a severely delayed wake, leave
-  at least half a period between physical sends instead of producing a burst."
-  [{:keys [origin-ms period-ms] :as timeline} slot started finished]
+  at least half a period after the previous handoff returned. This upper
+  bound on actual sink entry also covers a preemption just before the call."
+  [{:keys [origin-ms period-ms] :as timeline} slot handed-off finished]
   (max (inc slot) (inc (slot-at timeline finished))
-       (long (Math/ceil (/ (- (+ started (/ period-ms 2)) origin-ms) period-ms)))))
+       (long (Math/ceil (/ (- (+ handed-off (/ period-ms 2)) origin-ms) period-ms)))))

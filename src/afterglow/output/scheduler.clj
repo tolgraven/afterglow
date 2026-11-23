@@ -14,10 +14,11 @@
 
 (defn create
   "Inert owner; send! receives newly owned universe arrays and a packet ID.
-  now-ms is a physical monotonic clock, never the musical/show clock."
-  [{:keys [send! now-ms receipt-capacity]}]
+  Optional prepare-output receives those arrays and ID, and returns the final
+  universe map before deadline admission. now-ms is the monotonic physical clock."
+  [{:keys [send! prepare-output now-ms receipt-capacity]}]
   (let [origin (System/nanoTime)]
-    {:send! send! :now-ms (or now-ms #(/ (- (System/nanoTime) origin) 1.0e6))
+    {:send! send! :prepare-output prepare-output :now-ms (or now-ms #(/ (- (System/nanoTime) origin) 1.0e6))
      :gate (atom nil) :counter (atom 0)
      :receipts (when receipt-capacity (ArrayBlockingQueue. (int receipt-capacity)))
      :receipt-drops (AtomicLong. 0)
@@ -134,12 +135,13 @@
 
 (defn- send-packet! [owner gate packet expires-at]
   (if-let [send! (:send! owner)]
-    (let [transport (policy/materialize packet)
+    (let [{:keys [universes frame-id]} (policy/materialize packet)
+          output (if-let [prepare (:prepare-output owner)] (prepare universes frame-id) universes)
           now (:now-ms owner) started (now)]
       (if (and expires-at (>= started expires-at) (not (:dark? gate)))
         {:expired-before-send? true}
         (do
-          (send! (:universes transport) (:frame-id transport))
+          (send! output frame-id)
           (let [finished (now)]
             (receipt! owner gate packet finished)
             (assoc packet :sent-at-ms started :sent-by-ms finished)))))
@@ -267,8 +269,10 @@
                   (if (< slot wanted)
                     (queue-slot wanted previous)
                     (let [timing (send-slot! owner grid slot previous started)
-                          sent (or (:sent-at-ms timing) started)]
-                      (queue-slot (timeline/next-output-slot grid slot sent (now)) slot))))))]
+                          ;; A thread can be preempted between checking the clock and
+                          ;; entering the sink. Its return bounds the actual handoff.
+                          handed-off (or (:sent-by-ms timing) started)]
+                      (queue-slot (timeline/next-output-slot grid slot handed-off (now)) slot))))))]
       (queue-slot 1 0))))
 
 (defn- render-slot! [owner render! ticket started]
