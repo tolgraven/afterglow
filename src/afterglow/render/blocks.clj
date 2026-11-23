@@ -1,7 +1,8 @@
 (ns afterglow.render.blocks
   "Portable effect materials and generators. Lower once to the same numeric IR
   used by scalar effects, dense CPU fields, and GLSL transform feedback."
-  (:require [afterglow.render.ir :as ir]))
+  (:require [afterglow.render.fog-law :as fog-law]
+            [afterglow.render.ir :as ir]))
 
 (defn- fail! [path message]
   (throw (ex-info message {:path path :message message})))
@@ -28,7 +29,8 @@
 (defn fog-optical-depth-expression
   "Dimensionless optical depth along a uniform segment of a light ray."
   [extinction density distance]
-  (op :multiply (op :max 0.0 extinction) (op :max 0.0 density) (op :max 0.0 distance)))
+  (fog-law/optical-depth #(op :max 0.0 %) #(op :multiply %1 %2 %3)
+                         extinction density distance))
 
 (defn fog-transmission-expression
   "Fraction of unscattered light after travelling distance metres in uniform fog."

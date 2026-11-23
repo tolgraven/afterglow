@@ -170,3 +170,7 @@
   (let [depth (optics/optical-depth 1 1e-19 1)]
     (is (== 1.0 (optics/transmittance depth)))
     (is (== 1e-19 (optics/absorptance depth)))))
+
+(deftest optical-depth-rejects-nonfinite-inputs-and-overflow
+  (doseq [args [[##NaN 1 1] [1 ##-Inf 1] [1 1 ##Inf] [1e300 1e300 1]]]
+    (is (thrown? clojure.lang.ExceptionInfo (apply optics/optical-depth args)))))

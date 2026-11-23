@@ -2,6 +2,7 @@
   "Beer–Lambert attenuation along one segment. Density is equivalent fog volume
   per cubic metre of room air. Extinction is per metre at unit density."
   (:require [afterglow.render.blocks :as blocks]
+            [afterglow.render.fog-law :as fog-law]
             [afterglow.render.ir :as ir]
             [clojure.string :as str]))
 
@@ -12,10 +13,15 @@
 
 (def ^:private depth-expression (material-expression blocks/fog-optical-depth-expression))
 (def ^:private transmission-expression (material-expression blocks/fog-transmission-expression))
-(def ^:private evaluate-depth (ir/compile-expression depth-expression))
+(defn- finite ^double [^double value]
+  (if (Double/isFinite value)
+    value
+    (throw (ex-info "Fog optics requires finite inputs and optical depth" {:value value}))))
 
-(defn optical-depth ^double [extinction density distance]
-  (evaluate-depth {:params {:extinction extinction :density density :distance distance}}))
+(defn- nonnegative ^double [^double value] (max 0.0 (finite value)))
+
+(defn optical-depth ^double [^double extinction ^double density ^double distance]
+  (finite (fog-law/optical-depth nonnegative * extinction density distance)))
 
 (defn absorptance
   "Fraction removed from a direct ray. expm1 resolves trace haze even when its
