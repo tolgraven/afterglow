@@ -28,7 +28,9 @@ the scheduling rules and has no device or thread dependencies.
 
 The first render starts a period ahead. Later starts reserve the larger of the
 latest cost and the 90th percentile over the last 24 observed render costs,
-plus a jitter allowance of 10% or 0.4 ms, whichever is larger. A single outlier
+plus a jitter allowance of 10% or 0.4 ms, whichever is larger. It also reserves the recent upper wake
+delay over the same window, capped at one period. A wake after the planned
+deadline updates this estimate even though the producer skips that slot. A single outlier
 can raise the cost estimate to a full period. Two successive long renders can
 raise it further. For example, seven milliseconds of observed work reserves
 7.7 ms. The next 50 ms output then begins sampling around 42.3 ms. An operating
@@ -39,9 +41,12 @@ slots following a late wake or a blocked transport.
 `:direct` and `:hold-fade` discard a newly completed sample that missed its
 scheduled deadline. A held source may still drive the configured fallback.
 `:buffered-interpolation` accepts completion within the configured presentation
-latency and blends continuous channels using the delayed timeline. Function
+latency and blends continuous channels using the delayed timeline. A fractional
+latency can put that target between physical slots. A valid sample remains
+available through the first slot that can present it as a lower endpoint. Function
 channels retain the lower sample. A patch, blackout or epoch change fences
-previously prepared packets. High refresh-rate local UI animation keeps its
+previously prepared packets. Supply a stable `:timeline-id` in the ticket and
+change it on transport seeks or playback changes to retire old buffered output. High refresh-rate local UI animation keeps its
 own presentation clock.
 
 Inspect `(scheduler/status owner)` for the following measurements.
@@ -49,8 +54,8 @@ Inspect `(scheduler/status owner)` for the following measurements.
 | Measurement | Meaning |
 | --- | --- |
 | `:render-timing :last` | Planned release and deadline, actual start, input capture start, ready and finish, render cost and time remaining at handoff. Hosts can supply show time and beat. |
-| `:render-timing :on-time`, `:renders`, `:skipped` | Rendered samples ready by their nominal slot, attempts made and intervening slots the producer skipped. |
-| `:output-timing` | Most recent physical slot, nominal time, actual publisher start and completion, source sample time and frame ID. The transport call ends before the completion timestamp. |
+| `:render-timing :on-time`, `:renders`, `:skipped` | Rendered samples ready by their nominal slot, attempts made and intervening slots the producer skipped. `:missed-wakes` counts releases that arrived after their deadline. |
+| `:output-timing` | Most recent physical slot, nominal time, actual publisher start and completion, source sample time and frame ID. The timestamps immediately before and after the sink call distinguish transport from packing. `:source-input-age-ms` gives the age of the lower source’s input capture when sent. |
 | `:missed-render-deadlines`, `:expired-at-publication`, `:skipped-output-slots` | Renders completed outside their policy window, queued samples waiting past their policy window in the current generation, and elapsed slots the sender skipped. |
 
 RDM runs independently of DMX publication. The connection's `:request!` performs `ForceDiscovery` or `RDMCommand`; `command!` follows timed acknowledgements and reports responder NACKs. The job owner registers the provided close function before connect, closes the connection on cancellation or its deadline, and closes it in `finally`. Tolglow selects devices, associates discoveries with the fixture registry and saves that show configuration.

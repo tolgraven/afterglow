@@ -166,6 +166,11 @@
         (is (true? (finish (begin 6 150 140 buffered) 155 90)))
         (is (zero? (present 160)))
         (is (= 90 (present 175))))
+      (let [fractional {:mode :buffered-interpolation :latency-ms 10}]
+        (is (true? (finish (begin 8 200 190 fractional) 206 75)))
+        (is (= 75 (present 225)) "The first slot after the 210 ms delayed target can use the sample")
+        (is (false? (finish (begin 10 250 240 fractional) 261 155)))
+        (is (= 45 (present 275)) "Fallback fades the last valid 75-byte source"))
       (finally (scheduler/close! owner)))))
 
 (deftest scheduled-producer-and-sender-share-a-grid-without-catching-up-on-expired-slots
@@ -184,7 +189,7 @@
               (swap! clock max time))
             (render! [ticket]
               (let [id (:slot ticket) cost (if (= id 3) 55 7)
-                    token (scheduler/begin-frame! owner 1 @patch {} false ticket)]
+                    token (scheduler/begin-frame! owner 1 @patch {} false (assoc ticket :inputs-at-ms @clock))]
                 (swap! rendered conj [id @clock (:deadline-ms ticket)])
                 (until! (+ @clock cost))
                 (scheduler/complete! owner token (frame id 0 0))))]
@@ -196,6 +201,7 @@
           (is (< 41.0 (second (second @rendered)) 43.0) "Fresh inputs for the second 50 ms slot")
           (is (not-any? #(= 3 (last %)) @sent) "The slow render cannot take over at a later deadline")
           (is (= [25.0 50.0 75.0 100.0 125.0 150.0 175.0] (mapv first @sent)))
+          (is (number? (get-in (scheduler/status owner) [:output-timing :source-input-age-ms])))
           (is (pos? (:missed-render-deadlines (scheduler/status owner))))
           (is (pos? (get-in (scheduler/status owner) [:render-timing :skipped]))))
         (finally (scheduler/close! owner))))))
@@ -215,9 +221,28 @@
         (reset! clock 49.5)
         ((second @next-call))
         (is (== 100 (first @next-call)))
+        (is (= [49.5 81.0] ((juxt :sent-at-ms :sent-by-ms) (:output-timing (scheduler/status owner)))))
         (reset! clock 100.0)
         ((second @next-call))
         (is (= [49.5 100.0] @started))
         (is (= 2 (:skipped-output-slots (scheduler/status owner))))
         (is (= 4 (get-in (scheduler/status owner) [:output-timing :slot]))))
+      (finally (scheduler/close! owner)))))
+
+(deftest changing-the-musical-timeline-fences-previously-buffered-output
+  (let [clock (atom 0.0) sent (atom []) owner (capture clock sent)
+        opts {:mode :buffered-interpolation :latency-ms 25}
+        begin #(scheduler/begin-frame! owner 0 @patch opts false {:timeline-id %})]
+    (try
+      (let [old (begin [:playing 1])]
+        (scheduler/complete! owner old (frame 211 0 0))
+        (reset! clock 25.0)
+        (is (= 211 (get-in (scheduler/publish! owner) [:universes 0 0])))
+        (let [new (begin [:playing 2])]
+          (is (> (:generation new) (:generation old)))
+          (is (nil? (scheduler/complete! owner old (frame 210 0 0))))
+          (is (= 0 (get-in (scheduler/publish! owner) [:universes 0 0])))
+          (is (true? (scheduler/complete! owner new (frame 31 0 0))))
+          (reset! clock 50.0)
+          (is (= 31 (get-in (scheduler/publish! owner) [:universes 0 0])))))
       (finally (scheduler/close! owner)))))

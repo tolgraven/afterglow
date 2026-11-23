@@ -25,8 +25,8 @@
      :scheduler (atom nil) :timeline (atom nil) :ready (atom nil) :state (atom nil)
      :status (atom {:published 0 :coalesced 0})}))
 
-(defn- gate! [owner epoch patch options dark?]
-  (let [key [epoch patch options (boolean dark?)]
+(defn- gate! [owner epoch patch options dark? timeline-id]
+  (let [key [epoch patch options (boolean dark?) timeline-id]
         current @(:gate owner)]
     (when-not @(:closed? owner)
       (if (= key (:key current))
@@ -47,10 +47,19 @@
   changes invalidate all older completions and buffered bright frames."
   ([owner epoch patch options dark?] (begin-frame! owner epoch patch options dark? nil))
   ([owner epoch patch options dark? ticket]
-   (when-let [gate (gate! owner epoch patch options dark?)]
+   (when-let [gate (gate! owner epoch patch options dark? (:timeline-id ticket))]
      (cond-> {:generation (:generation gate) :epoch epoch :frame-id (swap! (:counter owner) inc)
-              :time-ms (if ticket (:deadline-ms ticket) ((:now-ms owner)))}
-       ticket (merge (select-keys ticket [:slot :started-at-ms :inputs-at-ms]))))))
+              :time-ms (if (:slot ticket) (:deadline-ms ticket) ((:now-ms owner)))}
+       (:slot ticket) (merge (select-keys ticket [:slot :started-at-ms :inputs-at-ms]))))))
+
+(defn- publication-expiry [grid token period-ms latency-ms]
+  ;; A sample ready by its delayed target can first become the lower endpoint
+  ;; on the next physical slot, even if the requested latency is fractional.
+  (let [period (get grid :period-ms period-ms)
+        slots (long (Math/ceil (/ latency-ms period)))]
+    (if grid
+      (timeline/deadline grid (+ (:slot token) slots))
+      (+ (:time-ms token) (* slots period)))))
 
 (defn complete!
   "Freeze an exclusively owned renderer result and offer without blocking the
@@ -67,11 +76,13 @@
                           (every? (fn [[[universe index] value]]
                                     (= value (get-in frozen [:universes universe index]))) (:expected-bytes marker))))
           ready (now)
-          packet (assoc verified :completed-at-ms ready)
+          packet (cond-> (assoc verified :completed-at-ms ready)
+                   (:inputs-at-ms token) (assoc :inputs-at-ms (:inputs-at-ms token)))
           options (:options @(:gate owner))
-          due (when (:slot token)
-                (+ (:time-ms token) (if (= :buffered-interpolation (:mode options)) (:latency-ms options) 0)))
-          entry {:generation (:generation token) :packet packet :due-at-ms due}
+          latency (if (= :buffered-interpolation (:mode options)) (:latency-ms options) 0)
+          due (when (:slot token) (+ (:time-ms token) latency))
+          expiry (when due (publication-expiry @(:timeline owner) token (:period-ms options) latency))
+          entry {:generation (:generation token) :packet packet :due-at-ms expiry}
           ^LinkedBlockingDeque queue (:queue owner)]
       (when (:slot token)
         (reset! (:ready owner) (assoc (select-keys token [:slot :time-ms :show-time-ms :beat :inputs-at-ms]) :ready-at-ms ready)))
@@ -95,8 +106,33 @@
         (update next-state :history
                 (fn [history]
                   (update history (dec (count history)) merge
-                          (select-keys packet [:calibration :calibration-verified?]))))
+                          (select-keys packet [:calibration :calibration-verified? :inputs-at-ms]))))
         next-state))))
+
+(defn- receipt! [owner gate packet published]
+  (when-let [^ArrayBlockingQueue mailbox (when (:calibration packet) (:receipts owner))]
+    (let [presentation (:presentation packet) ^AtomicLong drops (:receipt-drops owner)
+          receipt {:epoch (:epoch packet) :generation (:generation gate)
+                   :frame-id (:frame-id packet) :sample-at-ms (:time-ms packet)
+                   :published-at-ms published :presentation presentation :calibration (:calibration packet)
+                   :eligible? (boolean (and (:calibration-verified? packet)
+                                            (= 1.0 (:gain presentation))
+                                            (zero? (:weight presentation 0))
+                                            (not (:fallback? presentation))
+                                            (not (:waiting? presentation))
+                                            (not (:blackout? presentation))))
+                   :dropped-before (.get drops)}]
+      (if (.offer mailbox receipt) (.set drops 0) (.incrementAndGet drops)))))
+
+(defn- send-packet! [owner gate packet]
+  (if-let [send! (:send! owner)]
+    (let [transport (policy/materialize packet)
+          now (:now-ms owner) started (now)]
+      (send! (:universes transport) (:frame-id transport))
+      (let [finished (now)]
+        (receipt! owner gate packet finished)
+        (assoc packet :sent-at-ms started :sent-by-ms finished)))
+    packet))
 
 (defn publish!
   "Present one physical deadline. Safe to call manually with an injected clock.
@@ -125,32 +161,12 @@
           ;; A changed gate must not allow a previously bright sample to escape.
           ;; No host code takes this lock while owning a renderer buffer.
           (when (and packet (= (:generation gate) (:generation @(:gate owner))))
-            (let [transport (policy/materialize packet)]
-              (when-let [send! (:send! owner)]
-                (send! (:universes transport) (:frame-id transport))
-                ;; No callback or universe copy here. Queue processing is owned
-                ;; by the show coordinator, away from the physical deadline.
-                (when-let [^ArrayBlockingQueue mailbox (when (:calibration packet) (:receipts owner))]
-                  (let [presentation (:presentation packet)
-                        ^AtomicLong drops (:receipt-drops owner)
-                        receipt {:epoch (:epoch packet) :generation (:generation gate)
-                                 :frame-id (:frame-id packet) :sample-at-ms (:time-ms packet)
-                                 :published-at-ms ((:now-ms owner)) :presentation presentation
-                                 :calibration (:calibration packet)
-                                 :eligible? (boolean (and (:calibration-verified? packet)
-                                                         (= 1.0 (:gain presentation))
-                                                         (zero? (:weight presentation 0))
-                                                         (not (:fallback? presentation))
-                                                         (not (:waiting? presentation))
-                                                         (not (:blackout? presentation))))
-                                 :dropped-before (.get drops)}]
-                    (if (.offer mailbox receipt) (.set drops 0) (.incrementAndGet drops)))))
+            (let [sent (send-packet! owner gate packet)]
               (swap! (:status owner) #(-> % (update :published inc)
                                            (assoc :last (:presentation packet)
                                                   :accepted (:accepted next-state) :dropped (:dropped next-state)
-                                                  :expired-at-publication (:expired-at-publication next-state 0))))))
-          packet))))))
-
+                                                  :expired-at-publication (:expired-at-publication next-state 0))))
+              sent))))))))
 
 (defn drain-receipts!
   "Drain the optional bounded physical-output mailbox off the publisher thread."
@@ -162,7 +178,7 @@
   (merge @(:status owner) {:scheduled? (some? @(:scheduler owner)) :closed? @(:closed? owner)
                           :pending (.size ^LinkedBlockingDeque (:queue owner))
                           :options (:options @(:gate owner))
-                          :render-timing (dissoc @(:timeline owner) :costs)}))
+                          :render-timing (dissoc @(:timeline owner) :costs :wake-lags)}))
 
 (defn- at! [owner ^ScheduledExecutorService executor at-ms f]
   (when-not @(:closed? owner)
@@ -176,7 +192,10 @@
     (let [due (timeline/deadline grid slot)
           packet (publish! owner due)
           timing {:slot slot :deadline-ms due :started-at-ms started :finished-at-ms ((:now-ms owner))
-                  :source-time-ms (:time-ms packet) :frame-id (:frame-id packet)}]
+                  :source-time-ms (:time-ms packet) :frame-id (:frame-id packet)
+                  :sent-at-ms (:sent-at-ms packet) :sent-by-ms (:sent-by-ms packet)
+                  :source-input-age-ms (when (and (:sent-at-ms packet) (:inputs-at-ms packet))
+                                         (- (:sent-at-ms packet) (:inputs-at-ms packet)))}]
       (swap! (:status owner) #(-> % (assoc :output-timing timing)
                                   (update :skipped-output-slots (fnil + 0) (- slot previous 1)))))
     (catch Exception error (swap! (:status owner) assoc :error (.getMessage error)))))
@@ -212,7 +231,8 @@
               (let [start (now)]
                 (cond
                   (< start (:start-at-ms ticket)) (queue-ticket ticket)
-                  (>= start (:deadline-ms ticket)) (queue-ticket (timeline/next-render @state start))
+                  (>= start (:deadline-ms ticket))
+                  (queue-ticket (timeline/next-render (swap! state timeline/missed-wake ticket start) start))
                   :else (let [observed (render-slot! owner render! ticket start)]
                           (queue-ticket (timeline/next-render observed (get-in observed [:last :finished-at-ms])))))))]
       (queue-ticket (timeline/next-render grid (:origin-ms grid))))))

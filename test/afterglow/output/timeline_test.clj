@@ -22,3 +22,17 @@
       (is (> (:lead-ms recovered) 60))
       (is (> (:slot recovered) (:slot t2)))
       (is (>= (:start-at-ms recovered) (get-in slower [:last :finished-at-ms]))))))
+
+(deftest a-late-wake-increases-reserve-even-if-the-effect-could-not-run
+  (let [cold (t/timeline 0 25)
+        warm (t/observed cold (t/next-render cold 0) 0 0.3 1)
+        late (t/next-render warm 1)
+        woke (+ (:start-at-ms late) 2)
+        after (t/missed-wake warm late woke)
+        retry (t/next-render after woke)]
+    (is (> woke (:deadline-ms late)))
+    (is (= 1 (:renders after)))
+    (is (= 1 (:missed-wakes after)))
+    (is (= 1 (:skipped after)))
+    (is (< (+ (:start-at-ms retry) 2 0.3) (:deadline-ms retry))
+        "The same OS wake delay must leave time for the next short effect")))
