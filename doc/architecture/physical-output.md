@@ -93,7 +93,11 @@ transport buffers. If the next nominal deadline has passed, it leaves the
 physical output on its previous sample and records `:expired-before-send`.
 Hosts can supply `:prepare-safety-output` to correct the last successfully
 sent channel values when a normal packet expires. It receives detached
-buffers and the last sent frame ID. Return `nil` when no cutoff is needed.
+buffers and source metadata, including any immutable `:safety-state` from
+the completed source. A failed handoff marks the wire uncertain until a
+complete send succeeds. If the first handoff failed, the safety hook receives
+the current idle values. It also receives whether the last source predates
+the current publication gate. Return `nil` when no cutoff is needed.
 The safety send leaves the expired frame pending for its usual admission
 rules and reports `:safety-output?` and `:safety-publications`.
 The next slot can still consume a newer completion that arrived during

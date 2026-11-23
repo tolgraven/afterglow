@@ -382,8 +382,8 @@
 (deftest sender-includes-final-channel-preparation-and-spaces-from-completed-handoff
   (let [clock (atom 0) next-call (atom nil) sent (atom [])
         owner (scheduler/create {:now-ms #(deref clock)
-                                 :prepare-output (fn [buffers id]
-                                                   (when (= id 1) (reset! clock 59))
+                                 :prepare-output (fn [buffers {:keys [frame-id]}]
+                                                   (when (= frame-id 1) (reset! clock 59))
                                                    buffers)
                                  :send! (fn [_ id]
                                           ;; A transport can start working after the caller's
@@ -436,10 +436,11 @@
   (let [clock (atom 0.0) next-call (atom nil) sent (atom [])
         owner (scheduler/create
                {:now-ms #(deref clock)
-                :prepare-output (fn [buffers id]
-                                  (when (> id 1) (swap! clock + 26))
+                :prepare-output (fn [buffers {:keys [frame-id]}]
+                                  (when (> frame-id 1) (swap! clock + 26))
                                   buffers)
-                :prepare-safety-output (fn [buffers _]
+                :prepare-safety-output (fn [buffers {:keys [frame-id safety-state]}]
+                                         (is (= {:source frame-id} safety-state))
                                          (let [^bytes buffer (get buffers 0)]
                                            (when-not (zero? (aget buffer 1))
                                              (aset-byte buffer 1 (byte 0))
@@ -452,7 +453,7 @@
         offer! (fn [slot red]
                  (let [token (scheduler/begin-frame! owner 1 @patch {} false
                                                      {:slot slot :started-at-ms @clock :deadline-ms (* 25 slot)})]
-                   (scheduler/complete! owner token (frame red 200 0))))
+                   (scheduler/complete! owner token (assoc (frame red 200 0) :safety-state {:source (:frame-id token)}))))
         run-next! (fn [] (reset! clock (first @next-call)) ((second @next-call)))]
     (try
       (with-redefs [scheduler/at! (fn [_ _ due f] (reset! next-call [due f]))]

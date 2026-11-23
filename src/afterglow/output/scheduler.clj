@@ -14,15 +14,16 @@
 
 (defn create
   "Inert owner; send! receives newly owned universe arrays and a packet ID.
-  Optional prepare-output receives those arrays and ID, and returns the final
-  universe map before deadline admission. Optional prepare-safety-output receives
-  a private copy of the last sent arrays and their ID when a regular packet
-  expires. Return nil or those buffers with safety cutoffs applied. now-ms is
-  the monotonic physical clock."
+  Optional prepare-output receives those arrays and the source metadata and
+  returns the final universe map before deadline admission. Optional
+  prepare-safety-output receives a private copy of the last successfully sent
+  arrays, or current idle arrays if the initial send threw. Its metadata adds
+  :stale-source? and :uncertain? (a handoff may have sent some universes before
+  throwing). Return nil or the corrected buffers. now-ms is monotonic."
   [{:keys [send! prepare-output prepare-safety-output now-ms receipt-capacity]}]
   (let [origin (System/nanoTime)]
     {:send! send! :prepare-output prepare-output :prepare-safety-output prepare-safety-output
-     :last-sent (when (and send! prepare-safety-output) (atom nil))
+     :wire (when (and send! prepare-safety-output) (atom nil))
      :now-ms (or now-ms #(/ (- (System/nanoTime) origin) 1.0e6))
      :gate (atom nil) :counter (atom 0)
      :receipts (when receipt-capacity (ArrayBlockingQueue. (int receipt-capacity)))
@@ -82,7 +83,9 @@
 
 (defn complete!
   "Freeze an exclusively owned renderer result and offer without blocking the
-  evaluator. At most three completions wait; excess oldest packets coalesce."
+  evaluator. An optional immutable :safety-state on rendered follows this
+  source through the preparation callbacks. At most three completions wait;
+  excess oldest packets coalesce."
   [owner token rendered]
   (when (and token (not @(:closed? owner))
              (= (:generation token) (:generation @(:gate owner))))
@@ -96,7 +99,8 @@
                                     (= value (get-in frozen [:universes universe index]))) (:expected-bytes marker))))
           ready (now)
           packet (cond-> (assoc verified :completed-at-ms ready)
-                   (:inputs-at-ms token) (assoc :inputs-at-ms (:inputs-at-ms token)))
+                   (:inputs-at-ms token) (assoc :inputs-at-ms (:inputs-at-ms token))
+                   (:safety-state rendered) (assoc :safety-state (:safety-state rendered)))
           options (:options @(:gate owner))
           latency (if (= :buffered-interpolation (:mode options)) (:latency-ms options) 0)
           due (when (:slot token) (+ (:time-ms token) latency))
@@ -119,7 +123,7 @@
         (update next-state :history
                 (fn [history]
                   (update history (dec (count history)) merge
-                          (assoc (select-keys packet [:calibration :calibration-verified? :inputs-at-ms])
+                          (assoc (select-keys packet [:calibration :calibration-verified? :inputs-at-ms :safety-state])
                                  :due-at-ms due-at-ms))))
         next-state))))
 
@@ -142,30 +146,45 @@
   (update-vals universes (fn [^bytes buffer] (aclone buffer))))
 
 (defn- wire-snapshot [packet output]
-  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms])
+  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms :generation :safety-state])
          :universes (copy-buffers output)))
 
 (defn- handoff! [owner packet output snapshot started]
-  ((:send! owner) output (:frame-id packet))
+  (try
+    ((:send! owner) output (:frame-id packet))
+    (catch Exception error
+      (when snapshot (swap! (:wire owner) assoc :uncertain? true))
+      (throw error)))
   (let [finished ((:now-ms owner))]
-    (when snapshot (reset! (:last-sent owner) snapshot))
+    (when snapshot (reset! (:wire owner) {:last-sent snapshot}))
     (assoc packet :sent-at-ms started :sent-by-ms finished)))
 
-(defn- send-safety-output! [owner]
-  (when-let [prior (some-> (:last-sent owner) deref)]
-    (when-let [corrected ((:prepare-safety-output owner) (copy-buffers (:universes prior)) (:frame-id prior))]
-      (let [snapshot (wire-snapshot prior corrected)]
-        (assoc (handoff! owner (dissoc prior :universes) corrected snapshot ((:now-ms owner)))
-               :safety-output? true)))))
+(defn- send-safety-output! [owner gate]
+  (let [{:keys [last-sent uncertain?]} (some-> (:wire owner) deref)]
+    (when (or last-sent uncertain?)
+      (let [source (if last-sent
+                     (update last-sent :universes copy-buffers)
+                     (policy/materialize {:frame-id 0 :generation (:generation gate)
+                                          :universes (get-in gate [:plan :idle-universes])}))
+            metadata (dissoc source :universes)
+            context (assoc metadata :uncertain? (boolean uncertain?)
+                                    :stale-source? (not= (:generation gate) (:generation source)))]
+        (when-let [corrected ((:prepare-safety-output owner) (:universes source) context)]
+          (let [snapshot (wire-snapshot metadata corrected)]
+            (assoc (handoff! owner metadata corrected snapshot ((:now-ms owner)))
+                   :safety-output? true)))))))
 
 (defn- send-packet! [owner gate packet expires-at]
   (if (:send! owner)
-    (let [{:keys [universes frame-id]} (policy/materialize packet)
-          output (if-let [prepare (:prepare-output owner)] (prepare universes frame-id) universes)
-          snapshot (when (:last-sent owner) (wire-snapshot packet output))
+    (let [{:keys [universes]} (policy/materialize packet)
+          source (assoc packet :generation (:generation gate))
+          output (if-let [prepare (:prepare-output owner)]
+                   (prepare universes (select-keys source [:frame-id :safety-state]))
+                   universes)
+          snapshot (when (:wire owner) (wire-snapshot source output))
           started ((:now-ms owner))]
       (if (and expires-at (>= started expires-at) (not (:dark? gate)))
-        (assoc (send-safety-output! owner) :expired-before-send? true)
+        (assoc (send-safety-output! owner gate) :expired-before-send? true)
         (let [sent (handoff! owner packet output snapshot started)]
           (receipt! owner gate packet (:sent-by-ms sent))
           sent)))
@@ -351,6 +370,6 @@
     (when-let [^ScheduledExecutorService scheduler @(:scheduler owner)] (.shutdownNow scheduler))
     (reset! (:queue owner) nil)
     (when-let [^ArrayBlockingQueue mailbox (:receipts owner)] (.clear mailbox))
-    (when-let [snapshot (:last-sent owner)] (reset! snapshot nil))
+    (when-let [wire (:wire owner)] (reset! wire nil))
     (reset! (:state owner) nil))
   nil)
