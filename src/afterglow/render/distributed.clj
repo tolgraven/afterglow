@@ -230,7 +230,8 @@
           (doseq [{:keys [peer send! start count] job :id} jobs]
             (send-packet! pool peer send! {:op :run :id id :job job :uniforms values :start start :count count}))
           (let [chunks (collect jobs deadline)
-                checked (when (every? some? chunks) (checked-slices pool group env jobs chunks))
+                checked (when (and (< (System/nanoTime) deadline) (every? some? chunks))
+                          (checked-slices pool group env jobs chunks))
                 batch (when (and checked (every? second checked))
                         (unpack plan (:count group) (map first checked) (map second checked)))]
             (if (and batch (< (System/nanoTime) deadline))
