@@ -1,12 +1,24 @@
 (ns afterglow.spatial.beam-test
   (:require [afterglow.render.frame :as frame]
             [afterglow.spatial.beam :as beam]
+            [afterglow.spatial.field :as field]
             [afterglow.spatial.geometry :as geo]
             [clojure.test :refer [deftest is testing]]))
 
 (def lamp {:id :head :position [0 0 0] :direction [0 0 1] :beam-angle 20.0 :lens-radius-m 0.1
            :channels {:red 1 :green 2 :blue 3 :pan 4 :tilt 5} :universe 1 :address 1})
 (def lit {:emitted-color [0.8 0.1 0] :intensity 1.0 :direction [0 0 1]})
+
+(deftest custom-occluders-still-decide-visibility-for-prepared-volume-queries
+  (let [volume {:shape :sphere :position [0 0 3] :radius 0.2 :selection #{:beam}}
+        sampling (field/prepare volume)
+        options (beam/prepare-options {:surfaces [{:id :floor :point [0 -1 0] :normal [0 1 0]}]})
+        for-volume #(beam/volume-options % #{:beam} sampling)
+        weight #(get (beam/contribution lamp lit volume sampling %) :weight)
+        override #(assoc % :occluded? (constantly true))]
+    (is (= 0.8 (weight (for-volume options))))
+    (is (nil? (weight (for-volume (override options)))))
+    (is (nil? (weight (override (for-volume options)))))))
 
 (defn- at [fixture output point options]
   (beam/contribution fixture output {:shape :sphere :position point :radius 0.0}
