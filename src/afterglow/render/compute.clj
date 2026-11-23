@@ -92,19 +92,23 @@
 
 (defn prepare-group
   "Prepare named expression definitions and a matching ir/compile-batch plan.
-  Capture ordered xyz positions at their original precision for CPU fallback."
-  [expressions positions cpu-plan]
-  (let [positions (if (instance? double/1 positions) (aclone ^doubles positions) positions)]
-    (merge {:cpu-plan cpu-plan :positions positions}
-           (try {:shader ((:group @native) expressions positions)}
-                (catch Throwable error {:preparation-error (failure error)})))))
+  Capture ordered xyz positions and optional surface UVs at their original
+  precision for CPU fallback."
+  ([expressions positions cpu-plan] (prepare-group expressions positions cpu-plan nil))
+  ([expressions positions cpu-plan surface-uvs]
+   (let [positions (if (instance? double/1 positions) (aclone ^doubles positions) positions)
+         uvs (when (:surface-uv? cpu-plan)
+               (if (instance? double/1 surface-uvs) (aclone ^doubles surface-uvs) surface-uvs))]
+     (merge {:cpu-plan cpu-plan :positions positions :surface-uvs uvs}
+            (try {:shader ((:group @native) expressions positions uvs)}
+                 (catch Throwable error {:preparation-error (failure error)}))))))
 
-(defn- cpu-result! [owner {:keys [cpu-plan positions]} env detail]
+(defn- cpu-result! [owner {:keys [cpu-plan positions surface-uvs]} env detail]
   (when-let [state (:state owner)]
     (swap! state (fn [s] (cond-> (update s :cpu-fallbacks inc)
                            detail (assoc :last-fallback detail)
                            (= :deadline (:stage detail)) (update :deadline-fallbacks inc)))))
-  (ir/evaluate-batch cpu-plan env positions))
+  (ir/evaluate-batch cpu-plan env positions surface-uvs))
 
 (def ^:private late {:stage :deadline :type :budget-exhausted :message "GPU result exceeded this frame's deadline"})
 

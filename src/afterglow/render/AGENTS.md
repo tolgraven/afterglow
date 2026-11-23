@@ -150,3 +150,5 @@ mesh materials use the same arithmetic. Dry inputs and shader varyings come from
 the captured frame. Return a pure observation in result metadata for a subscribed
 display. Keep material definitions data-only and avoid serializing live observers.
 Exercise authored GLSL through the scalar oracle and an actual shader readback.
+
+Charted materials use optional fixture `:surface-uv [u v]` alongside world XYZ. Keep the original single-attribute path for rigs without charts and compare mixed coordinate fields across scalar, packed and GPU runners. [Shader fields](../../../doc/architecture/numeric-shader-fields.md)

@@ -115,6 +115,8 @@
                     [(assoc rgb :address 0)]
                     [(assoc rgb :universe -1)]
                     [(assoc rgb :position [0 Double/NaN 0])]
+                    [(assoc rgb :surface-uv [1.0 Double/NaN])]
+                    [(assoc rgb :surface-uv [0 1 2])]
                     [(assoc rgb :channels {:red 0})]
                     [(assoc rgb :channels {:red [1 1]})]
                     [(assoc rgb :channels {:red 1 :green 1})]

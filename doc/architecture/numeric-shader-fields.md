@@ -25,7 +25,9 @@ Use the returned offsets and types for each compiled definition.
 Attach `:source` as a vertex shader. Set transform feedback to interleaved mode
 with the `:varying` names from `:outputs`, in order, before linking. Compare
 `:stride` with the context's maximum interleaved component count. Position is
-a vec3 at location zero. Supply the requested clock, meter and parameter uniforms
+a vec3 at location zero. For charted fixtures pass `{:surface-uv? true}` to `emit-glsl-batch`. When an expression uses `{:op :surface-uv :axis :u}` or `:v`, bind one additional vec2 at location one. Uncharted rigs use world XY and retain the three-float input. Native groups upload these static coordinates once. Use `(ir/evaluate-batch plan env positions surface-uvs)` for the CPU reference, with an ordered vector of pairs and nil for individual uncharted heads.
+
+Supply the requested clock, meter and parameter uniforms
 from a single captured show frame, disable rasterization and draw points in patch
 order. Allocate four bytes per component per fixture. Keep frame ownership until
 the GPU fence signals and the readback is complete.

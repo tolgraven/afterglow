@@ -74,3 +74,33 @@
     (doseq [bad ["phase; return 2." "unknownInput" "1.0 /* skip */" "sine(0.0)"
                  "clamp(1.0" "1+2 garbage" "" "uv.z"]]
       (is (thrown? Exception (material (assoc-in catalog [:custom/wave :glsl] bad)))))))
+
+(deftest physical-and-surface-coordinates-can-contribute-to-the-same-native-field
+  (let [catalog {:test/mix {:mode :replace :glsl "world.z + uv.x - uv.y + position.x"}}
+        expr (:expression (blocks/plan catalog {:base 0 :stages [{:block :test/mix :coordinates :surface-uv}]}))
+        fields {:focus expr}
+        positions [[1.0 2.0 3.0] [1.0 2.0 3.0] [-2.0 4.0 5.0]]
+        charts [[0.2 0.7] [1.1 -0.25] nil]
+        expected [2.7 5.45 -3.0]
+        plan (ir/compile-batch fields)
+        values #(vec (get-in % [:outputs :focus :values]))
+        fragment (ir/emit-glsl expr :surface-uv)
+        charted (ir/emit-glsl-batch fields {:surface-uv? true})
+        ordinary (ir/emit-glsl-batch fields)]
+    (is (every? true? (map close? expected
+                           (map #(ir/evaluate expr {:position %1 :surface-uv %2}) positions charts))))
+    (is (every? true? (map close? expected (values (ir/evaluate-batch plan {} positions charts)))))
+    (is (every? true? (map close? expected
+                           (values (ir/evaluate-batch plan {} (double-array (mapcat identity positions))
+                                                      (double-array [0.2 0.7 1.1 -0.25 -2 4]))))))
+    (is (= [3.0 3.0 -3.0] (values (ir/evaluate-batch plan {} positions))))
+    (is (re-find #"in vec3 v_position;" (:source fragment)))
+    (is (re-find #"in vec2 v_uv;" (:source fragment)))
+    (is (= "v_uv" (get-in charted [:inputs :surface-uv])))
+    (is (nil? (get-in ordinary [:inputs :surface-uv])))
+    (is (= {:position "v_position"}
+           (:inputs (ir/emit-glsl-batch {:focus {:op :surface-uv :axis :u}}))))
+    (is (not (re-find #"location = 1" (:source ordinary))))
+    (is (thrown? clojure.lang.ExceptionInfo (ir/evaluate-batch plan {} positions [[1.0 2.0]])))
+    (doseq [bad [[:bad 0] false]]
+      (is (thrown? clojure.lang.ExceptionInfo (ir/evaluate-batch plan {} positions [bad nil nil]))))))

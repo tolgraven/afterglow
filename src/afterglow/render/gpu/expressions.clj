@@ -27,7 +27,7 @@
       (reduce append flat positions))))
 
 (defn- uniform-specs [{:keys [inputs uniforms]}]
-  (let [clocks (for [[key uniform] (dissoc inputs :position)
+  (let [clocks (for [[key uniform] (dissoc inputs :position :surface-uv)
                      :let [meter? (#{:beats-per-bar :bars-per-phrase} key)]]
                  {:path (if meter? [:meter key] [key]) :type :number :meter? meter? :name uniform})
         params (for [[key spec] uniforms] (assoc spec :path [:params key]))]
@@ -42,6 +42,8 @@
 
 (defn- configure! [^GL3 gl plan ^FloatBuffer points n]
   (let [stride (:stride plan)
+        chart? (contains? (:inputs plan) :surface-uv)
+        vertex-bytes (if chart? 20 12)
         limit (int-array 1)]
     (.glGetIntegerv gl GL2ES3/GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS limit 0)
     (when (> stride (aget limit 0))
@@ -55,9 +57,12 @@
         (.glUseProgram gl program)
         (.glGenBuffers gl 2 buffers 0)
         (.glBindBuffer gl GL/GL_ARRAY_BUFFER (aget buffers 0))
-        (.glBufferData gl GL/GL_ARRAY_BUFFER (* n 12) points GL/GL_STATIC_DRAW)
+        (.glBufferData gl GL/GL_ARRAY_BUFFER (* n vertex-bytes) points GL/GL_STATIC_DRAW)
         (.glEnableVertexAttribArray gl 0)
-        (.glVertexAttribPointer gl 0 3 GL/GL_FLOAT false 0 (long 0))
+        (.glVertexAttribPointer gl 0 3 GL/GL_FLOAT false vertex-bytes (long 0))
+        (when chart?
+          (.glEnableVertexAttribArray gl 1)
+          (.glVertexAttribPointer gl 1 2 GL/GL_FLOAT false vertex-bytes (long 12)))
         (.glBindBuffer gl GL2ES3/GL_TRANSFORM_FEEDBACK_BUFFER (aget buffers 1))
         (.glBufferData gl GL2ES3/GL_TRANSFORM_FEEDBACK_BUFFER (* n stride 4) nil GL2ES3/GL_STREAM_READ)
         (.glEnable gl GL2ES3/GL_RASTERIZER_DISCARD)
@@ -69,33 +74,55 @@
           (release-program! gl {:program program :vao (aget vao 0) :buffers buffers})
           (throw error))))))
 
+(defn- snapshot-uvs [xyz uvs]
+  (if (instance? double/1 uvs)
+    (into (vector-of :float) (map context/finite-float) uvs)
+    (reduce-kv (fn [flat i uv]
+                 (let [x (* 3 i)
+                       pair (if (nil? uv) [(nth xyz x) (nth xyz (inc x))] uv)]
+                   (when-not (and (vector? pair) (= 2 (count pair)))
+                     (throw (ex-info "Expected a surface UV pair" {:index i :surface-uv uv})))
+                   (into flat (map context/finite-float) pair)))
+               (vector-of :float) uvs)))
+
 (defrecord Group [outputs positions plan])
 
 (defn group
   "Compile an immutable group descriptor. Ordered positions are copied so the
   key has value equality even when the caller supplies a mutable double array."
-  [outputs positions]
-  (let [plan (ir/emit-glsl-batch outputs)
-        n (position-count positions)]
-    (when (> (* (long n) (:stride plan)) 4000000)
-      (throw (ex-info "Batch exceeds four million output components" {})))
-    (assoc (->Group outputs (snapshot-positions positions) plan) :bindings (uniform-specs plan))))
+  ([outputs positions] (group outputs positions nil))
+  ([outputs positions surface-uvs]
+   (let [n (position-count positions)
+         _ (ir/validate-surface-uv-count! surface-uvs n)
+         chart? (or (instance? double/1 surface-uvs) (some some? surface-uvs))
+         plan (ir/emit-glsl-batch outputs {:surface-uv? chart?})
+         xyz (snapshot-positions positions)]
+     (when (> (* (long n) (:stride plan)) 4000000)
+       (throw (ex-info "Batch exceeds four million output components" {})))
+     (cond-> (assoc (->Group outputs xyz plan) :bindings (uniform-specs plan))
+       (contains? (:inputs plan) :surface-uv)
+       (assoc :surface-uvs
+              (snapshot-uvs xyz surface-uvs))))))
 
-(defn compile-program! [^GL3 gl {:keys [positions plan]}]
+(defn compile-program! [^GL3 gl {:keys [positions surface-uvs plan]}]
   (let [n (quot (count positions) 3)
-        points (context/floats-buffer (count positions))
+        points (context/floats-buffer (+ (count positions) (count surface-uvs)))
         readback (context/floats-buffer (* n (:stride plan)))]
-    (doseq [value positions] (.put points (float value)))
+    (if surface-uvs
+      (dotimes [i n]
+        (dotimes [axis 3] (.put points (float (nth positions (+ (* i 3) axis)))))
+        (dotimes [axis 2] (.put points (float (nth surface-uvs (+ (* i 2) axis))))))
+      (doseq [value positions] (.put points (float value))))
     (.flip points)
     (assoc (configure! gl plan points n) :plan plan :count n :readback readback)))
 
 (defn open!
   "Compile a map of named expression trees and upload ordered fixture positions
-  once. Accepts the same position formats and output-size bound as evaluate-batch.
-  Use with-open. Rebuild for changes to the expressions or positions."
+  once. Optional :surface-uvs contains ordered UV pairs, with nil for any head
+  using world x/y. Use with-open. Rebuild when fields or coordinates change."
   ([outputs positions] (open! outputs positions {}))
-  ([outputs positions {:keys [timeout-ms] :or {timeout-ms 1000}}]
-   (let [group (group outputs positions)]
+  ([outputs positions {:keys [surface-uvs timeout-ms] :or {timeout-ms 1000}}]
+   (let [group (group outputs positions surface-uvs)]
      (context/open! ::expressions timeout-ms #(compile-program! % group)))))
 
 (defn- uniform-values [env {:keys [path type meter?]}]

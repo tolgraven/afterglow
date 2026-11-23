@@ -39,5 +39,35 @@ test('generated water, gel and fog agree on surface fragments, fixture batches a
   // The first two fixtures share XY and have different depths.
   assert.deepEqual(proof.uv.samples[0].values[0], proof.uv.samples[0].values[1]);
   assert.notEqual(proof.world.samples[0].values[0].dimmer, proof.world.samples[0].values[1].dimmer);
+  // A second pair occupies the same XYZ with two deliberately different UVs.
+  assert.deepEqual(proof.world.samples[0].values[0], proof.world.samples[0].values[4]);
+  assert.notEqual(proof.uv.samples[0].values[0].dimmer, proof.uv.samples[0].values[4].dimmer);
+  const runnerSource = await fs.readFile(path.join(root, 'resources/gpu/compute.js'), 'utf8');
+  const values = await page.evaluate(async ({runnerSource, proof}) => {
+    const url = URL.createObjectURL(new Blob([runnerSource], {type: 'text/javascript'}));
+    const {createComputeRunner} = await import(url);
+    URL.revokeObjectURL(url);
+    const runner = createComputeRunner(document.createElement('canvas'));
+    const positions = new Float32Array(proof.positions.flat());
+    const sample = proof.uv.samples[1];
+    const input = {positions, elapsedBeats: sample.beat, params: {density: sample.density}};
+    try {
+      runner.compile(proof.uv.fragments.color);
+      const mixed = await runner.run({...input, surfaceUVs: proof['surface-uvs']});
+      const fallback = await runner.run(input);
+      const uncharted = await runner.run({...input, surfaceUVs: proof.positions.map(() => null)});
+      runner.compile(proof.world.fragments.color);
+      const ordinary = await runner.run(input);
+      return [mixed, fallback, ordinary, uncharted].map(frame => Array.from(frame.values));
+    } finally { runner.dispose(); }
+  }, {runnerSource, proof});
+  for (let i = 0; i < proof.positions.length; i++) {
+    for (let c = 0; c < 3; c++) {
+      assert.ok(Math.abs(values[0][4*i+c] - proof.uv.samples[1].values[i].color[c]) <= tolerance);
+      assert.ok(Math.abs(values[2][4*i+c] - proof.world.samples[1].values[i].color[c]) <= tolerance);
+    }
+  }
+  assert.deepEqual(values[1], values[3]);
+  assert.deepEqual(values[1].slice(0, 3), values[1].slice(16, 19));
   t.diagnostic(JSON.stringify(result));
 });

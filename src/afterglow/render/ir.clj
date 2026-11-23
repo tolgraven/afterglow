@@ -183,6 +183,14 @@
                  :beat beat :bar (str "(" beat " / u_beats_per_bar)")
                  :phrase (str "((" beat " / u_beats_per_bar) / u_bars_per_phrase)"))
          :evaluate (fn [env] (musical-value node env path))}))
+    :surface-uv
+    (let [axis (:axis node) index ({:u 0 :v 1} axis)]
+      (when-not index (invalid! path "Surface coordinate axis must be :u or :v"))
+      {:type :number :params {} :glsl (str "v_uv." (["x" "y"] index))
+       :evaluate (fn [{:keys [surface-uv position]}]
+                   (if (some? surface-uv)
+                     (nth (checked surface-uv :vec2 path) index)
+                     (nth (checked position :vec3 path) index)))})
     :position (let [axis (:axis node), index ({:x 0 :y 1 :z 2} axis)]
                 (when-not index (invalid! path "Position axis must be :x, :y, or :z"))
                 {:type :number :params {} :glsl (str "v_position." (name axis))
@@ -238,7 +246,7 @@
   "Frame inputs shared by every position, with source paths for diagnostics."
   [expression path]
   (case (:op expression)
-    (:const :position) []
+    (:const :position :surface-uv) []
     (:param :time :beat :bar :phrase)
     (let [{:keys [evaluate type]} (analyze expression path 0)]
       (for [component (range (width type))]
@@ -260,6 +268,8 @@
       (:param :time :beat :bar :phrase)
       (let [slot (int (get slots [expression component]))]
         (reify ScalarExpression (evalDouble [_ inputs] (aget inputs slot))))
+      :surface-uv (let [slot (int ({:u 3 :v 4} (:axis expression)))]
+                    (reify ScalarExpression (evalDouble [_ inputs] (aget inputs slot))))
       :position (let [axis (int ({:x 0 :y 1 :z 2} (:axis expression)))]
                   (reify ScalarExpression (evalDouble [_ inputs] (aget inputs axis))))
       (:vec2 :vec3 :vec4) (scalar-component (nth (:args expression) component) 0 (conj path :args component) slots)
@@ -331,6 +341,7 @@
                         (let [absolute? (= :absolute (:clock node))]
                           (case (:op node)
                             :param [[:params (:key node)]]
+                            :surface-uv [[:surface-uv] [:position]]
                             :position [[:position]]
                             :time [[(if absolute? :time-ms :elapsed-ms)]]
                             :beat [[(if absolute? :beat :elapsed-beats)]]
@@ -342,7 +353,7 @@
         (tree-seq #(and (map? %) (vector? (:args %))) :args expression)))
 
 (defn- compile-field [slots {:keys [expression components] :as field}]
-  (let [spatial? (some #(= :position (:op %)) (tree-seq #(vector? (:args %)) :args expression))]
+  (let [spatial? (some #(#{:position :surface-uv} (:op %)) (tree-seq #(vector? (:args %)) :args expression))]
     (-> field
         (dissoc :node :expression)
         (assoc :spatial? (boolean spatial?)
@@ -366,8 +377,9 @@
         uniforms (vec (into {} (mapcat #(uniform-inputs (:expression %) []) nodes)))
         ;; Every invocation owns one double array. Slots 0–2 hold the current
         ;; xyz position; the remaining inputs stay fixed for the entire frame.
-        slots (zipmap (map key uniforms) (iterate inc 3))]
-    {:type ::batch
+        chart? (boolean (some #(some #{[:surface-uv]} (input-paths %)) (vals outputs)))
+        slots (zipmap (map key uniforms) (iterate inc (if chart? 5 3)))]
+    {:type ::batch :surface-uv? chart?
      :uniforms (mapv val uniforms)
      :params (collected (map :node nodes))
      :clocks (set (for [[_ expression] outputs
@@ -400,16 +412,40 @@
             (invalid-position! index))
           (aset xyz axis (double value)))))))
 
+(defn validate-surface-uv-count! [uvs n]
+  (when-not (or (nil? uvs)
+                (and (vector? uvs) (= (count uvs) n))
+                (and (instance? doubles-class uvs) (= (alength ^doubles uvs) (* 2 (long n)))))
+    (invalid! [:surface-uvs] "Supply one optional [u v] per head or a flat double-array of UV pairs")))
+
+(defn- load-uv! [uvs flat? index ^doubles inputs]
+  (if flat?
+    (let [base (* (long index) 2)]
+      (dotimes [axis 2]
+        (let [v (aget ^doubles uvs (+ base axis))]
+          (when-not (Double/isFinite v) (invalid! [:surface-uvs index] "Expected finite UV coordinates"))
+          (aset inputs (+ 3 axis) v))))
+    (let [uv (when uvs (nth uvs index))]
+      (if (nil? uv)
+        (do (aset inputs 3 (aget inputs 0))
+            (aset inputs 4 (aget inputs 1)))
+        (do (checked uv :vec2 [:surface-uvs index])
+            (aset inputs 3 (double (nth uv 0)))
+            (aset inputs 4 (double (nth uv 1))))))))
+
 (defn evaluate-batch
   "Evaluate a compiled batch for ordered positions and return owned float64 fields.
 
   positions is either a vector of [x y z] vectors or a flat double-array of xyz
-  triples. env supplies shared explicit time and parameters. The result is
+  triples. Optional surface-uvs supplies one [u v] or nil per position, or a flat
+  double-array of pairs. A head without a chart uses its world x/y. env supplies
+  shared explicit time and parameters. The result is
   {:count n :outputs {attribute {:type t :components k :values double-array}}}.
   Each output is interleaved by head within that field and has an independent
   lifetime. No input is mutated. At most four million output components are
   allocated per invocation. The caller performs fixture conversion/DMX packing."
-  [batch env positions]
+  ([batch env positions] (evaluate-batch batch env positions nil))
+  ([batch env positions surface-uvs]
   (when-not (and (map? batch) (= ::batch (:type batch)) (map? env))
     (invalid! [] "Expected a compiled batch plan and an explicit environment map"))
   (let [flat? (instance? doubles-class positions)
@@ -419,6 +455,7 @@
                     (vector? positions) (count positions)
                     :else (invalid! [] "Batch positions must be a vector of xyz vectors or a flat double-array"))
         components (reduce + (map :components (:outputs batch)))]
+    (validate-surface-uv-count! surface-uvs count)
     (when (> (* (long count) components) 4000000)
       (invalid! [] "Batch exceeds four million output components"))
     (doseq [[key type] (:params batch)]
@@ -429,12 +466,15 @@
           spatial-fields (filterv :spatial? fields)
           spatial-count (clojure.core/count spatial-fields)
           uniforms (:uniforms batch)
-          inputs (double-array (+ 3 (clojure.core/count uniforms)))]
+          chart? (:surface-uv? batch)
+          uv-flat? (instance? doubles-class surface-uvs)
+          coordinates (if chart? 5 3)
+          inputs (double-array (+ coordinates (clojure.core/count uniforms)))]
       ;; Whole-output expressions that depend only on time/params are shared by
       ;; every head. Compute them once instead of re-reading the same inputs N times.
       (when (pos? count)
         (dotimes [slot (clojure.core/count uniforms)]
-          (aset inputs (+ slot 3) (double ((nth uniforms slot) env))))
+          (aset inputs (+ slot coordinates) (double ((nth uniforms slot) env))))
         (doseq [{:keys [scalars components] :as field} (remove :spatial? fields)]
           (let [^doubles target (:values field), components (int components)]
             (dotimes [component components]
@@ -445,6 +485,7 @@
                     (aset target (+ (* index components) component) value))))))))
       (dotimes [index count]
         (load-position! positions flat? index inputs)
+        (when chart? (load-uv! surface-uvs uv-flat? index inputs))
         (dotimes [field-index spatial-count]
           (let [field (nth spatial-fields field-index), scalars (:scalars field)
                 components (int (:components field)), base (* index components), ^doubles target (:values field)]
@@ -452,7 +493,7 @@
               (aset target (+ base component)
                     (.evalDouble ^ScalarExpression (nth scalars component) inputs))))))
       {:count count
-       :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))})))
+       :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))}))))
 
 (def ^:private time-inputs {:time-ms "u_time_ms" :elapsed-ms "u_elapsed_ms"})
 (def ^:private numeric-contract
@@ -474,6 +515,7 @@
                         (if absolute? "u_beat" "u_elapsed_beats"))
            (#{:bar :phrase} op) (assoc :beats-per-bar "u_beats_per_bar")
            (= op :phrase) (assoc :bars-per-phrase "u_bars_per_phrase"))
+         :surface-uv (assoc inputs :surface-uv "v_uv")
          :position (assoc inputs :position "v_position")
          inputs)))
    (sorted-map)
@@ -501,13 +543,16 @@
   be representable on a float32 GPU."
   ([expression] (emit-glsl expression :world))
   ([expression coordinates]
-  (let [input-declaration (case coordinates
-                            :world "in vec3 v_position;\n"
-                            :surface-uv "in vec2 v_uv;\n#define v_position vec3(v_uv, 0.0)\n"
-                            (invalid! [:coordinates] "Expected :world or :surface-uv"))
+  (when-not (#{:world :surface-uv} coordinates) (invalid! [:coordinates] "Expected :world or :surface-uv"))
+  (let [used (shader-inputs [expression])
+        mapped? (contains? used :surface-uv)
+        uv-only? (and (= coordinates :surface-uv) (not mapped?))
+        input-declaration (if uv-only?
+                            "in vec2 v_uv;\n#define v_position vec3(v_uv, 0.0)\n"
+                            (str "in vec3 v_position;\n" (when mapped? "in vec2 v_uv;\n")))
         node (compile-node expression)
         uniforms (shader-uniforms [node])
-        inputs (merge (shader-inputs [expression]) time-inputs {:position (if (= coordinates :surface-uv) "v_uv" "v_position")})
+        inputs (assoc (merge used time-inputs) :position (if uv-only? "v_uv" "v_position"))
         source-expression (bind-expression node uniforms)
         result-type (:type node)
         result (case result-type
@@ -519,20 +564,28 @@
      :inputs inputs :numeric-contract numeric-contract
      :source (str "#version 300 es\nprecision highp float;\n"
                   "uniform float u_time_ms;\nuniform float u_elapsed_ms;\n" input-declaration
-                  (uniform-declarations (dissoc inputs :position :elapsed-ms :time-ms) uniforms)
+                  (uniform-declarations (dissoc inputs :position :surface-uv :elapsed-ms :time-ms) uniforms)
                   "out vec4 fragColor;\nvoid main() {\n  " (glsl-type result-type)
                   " value = " source-expression ";\n  fragColor = " result ";\n}\n")})))
 
 (defn emit-glsl-batch
   "Compile named fixture expressions to a vertex shader for interleaved transform
   feedback. Offsets and stride count floats. Each point is one fixture, with its
-  world position at location 0. Bind the returned varying names in output order
+  world position at location 0. When a material samples UVs, :surface-uv? true
+  adds an independent vec2 at location 1. Its default uses world x/y for UV.
+  Bind the returned varying names in output order
   before linking. Compare stride to the device's interleaved component limit."
-  [outputs]
+  ([outputs] (emit-glsl-batch outputs {}))
+  ([outputs {:keys [surface-uv?]}]
   (validate-outputs! outputs)
   (let [ordered (sort-by (comp str key) outputs)
         nodes (mapv (comp compile-node val) ordered)
-        inputs (shader-inputs (map val ordered))
+        used (shader-inputs (map val ordered))
+        mapped? (contains? used :surface-uv)
+        chart? (and mapped? surface-uv?)
+        inputs (if (and mapped? (not chart?))
+                 (-> used (dissoc :surface-uv) (assoc :position "v_position"))
+                 used)
         uniforms (shader-uniforms nodes)
         fields (mapv (fn [index [attribute _] {:keys [type]}]
                        {:attribute attribute :type type :components (width type)
@@ -548,6 +601,7 @@
      :stride (last offsets) :inputs inputs :uniforms uniforms :numeric-contract numeric-contract
      :source (str "#version 300 es\n#ifdef GL_ES\nprecision highp float;\n#endif\n"
                   "layout(location = 0) in vec3 v_position;\n"
-                  (uniform-declarations (dissoc inputs :position) uniforms)
+                  (when mapped? (if chart? "layout(location = 1) in vec2 v_uv;\n" "#define v_uv v_position.xy\n"))
+                  (uniform-declarations (dissoc inputs :position :surface-uv) uniforms)
                   (apply str declarations) "void main() {\n" (apply str assignments)
-                  "  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n")}))
+                  "  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n")})))

@@ -2,12 +2,13 @@
 // The vertex stage supplies either metre coordinates or the surface's own UVs.
 const sampleVertex = `#version 300 es
 layout(location=0) in vec3 position;
+layout(location=1) in vec2 surfaceUV;
 uniform float count;
 out vec3 v_position;
 out vec2 v_uv;
 void main() {
   v_position=position;
-  v_uv=position.xy;
+  v_uv=surfaceUV;
   gl_Position=vec4((float(gl_VertexID)+0.5)*2.0/count-1.0,0.0,0.0,1.0);
   gl_PointSize=1.0;
 }`;
@@ -29,12 +30,12 @@ function link(gl, vertex, fragment, varyings = []) {
   return program;
 }
 
-function vertices(gl, positions) {
+function vertices(gl, positions, location = 0, size = 3) {
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions.flat()), gl.STATIC_DRAW);
-  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
-  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(location);
   return buffer;
 }
 
@@ -134,13 +135,14 @@ export function verify(canvas, proof) {
   if (!gl) throw Error('WebGL2 unavailable');
   const count = proof.positions.length;
   const input = vertices(gl, proof.positions);
+  const chart = vertices(gl, proof['surface-uvs'].map((uv, i) => uv ?? proof.positions[i].slice(0, 2)), 1, 2);
   const results = {};
   for (const name of ['uv', 'world']) {
     results[name] = {fragments: readFragments(gl, proof[name], count), batch: readFields(gl, proof[name], count)};
   }
   const debug = gl.getExtension('WEBGL_debug_renderer_info');
   results.renderer = gl.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
-  gl.deleteBuffer(input);
+  gl.deleteBuffer(input); gl.deleteBuffer(chart);
   return results;
 }
 
@@ -187,7 +189,7 @@ function curtain(columns, rows) {
       const u = column / (columns - 1), v = row / (rows - 1);
       const z = 0.73 * Math.sin(u * 5.8 + v * 2.1) + 0.23 * Math.cos(v * 4.6 - u * 4);
       world.push([(u - 0.5) * 3.7, (v - 0.5) * 2.35 + 0.26 * Math.sin(6 * u), z]);
-      uv.push([u, v, 0]);
+      uv.push([u, v]);
     }
   }
   return {world, uv};
@@ -197,16 +199,21 @@ export function demonstrate(canvas, proof) {
   const gl = canvas.getContext('webgl2', {alpha: false, antialias: true, preserveDrawingBuffer: true});
   const shape = curtain(84, 48), count = shape.world.length;
   const display = link(gl, diodeVertex, diodeFragment);
-  const geometry = vertices(gl, shape.world), texcoords = vertices(gl, shape.uv);
+  const geometry = vertices(gl, shape.world), texcoords = vertices(gl, shape.uv, 1, 2);
   const displays = ['world', 'uv'].map((mode, panel) => {
     const shader = proof[mode].batch;
     const compute = fieldProgram(gl, shader);
     const data = fieldBuffer(gl, count, shader.stride);
     const read = gl.createVertexArray(), draw = gl.createVertexArray();
     gl.bindVertexArray(read);
-    gl.bindBuffer(gl.ARRAY_BUFFER, mode === 'world' ? geometry : texcoords);
+    gl.bindBuffer(gl.ARRAY_BUFFER, geometry);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(0);
+    if (shader.inputs['surface-uv']) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, texcoords);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(1);
+    }
     gl.bindVertexArray(draw);
     gl.bindBuffer(gl.ARRAY_BUFFER, geometry);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);

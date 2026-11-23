@@ -14,8 +14,8 @@
   "Capture immutable expression definitions and ordered xyz positions. Equal
   descriptions share a program; changing the definitions or physical order
   produces a new cache key. The descriptor can be shared by frame workers."
-  [outputs positions]
-  (expressions/group outputs positions))
+  ([outputs positions] (expressions/group outputs positions))
+  ([outputs positions surface-uvs] (expressions/group outputs positions surface-uvs)))
 
 (defn- shutdown! [^ThreadPoolExecutor executor gate]
   (locking gate

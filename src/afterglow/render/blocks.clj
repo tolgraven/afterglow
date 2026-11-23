@@ -64,7 +64,7 @@
 (defn- coordinate-nodes [mapping]
   (case mapping
     (nil :world) (mapv #(hash-map :op :position :axis %) axes)
-    :surface-uv [{:op :position :axis :x} {:op :position :axis :y} (expr 0.0)]
+    :surface-uv [{:op :surface-uv :axis :u} {:op :surface-uv :axis :v} (expr 0.0)]
     (do
       (when-not (and (vector? mapping) (<= 2 (count mapping) 3))
         (fail! [:coordinates] "Supply :world, :surface-uv, or two or three coordinate expressions"))

@@ -80,3 +80,16 @@
         (is (= #{4 5 6} (set (keys actual))))
         (is (= expected actual))
         (is (some pos? (map #(bit-and 255 %) (mapcat identity (vals actual)))))))))
+
+(deftest independent-surface-uvs-share-the-world-position-buffer-only-when-required
+  (let [positions [[1.0 2.0 0.3] [1.0 2.0 0.3] [2.0 1.0 0.5]]
+        uvs [[0.75 0.4] [-0.5 1.5] nil]
+        fields {:focus (operation :add {:op :position :axis :z} {:op :surface-uv :axis :u})
+                :pair (operation :vec2 {:op :surface-uv :axis :v} {:op :position :axis :x})}
+        plan (ir/compile-batch fields)]
+    (doseq [chart [nil uvs]]
+      (with-open [runner (gpu/open! fields positions {:surface-uvs chart})]
+        (verify (ir/evaluate-batch plan {} positions chart) (gpu/evaluate! runner {}))))
+    (is (not= (gpu/group fields positions uvs)
+              (gpu/group fields positions (assoc-in uvs [1 0] 0.85))))
+    (is (= (gpu/group {:aim position} positions) (gpu/group {:aim position} positions uvs)))))

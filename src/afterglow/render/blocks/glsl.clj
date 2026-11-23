@@ -26,7 +26,7 @@
 
 (defn expression
   "Accept arithmetic, supported numeric GLSL functions, prefab input names,
-  position.xyz and uv.xy components. The CPU and both GPU backends share the AST."
+  mapped position.xyz, physical world.xyz and independent uv.xy components. The CPU and both GPU backends share the AST."
   [source]
   (let [tokens (tokenize source) cursor (volatile! 0)
         peek-token #(first (get tokens @cursor))
@@ -50,8 +50,12 @@
                       (= "-" t) {:op :subtract :args [(atom-node (inc depth))]}
                       (= "+" t) (atom-node (inc depth))
                       (functions t) {:op (keyword t) :args (args (inc depth))}
-                      (and t (re-matches #"(?:position\.[xyz]|uv\.[xy])" t))
-                      {:op :coordinate :axis (keyword (subs t (inc (.indexOf ^String t "."))))}
+                      (and t (re-matches #"position\.[xyz]" t))
+                      {:op :coordinate :axis (keyword (subs t 9))}
+                      (and t (re-matches #"world\.[xyz]" t))
+                      {:op :position :axis (keyword (subs t 6))}
+                      (and t (re-matches #"uv\.[xy]" t))
+                      {:op :surface-uv :axis (if (= "uv.x" t) :u :v)}
                       (and t (re-matches #"[A-Za-z_]\w*" t)) {:op :input :key (keyword t)}
                       :else (invalid "Expected a number, input, function or coordinate" offset))))
             (binary [precedence depth]

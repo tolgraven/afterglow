@@ -118,7 +118,11 @@
   (let [compiled
         (mapv
          (fn [index fixture]
-           (let [{:keys [id position universe address channels calibration]} fixture]
+           (let [{:keys [id position surface-uv universe address channels calibration]} fixture]
+             (when (and (some? surface-uv)
+                        (not (and (vector? surface-uv) (= 2 (count surface-uv)) (every? finite? surface-uv))))
+               (fail! "Fixture surface UV must contain two finite coordinates"
+                      {:path [:fixtures index :surface-uv] :fixture-id id}))
              (when (contains? fixture :fogger) (atmosphere/validate-fogger! fixture))
              (when-let [{:keys [path message]} (first (photometry/errors fixture))]
                (fail! message {:path (into [:fixtures index] path) :fixture-id id}))
