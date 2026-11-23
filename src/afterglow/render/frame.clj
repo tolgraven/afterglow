@@ -27,7 +27,7 @@
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
    [:emitted-color :vec3 3] [:intensity :number 1] [:aim :vec3 3] [:direction :vec3 3]])
-(def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4})
+(def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4 :shutter 9})
 
 (defn- packed-number? [value]
   (or (instance? Double value) (instance? Float value) (integer? value)))
@@ -377,6 +377,15 @@
                    :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))))
     assigned))
 
+(defn aim-reachable?
+  "Can the calibrated physical renderer point this head's centre ray at a world
+  point in metres? Fixed fixtures and a target at the lens have no aim solution."
+  [fixture point]
+  (let [origin (:position fixture [0 0 0])]
+    (boolean (and (contains? (:channels fixture) :pan) (contains? (:channels fixture) :tilt)
+                  (vec3? point) (not (every? zero? (map - point origin)))
+                  (:aim-reachable? (resolve-geometry (assoc fixture :position origin) {:aim point} nil nil))))))
+
 (defn- apply-solved-geometry [fixture assigned previous solution source]
   (check-movement-history! fixture previous)
   (with-effect-source source
@@ -424,13 +433,14 @@
 
 (defn- create-compact [patch]
   (let [count (count (:fixtures patch))
-        arrays (object-array (map (fn [[_ _ components]] (double-array (* count components))) compact-specs))
-        masks (object-array (map (fn [_] (boolean-array count)) compact-specs))]
+        fields (cond-> compact-specs (contains? (::attribute-slots patch) :shutter) (conj [:shutter :number 1]))
+        arrays (object-array (map (fn [[_ _ components]] (double-array (* count components))) fields))
+        masks (object-array (map (fn [_] (boolean-array count)) fields))]
     {:arrays arrays :masks masks
      :view {:count count :target-order (:target-order patch)
             :fields (into {} (map-indexed (fn [index [attribute type components]]
                                            [attribute {:type type :components components
-                                                       :values (aget arrays index) :valid (aget masks index)}]) compact-specs))}}))
+                                                       :values (aget arrays index) :valid (aget masks index)}]) fields))}}))
 
 (defn- compact-scalar! [compact field index value]
   (let [^doubles values (aget ^objects (:arrays compact) (int field))
@@ -791,6 +801,27 @@
 
        :else (pack-general-state patch (reduce-assignments patch assignments) options)))))
 
+(defn- compact-view! [compact]
+  (when-not (and (map? compact) (integer? (:count compact)) (not (neg? (:count compact)))
+                 (vector? (:target-order compact)) (map? (:fields compact)))
+    (fail! "Expected a compact frame projection" {}))
+  compact)
+
+(defn- compact-value [^doubles values n index]
+  (if (= n 1)
+    (aget values (int index))
+    (let [offset (int (* index n))]
+      (if (= n 3)
+        [(aget values offset) (aget values (inc offset)) (aget values (+ offset 2))]
+        (mapv #(aget values (+ offset %)) (range n))))))
+
+(defn- compact-row [order fields index]
+  (reduce-kv (fn [row attribute {:keys [components values valid]}]
+               (if (aget ^booleans valid (int index))
+                 (assoc row attribute (compact-value values components index))
+                 row))
+             {:id (nth order index)} fields))
+
 (defn project-compact
   "Project selected stable target indices from a completed compact frame.
   Returns ordinary maps for UI consumers without evaluating effects or packing
@@ -798,20 +829,33 @@
   selection or call at a lower UI rate; omit indices to project every target."
   ([compact] (project-compact compact (range (:count compact))))
   ([compact indices]
-   (when-not (and (map? compact) (integer? (:count compact)) (not (neg? (:count compact)))
-                  (vector? (:target-order compact)) (map? (:fields compact)))
-     (fail! "Expected a compact frame projection" {}))
+   (compact-view! compact)
    (mapv (fn [index]
            (when-not (and (integer? index) (<= 0 index) (< index (:count compact)))
              (fail! "Compact projection target index is out of range" {:index index}))
-           (reduce-kv
-            (fn [result attribute {:keys [components values valid]}]
-              (if (aget ^booleans valid (int index))
-                (assoc result attribute
-                       (if (= components 1) (aget ^doubles values (int index))
-                           (mapv #(aget ^doubles values (+ (* index components) %)) (range components))))
-                result))
-            {:id (nth (:target-order compact) index)} (:fields compact))) indices)))
+           (compact-row (:target-order compact) (:fields compact) index))
+         indices)))
+
+(defn compact-index
+  "Prepare a target-ID index once for frames with this target order."
+  [order]
+  {:order order :indices (zipmap order (range))})
+
+(defn compact-reader
+  "Create an ID -> row reader for attributes in one completed frame. A published
+  row is shared by subsequent lookups, including concurrent requests. Missing
+  targets return nil. Discard the reader when the frame is no longer needed."
+  [{:keys [order indices]} compact attributes]
+  (compact-view! compact)
+  (when-not (or (identical? order (:target-order compact)) (= order (:target-order compact)))
+    (fail! "Rebuild the compact index when the fixture order changes" {}))
+  (let [rows (java.util.concurrent.atomic.AtomicReferenceArray. (int (:count compact)))
+        fields (select-keys (:fields compact) attributes)]
+    (fn [id]
+      (when-some [index (get indices id)]
+        (or (.get rows (int index))
+            (let [row (compact-row order fields index)]
+              (if (.compareAndSet rows (int index) nil row) row (.get rows (int index)))))))))
 
 (def ^:private doubles-class (class (double-array 0)))
 
@@ -874,15 +918,16 @@
    (merge-packed-batches! patch target-values target-present batches nil))
   ([patch ^doubles target-values ^booleans target-present batches ^booleans excluded]
    (let [stride (int (::stride patch))]
-     (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
+     (doseq [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} batches
              {:keys [attribute components values slot]} columns]
        (let [^doubles source values, row-count (count target-ids), components (int components)
              opacity (double opacity)
              high? (and (::hdr? patch) (hdr/light-attributes attribute))]
          (dotimes [row row-count]
            (let [index (long (if target-indices (aget ^ints target-indices row) row))
-                 base (* index stride)]
-             (when-not (and excluded (aget excluded (int index)))
+                 base (* index stride)
+                 opacity (if opacities (aget ^doubles opacities row) opacity)]
+             (when-not (or (and opacities (zero? opacity)) (and excluded (aget excluded (int index))))
                (dotimes [component components]
                  (let [value (aget source (+ (* row components) component))
                        permitted? (and high? (or (not= :dimmer attribute)
@@ -916,12 +961,13 @@
 
 (defn- expand-batch
   ([batch] (expand-batch batch nil))
-  ([{:keys [target-ids columns blend opacity]} selected]
+  ([{:keys [target-ids columns blend opacity ::layers/opacities]} selected]
    (for [row (range (count target-ids))
          :let [id (nth target-ids row)]
-         :when (or (nil? selected) (contains? selected id))
+         :when (and (or (nil? selected) (contains? selected id))
+                    (or (nil? opacities) (pos? (aget ^doubles opacities row))))
          {:keys [attribute components values]} columns]
-     {:target-id id :attribute attribute :blend blend :opacity opacity
+     {:target-id id :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
       :value (if (= 1 components) (aget ^doubles values row)
                  (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
 
@@ -944,7 +990,7 @@
                                (some #(geometric-attributes (:attribute %)) columns))
                          (into targets target-ids) targets)))) #{} blocks))
 
-(defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity]} ^booleans general]
+(defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} ^booleans general]
   ;; A large pixel batch may have only a few geometric targets. Scan the mask
   ;; with a primitive index, retaining only selected row indices. Assignment
   ;; maps remain streamed in row order, including repeated/reordered IDs.
@@ -952,11 +998,12 @@
         rows (loop [row 0, selected (transient [])]
                (if (< row row-count)
                  (recur (inc row)
-                        (if (aget general (int (if target-indices (aget ^ints target-indices row) row)))
+                        (if (and (aget general (int (if target-indices (aget ^ints target-indices row) row)))
+                                 (or (nil? opacities) (pos? (aget ^doubles opacities row))))
                           (conj! selected row) selected))
                  (persistent! selected)))]
     (for [row rows, {:keys [attribute components values]} columns]
-      {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity opacity
+      {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
        :value (if (= 1 components) (aget ^doubles values row)
                   (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
 

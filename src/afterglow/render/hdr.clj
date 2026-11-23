@@ -2,7 +2,7 @@
   "Linear light overdrive and single-bounce spatial highlights before DMX packing."
   (:require [afterglow.render.photometry :as photometry]
             [afterglow.render.hdr.packed :as packed]
-            [clojure.string :as str]
+            [afterglow.render.shutter :as shutter]
             [thi.ng.color.core :as color]))
 
 (def emitters (set (keys photometry/emitter-spectrum)))
@@ -49,11 +49,7 @@
         virtual (when rgb? (into [(->Lane :r 0 [1 0 0] 0) (->Lane :g 1 [0 1 0] 1) (->Lane :b 2 [0 0 1] 2)]
                                  (remove #(#{:red :green :blue :white} (:attribute %))) physical))
         lamp? (and (empty? attrs) (:dimmer channels) (not-any? channels [:fog :haze :fan :relay :pump]))
-        shutters (into [] (keep (fn [attr]
-                                  (let [c (compiled-channels attr)
-                                        ranges (filterv #(and (keyword? (:type %)) (str/includes? (name (:type %)) "closed"))
-                                                        (:functions c))]
-                                    (when (seq ranges) [attr (:inverted-from c) (boolean (:fine c)) ranges])))) [:shutter :strobe])]
+        shutters (shutter/profile compiled-channels)]
     (when (or lamp? (seq attrs))
       (assoc (->Head id i position rgb? (= rgbw-policy :extract-min) (boolean lamp?)
                      (if lamp? [(->Lane :dimmer 3 (or emission-color [1 1 1]) :tint)] physical) virtual shutters)
@@ -112,13 +108,6 @@
                       (dotimes [c 3]
                         (aset incident (+ at c) (min Double/MAX_VALUE (+ (aget incident (+ at c)) (* f (aget excess c))))))))))))
           (recur (inc k)))))))
-
-(defn- gate-open? [head read-value]
-  (every? (fn [[field pivot fine? ranges]]
-            (let [level (* 255.0 (double (read-value field 0.0)))
-                  raw (if (and pivot (>= level (double pivot))) (- 255.0 (- level (double pivot))) level)
-                  coarse (if fine? (long raw) (Math/round (double raw)))]
-              (not-any? #(<= (:start %) coarse (:end %)) ranges))) (:shutters head)))
 
 (defn- receiver-level ^double [receive tint ^doubles incident at]
   (cond
@@ -225,7 +214,7 @@
             (aset gain-frame i g)
             (when (and (pos? peak) (scoped? head))
               (aset whites i (min 1.0 (* source-white-mix peak)))
-              (when (and (or spill? observe?) (gate-open? head read-value))
+              (when (and (or spill? observe?) (shutter/open? (:shutters head) read-value))
                 (let [received (when observe? (volatile! (transient {})))]
                   (scatter! (if observe? @(:listeners layout) layout) head allowed incident excess settings received)
                   (when received

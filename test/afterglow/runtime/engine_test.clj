@@ -304,3 +304,18 @@
                (mapv #(get-in % [:assignments 0 :value]) [first-frame second-frame changed reloaded])))
         (is (= 2 (get-in reloaded [:assignments 0 :version])))
         (is (= [:effect/reloaded] (mapv :type (:intents reloaded))))))))
+
+(deftest a-host-can-hold-a-native-scope-until-its-private-release-deadline
+  (let [live (instance :gate :duration-ms 100 :release-duration-ms 50
+                       :system {:clock-offset-ms 20 :clock-offset-beats 0})
+        show (model live)
+        sample #(engine/instance-lifecycle show {:time-ms % :beat 0} live)]
+    (is (= :running (get-in (sample 119) [:instance :phase])))
+    (is (= :releasing (get-in (sample 125) [:instance :phase])))
+    (is (== 100 (get-in (sample 125) [:instance :release-at-ms])))
+    (is (false? (:expired? (sample 169))))
+    (is (:expired? (sample 170)))
+    (let [held (update live :system assoc :paused? true :paused-clock {:time-ms 90 :beat 0})
+          frozen (engine/instance-lifecycle show {:time-ms 500 :beat 0} held)]
+      (is (= :running (get-in frozen [:instance :phase])))
+      (is (false? (:expired? frozen))))))

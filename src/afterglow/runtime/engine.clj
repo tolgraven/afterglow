@@ -171,12 +171,21 @@
                                    (filterv (set authored) targets)
                                    targets))))
 
-(defn- prepare-instance
-  [model global-clock snapshot instance]
+(defn instance-lifecycle
+  "Read a live instance at this frame's private clock, before running its step.
+  Includes compatible reloads, the exact release boundary and positive envelope
+  tails. Hosts can scope owned resources to precisely the frames that render."
+  [model global-clock instance]
   (let [paused? (true? (get-in instance [:system :paused?]))
         clock (system/private-clock instance global-clock)
         [reloaded intents] (if paused? [instance []] (reload-instance (:registry model) clock instance))
-        prepared (if paused? reloaded (release-if-expired model clock reloaded))
+        prepared (if paused? reloaded (release-if-expired model clock reloaded))]
+    {:instance prepared :intents intents :clock clock :paused? paused?
+     :expired? (and (not paused?) (release-finished? clock prepared))}))
+
+(defn- prepare-instance
+  [model global-clock snapshot instance]
+  (let [{prepared :instance :keys [clock paused?] :as lifecycle} (instance-lifecycle model global-clock instance)
         input-state (if paused? (get-in prepared [:system :last-input-state] (:state prepared)) (:state prepared))
         delta (if paused? (get-in prepared [:system :last-delta-ms] 0)
                   (max 0 (- (:time-ms clock) (get-in prepared [:system :last-clock :time-ms]
@@ -189,9 +198,8 @@
                      (assoc-in [:system :last-delta-ms] delta)
                      (assoc-in [:system :last-frame-number] number))]
     (validate-instance! (:id prepared) prepared)
-    {:instance prepared :program (render-definition prepared) :intents intents :clock clock :paused? paused?
-     :input-state input-state :delta-ms delta :number number
-     :expired? (and (not paused?) (release-finished? clock prepared))}))
+    (assoc lifecycle :instance prepared :program (render-definition prepared)
+           :input-state input-state :delta-ms delta :number number)))
 
 (defn- with-opacity [result opacity]
   (cond
