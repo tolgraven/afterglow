@@ -1,6 +1,7 @@
 ## Change
 
 Describe what a show operator or API caller can do after this change.
+Link the [tracked issue](https://github.com/tolgraven/tolglow/issues) as `tolgraven/tolglow#<number>` so the cross-repository reference resolves.
 
 ## Visual evidence
 
