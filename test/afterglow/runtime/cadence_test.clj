@@ -131,4 +131,21 @@
     (is (= 6 (:minimum-useful-stride recovering)))
     (is (= 1 (get-in recovering [:effects :capped :stride])))
     (is (= 2 (:minimum-useful-stride (tick recovering nil))) "Unscheduled REPL renders do not inherit physical gaps")
-    (is (= 2 (:minimum-useful-stride (tick recovering 1))) "A restarted clock discards the old slot gap")))
+    (is (= 2 (:minimum-useful-stride (tick recovering 1))) "A restarted clock discards the old slot gap")
+    (doseq [bad [-1 1.5 :first]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"output slot" (tick stalled bad))))))
+
+(deftest alternating-short-and-long-renders-count-both-producer-gaps
+  (let [frame {:epoch 1 :versions {:long 1 :short 1}
+               :samples {:long (cost 10 true) :short (cost 12 true)}
+               :max-strides {:short 4} :elapsed-ms 110 :period-ms 25}
+        config (cadence/settings {:max-stride 16 :pressure-frames 1})
+        tick (fn [state slot] (cadence/advance state (assoc frame :output-slot slot) config))
+        steady (reduce tick nil [0 1 9 10 18 19 27])
+        normal (-> steady (tick 28) (tick 29))]
+    (is (= 9 (:minimum-useful-stride steady)))
+    (is (= 1 (get-in steady [:effects :short :stride])))
+    (is (<= 9 (get-in steady [:effects :long :stride]) 16))
+    (is (= 2 (:minimum-useful-stride normal)))
+    (is (> (get-in normal [:effects :short :stride]) 1))
+    (is (= 2 (:minimum-useful-stride (cadence/advance steady (assoc frame :epoch 2 :output-slot 128) config))))))

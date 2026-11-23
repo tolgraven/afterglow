@@ -31,6 +31,18 @@ can restore one interval by a factor of two when its expected cost fits the
 remaining budget. Smoothed duration and missed-frame frequency govern the two
 windows. Epoch and definition changes reset their corresponding histories.
 
+A physical host can include the nominal deadline index in `:output-slot`.
+At 40 Hz, rendering slots 20, 25 and 31 means the last two renders advanced
+the show by 11 slots (275 ms). A 50 ms forecast would already have expired
+by the next render. Reopening it can cost two effect calls, one at the
+current time and one in the future. The policy therefore asks for an
+automatic interval long enough to cover the last two observed gaps. An
+effect whose musical ceiling or global limit is shorter keeps its ordinary
+sampling. Direct, discrete cues and authored tween intervals keep their
+existing behavior. The two-gap window advances on each completed render,
+so a single long gap drops out after two subsequent gaps. During startup,
+after a clock restart and for unscheduled renders the minimum is two slots.
+
 A host may set `:defer-live-slowdown?` on the frame timing input while it is
 reducing the keyframe rate of mounted presentation surfaces. Measurements and
 recovery continue through this interval. Once the visual sampler reaches its

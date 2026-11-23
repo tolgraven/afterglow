@@ -68,8 +68,8 @@
         {:keys [previous-sample-ms last-sample-ms predictive?] :as updated}
         (cond-> prior sample (record-sample sample smoothing frame))
         cheap? (and previous-sample-ms (< (max previous-sample-ms last-sample-ms) min-cost-ms))
-        stride (min (:stride updated) limit)
-        stride (if (or cheap? (false? predictive?) (< stride minimum)) 1 stride)]
+        bounded (min (:stride updated) limit)
+        stride (if (or cheap? (false? predictive?) (< bounded minimum)) 1 bounded)]
     (cond-> (assoc updated :max-stride limit :stride stride)
       (< stride (:stride updated)) (assoc :changed-at frame))))
 
@@ -83,7 +83,8 @@
        ffirst))
 
 (defn- faster-stride [stride minimum]
-  (let [next (quot stride 2)] (if (< next minimum) 1 next)))
+  (let [halved (quot stride 2)]
+    (if (< halved minimum) 1 halved)))
 
 (defn- recovery-candidate [entries minimum free-ms]
   (->> entries
@@ -98,7 +99,8 @@
 (defn advance
   "Fold a completed frame into the release policy. :versions maps active instance
   IDs to their definition identities/versions. Optional :max-strides maps active
-  IDs to individual whole-frame limits. Epoch changes start a fresh history.
+  IDs to individual whole-frame limits. Optional :output-slot is the index
+  of the physical deadline rendered. Epoch changes start a fresh history.
   :samples comes from observer, :period-ms is the actual output period and
   :elapsed-ms includes complete host work. Only eligible expensive effects slow
   down. Each pressure window can slow one effect. Two real cheap samples
@@ -109,6 +111,8 @@
     (throw (ex-info "Frame timings require a positive period and nonnegative elapsed time" {})))
   (when-not (or (nil? max-strides) (and (map? max-strides) (every? pos-int? (vals max-strides))))
     (throw (ex-info "Per-effect maximum strides must be positive frame counts" {:max-strides max-strides})))
+  (when-not (or (nil? output-slot) (nat-int? output-slot))
+    (throw (ex-info "Physical output slot must be a nonnegative integer" {:output-slot output-slot})))
   (let [{:keys [smoothing headroom pressure-frames recovery-frames max-stride]} config
         prior (when (= epoch (:epoch previous)) previous)
         ;; A producer which regularly skips physical slots can overshoot its
@@ -117,7 +121,7 @@
         ;; spending those calls, after two consecutive observed gaps.
         gap (when (and output-slot (:output-slot prior) (> output-slot (:output-slot prior)))
               (- output-slot (:output-slot prior)))
-        minimum (if (and gap (:slot-gap prior)) (* 2 (min gap (:slot-gap prior))) 2)
+        minimum (if (and gap (:slot-gap prior)) (+ gap (:slot-gap prior)) 2)
         frame (inc (:frame prior 0))
         entries (reduce-kv (fn [m id version]
                              (assoc m id (update-entry (get-in prior [:effects id]) version
