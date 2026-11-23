@@ -2,6 +2,7 @@
   (:require [afterglow.render.distributed :as pool]
             [afterglow.render.distributed-test :as rt]
             [afterglow.render.ir :as ir]
+            [afterglow.render.verified :as verified]
             [clojure.test :refer [deftest is]]))
 
 (deftest guest-never-writes-an-unchecked-channel
@@ -51,3 +52,11 @@
       (is (not (pool/connected? owner b)))
       (is (= (mapv first rt/points) (vec (get-in (run) [:outputs :dimmer :values]))) "Single remaining peer uses full verification")
       (finally (pool/close! owner)))))
+
+
+(deftest equal-witnesses-are-still-checked-against-unpredictable-cpu-rows
+  (let [group (rt/group) job {:start 2 :count 4}
+        actual (rt/result-bytes [2 3 4 5]) colluding (rt/result-bytes [2 3 4 6])]
+    (is (verified/agree? group {} job actual actual))
+    (is (not (verified/agree? group {} job colluding colluding)))
+    (is (not (verified/agree? group {} job actual colluding)))))
