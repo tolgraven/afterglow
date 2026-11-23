@@ -187,40 +187,59 @@
     :batch (some geometry (keys (:outputs batch)))
     :assignments (some (comp geometry :attribute) assignments)))
 
-(defn- geometry-rows [{:keys [kind assignments batch]}]
-  (case kind
-    :batch (batch-rows (update batch :outputs select-keys geometry))
-    :assignments (filter (comp geometry :attribute) assignments)))
-
 (defn- can-overshoot? [curve]
   (let [shape (if (map? curve) (:type curve) curve)]
     (or (= shape :spring)
         (and (= shape :cubic-bezier)
              (some #(not (<= 0 % 1)) (map (:points curve) [1 3]))))))
 
-(defn- check-chord! [overshoot? positions left right]
-  (let [position (if (= :aim (:attribute left)) (positions (:target-id left) [0 0 0]) [0 0 0])
-        from (mapv - (:value left) position)
-        to (mapv - (:value right) position)
-        dot (fn [a b] (reduce + (map * a b)))
-        m (Math/sqrt (double (dot from from)))
-        n (Math/sqrt (double (dot to to)))]
+(defn- check-chord! [overshoot? ax ay az bx by bz]
+  (let [ax (double ax) ay (double ay) az (double az)
+        bx (double bx) by (double by) bz (double bz)
+        m (Math/sqrt (+ (* ax ax) (* ay ay) (* az az)))
+        n (Math/sqrt (+ (* bx bx) (* by by) (* bz bz)))]
     (when-not (and (Double/isFinite m) (Double/isFinite n) (pos? m) (pos? n))
       (invalid! "Aim or direction reaches zero distance"))
-    (let [cosine (dot (map #(/ % m) from) (map #(/ % n) to))]
-      ;; If the chord passes through the fixture, interpolation loses the
-      ;; direction even though the actual sampler may follow a curved path.
+    (let [cosine (+ (* (/ ax m) (/ bx n)) (* (/ ay m) (/ by n)) (* (/ az m) (/ bz n)))]
+      ;; Interpolating through the emitter loses the direction of the real curve.
       (when (or (< cosine -0.999999999999)
                 (and overshoot? (> cosine 0.999999999999) (not (== m n))))
         (invalid! "Use live movement samples along a singular aim or direction chord")))))
+
+(defn- position-for [positions attribute target-id]
+  (if (= :aim attribute) (get positions target-id [0 0 0]) [0 0 0]))
+
+(defn- check-assignments! [overshoot? positions left right]
+  (doseq [[a b] (map vector left right)
+          :let [attr (:attribute a)]
+          :when (geometry attr)]
+    (let [[x y z] (position-for positions attr (:target-id a))
+          [ax ay az] (:value a) [bx by bz] (:value b)]
+      (check-chord! overshoot? (- ax x) (- ay y) (- az z) (- bx x) (- by y) (- bz z)))))
+
+(defn- check-batch! [overshoot? positions left right]
+  (doseq [attr geometry
+          :let [^doubles from (get-in left [:outputs attr :values])]
+          :when from]
+    (let [^doubles to (get-in right [:outputs attr :values])
+          ids (:target-ids left)]
+      (dotimes [i (count ids)]
+        (let [[x y z] (position-for positions attr (nth ids i))
+              x (double x) y (double y) z (double z)
+              ix (* 3 i) iy (inc ix) iz (inc iy)]
+          (check-chord! overshoot?
+                        (- (aget from ix) x) (- (aget from iy) y) (- (aget from iz) z)
+                        (- (aget to ix) x) (- (aget to iy) y) (- (aget to iz) z)))))))
 
 (defn endpoints [origin target fixtures curve]
   (let [[origin target :as aligned] (align-endpoints origin target)]
     (when (some geometry-block? origin)
       (let [positions (into {} (map (juxt :id #(or (:position %) [0 0 0]))) fixtures)
-            pairs (map vector (mapcat geometry-rows origin) (mapcat geometry-rows target))
             overshoot? (can-overshoot? curve)]
-        (doseq [[left right] pairs] (check-chord! overshoot? positions left right))))
+        (doseq [[left right] (map vector origin target)]
+          (case (:kind left)
+            :batch (check-batch! overshoot? positions (:batch left) (:batch right))
+            :assignments (check-assignments! overshoot? positions (:assignments left) (:assignments right))))))
     aligned))
 
 (defn read-values [blocks target attribute]
