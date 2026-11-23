@@ -1,10 +1,15 @@
 (ns afterglow.render.distributed
   "A bounded pool of paired remote numerical workers. Jobs return typed fields
   for one current frame. Only the caller owns fixture packing and output."
-  (:require [afterglow.render.ir :as ir])
+  (:require [afterglow.render.ir :as ir]
+            [afterglow.render.verified :as verified])
   (:import [java.nio ByteBuffer ByteOrder]
            [java.util UUID]
            [java.util.concurrent CompletableFuture TimeUnit TimeoutException]))
+
+(def verification-policies
+  "Host capabilities for separately authenticated guest admission."
+  #{:full :redundant})
 
 (def ^:private max-heads 262144)
 (def ^:private max-floats 1048576)
@@ -66,13 +71,17 @@
 
 (defn connect! [pool caps send!]
   (let [capacity (:max-result-floats caps)]
-    (when-not (and (pos-int? capacity) (fn? send!))
+    (when-not (and (pos-int? capacity) (fn? send!)
+                   (or (nil? (:verification caps)) (contains? verification-policies (:verification caps)))
+                   (or (not= :redundant (:verification caps))
+                       (and (string? (:subject caps)) (<= 1 (count (:subject caps)) 128))))
       (throw (ex-info "Missing worker capability or transport" {})))
     (locking (:lock pool)
       (when (or (:closed? @(:state pool)) (>= (count @(:peers pool)) max-peers))
         (throw (ex-info "Render pool is closed or full" {})))
       (let [id (token)]
-        (swap! (:peers pool) assoc id {:send! send! :capacity (min max-floats capacity) :ready []})
+        (swap! (:peers pool) assoc id {:send! send! :capacity (min max-floats capacity) :ready []
+                                      :verification (:verification caps) :subject (:subject caps)})
         id))))
 
 (defn disconnect! [pool id]
@@ -125,6 +134,21 @@
                       [name (mapv finite-float values)]))]
     (into (into {} (map clock) (dissoc inputs :position :surface-uv)) (map parameter) uniforms)))
 
+(defn- lanes [warm]
+  (let [paired? #(= :redundant (:verification (val %)))
+        singles (mapv vector (remove paired? warm))
+        ;; A session with no independent witness goes through the full CPU check.
+        pair (fn [[a b]] (if (and b (not= (:subject (val a)) (:subject (val b))))
+                           [[a b]] (cond-> [[a]] b (conj [b]))))]
+    (into singles (mapcat pair) (partition-all 2 (filter paired? warm)))))
+
+(defn- assign! [pool workers offset n stride]
+  (mapv (fn [[id peer]]
+          (let [job {:id (token) :peer id :send! (:send! peer) :done (CompletableFuture.)
+                     :verification (:verification peer) :start offset :count n :floats (* stride n)}]
+            (swap! (:peers pool) assoc-in [id :job] job)
+            job)) workers))
+
 (defn- lease [pool group]
   (let [{program :id :keys [plan] :as setup} (:packet group)
         n (:count group) stride (:stride plan)]
@@ -136,20 +160,19 @@
             preps (mapv (fn [[id peer]]
                           (swap! (:peers pool) assoc-in [id :preparing] program)
                           [id (:send! peer) setup]) cold)
-            capacities (mapv #(quot (:capacity (val %)) stride) warm)]
+            groups (lanes warm)
+            capacities (mapv (fn [lane] (quot (reduce min (map #(:capacity (val %)) lane)) stride)) groups)]
         {:preps preps
          :jobs (when (<= n (reduce + 0 capacities))
                  (loop [remaining n offset 0 index 0 jobs []]
                    (if (zero? remaining) jobs
-                     (let [[id peer] (warm index)
-                           equally (long (Math/ceil (/ (double remaining) (- (count warm) index))))
+                     (let [lane (groups index)
+                           equally (long (Math/ceil (/ (double remaining) (- (count groups) index))))
                            needed (- remaining (reduce + 0 (subvec capacities (inc index))))
                            cnt (min remaining (capacities index) (max equally needed))]
                        (if (zero? cnt) (recur remaining offset (inc index) jobs)
-                         (let [job {:id (token) :peer id :send! (:send! peer) :done (CompletableFuture.)
-                                    :start offset :count cnt :floats (* stride cnt)}]
-                           (swap! (:peers pool) assoc-in [id :job] job)
-                           (recur (- remaining cnt) (+ offset cnt) (inc index) (conj jobs job))))))))}))))
+                         (recur (- remaining cnt) (+ offset cnt) (inc index)
+                                (into jobs (assign! pool lane offset cnt stride))))))))}))))
 
 (defn- send-packet! [pool peer send! packet]
   (try (send! packet)
@@ -170,15 +193,33 @@
                                 [attribute {:type type :components components :values (double-array (* n components))}]))
                       (:outputs plan))]
     (doseq [[{:keys [start count]} chunk] (map vector jobs chunks)]
-      (let [floats (.asFloatBuffer (buffer chunk))]
-        (dotimes [i count]
-          (doseq [{:keys [attribute components]} (:outputs plan)]
-            (let [^doubles target (:values (outputs attribute)) dest (* (+ start i) components)]
-              (dotimes [j components]
-                (let [v (.get floats)]
-                  (when-not (Float/isFinite v) (throw (ex-info "Nonfinite remote output" {:attribute attribute})))
-                  (aset-double target (+ dest j) (double v)))))))))
+      (if (map? chunk)
+        (doseq [[attribute {:keys [components values]}] (:outputs chunk)]
+          (System/arraycopy values 0 (get-in outputs [attribute :values]) (int (* start components)) (alength ^doubles values)))
+        (let [floats (.asFloatBuffer (buffer chunk))]
+          (dotimes [i count]
+            (doseq [{:keys [attribute components]} (:outputs plan)]
+              (let [^doubles target (:values (outputs attribute)) dest (* (+ start i) components)]
+                (dotimes [j components]
+                  (let [v (.get floats)]
+                    (when-not (Float/isFinite v) (throw (ex-info "Nonfinite remote output" {:attribute attribute})))
+                    (aset-double target (+ dest j) (double v))))))))))
     {:count n :outputs outputs}))
+
+(defn- reject-peer! [pool job]
+  (swap! (:state pool) update :rejected inc)
+  (disconnect! pool (:peer job))
+  nil)
+
+(defn- checked-slices [pool group env jobs chunks]
+  (let [verify (fn [[job data]] (or (verified/readback group env job data) (reject-peer! pool job)))
+        check (fn [[[job a :as first-copy] [_ b] :as copies]]
+                [job (cond
+                       (nil? (:verification job)) a
+                       (nil? b) (verify first-copy)
+                       (verified/agree? group env job a b) a
+                       :else (do (doseq [copy copies] (verify copy)) nil))])]
+    (mapv check (partition-by (comp :start first) (map vector jobs chunks)))))
 
 (defn evaluate!
   "Return the joined field batch within the frame deadline, or nil for local evaluation.
@@ -194,7 +235,10 @@
           (doseq [{:keys [peer send! start count] job :id} jobs]
             (send-packet! pool peer send! {:op :run :id id :job job :uniforms values :start start :count count}))
           (let [chunks (collect jobs deadline)
-                batch (when (every? some? chunks) (unpack plan (:count group) jobs chunks))]
+                checked (when (and (< (System/nanoTime) deadline) (every? some? chunks))
+                          (checked-slices pool group env jobs chunks))
+                batch (when (and checked (every? second checked))
+                        (unpack plan (:count group) (map first checked) (map second checked)))]
             (if (and batch (< (System/nanoTime) deadline))
               (do (swap! (:state pool) update :completed inc) batch)
               (do (swap! (:state pool) update :missed inc) nil)))
