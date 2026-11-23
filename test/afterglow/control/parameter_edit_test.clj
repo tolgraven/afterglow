@@ -84,3 +84,22 @@
 (deftest explicitly-unbounded-velocity-uses-normalized-range
   (is (= {:level 0.5}
          (edit/velocity-values {:params {:level {:type :number :bounds nil :default 0 :velocity true}}} 0.5))))
+
+(deftest bounded-colors-remain-adjustable-with-encoders-touch-and-grid
+  (doseq [[lo hi] [[0.0 0.5] [0.2 0.7] [0.4 0.4]]]
+    (let [schema {:type :color :bounds [lo hi] :default [hi lo lo]}
+          value (:default schema)]
+      (is (= value (edit/edit schema value 2 {:component 2})))
+      (doseq [x (range 8) y (range 8)]
+        (is (params/valid-value? schema (edit/color-grid-value schema x y))))
+      (doseq [v [0.0 0.5 1.0]]
+        (let [rgb (edit/edit schema value v {:mode :absolute :component 2})]
+          (is (params/valid-value? schema rgb))
+          (when (< lo hi)
+            (is (< (abs (- v (edit/position schema rgb {:component 2}))) 1e-8))))))))
+
+(deftest explicitly-unbounded-colors-use-the-full-control-range
+  (let [schema {:type :color :bounds nil :default [1 0 0]}]
+    (is (= [0.5 0.0 0.0] (edit/edit schema [1 0 0] 0.5 {:mode :absolute :component 2})))
+    (is (== 1 (edit/position schema [1 0 0] {:component 2})))
+    (is (= (edit/color-grid-value 3 4) (edit/color-grid-value schema 3 4)))))
