@@ -2,7 +2,8 @@
   "Interpolate uncomposited effect outputs. Arrays are read-only endpoints.
   Each interpolated numeric column has its own storage."
   (:require [afterglow.render.photometry :as photometry]
-            [afterglow.runtime :as runtime]))
+            [afterglow.runtime :as runtime]
+            [afterglow.time :as time]))
 
 (def emitters (into #{:dimmer :color} (keys photometry/emitter-spectrum)))
 (def geometry #{:aim :direction})
@@ -10,25 +11,67 @@
 
 (defn- invalid! [reason] (throw (ex-info reason {:type ::invalid-sampler})))
 
-(defn blocks [context result]
-  (when-not (and (= (:state context) (:state result)) (= [] (:intents result))
-                 (false? (:done? result)) (vector? (:assignments result)))
-    (invalid! "A predictive sampler must only produce continuous native outputs"))
-  (let [blocks (:contributions (runtime/append-contributions result []))]
-    (doseq [{:keys [kind assignments batch]} blocks]
-      (case kind
-        :assignments (when-not (every? (comp continuous :attribute) assignments)
-                       (invalid! "Discrete effects must run on the live clock"))
-        :batch (when-not (and (nil? (:field-request batch)) (seq (:outputs batch))
-                              (every? continuous (keys (:outputs batch))))
-                 (invalid! "Predictive batches need evaluated continuous fields"))))
-    blocks))
-
 (defn- bounds [attr hdr?]
   (cond
     (or (geometry attr) (= :beat-ratio attr)) [Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY]
     (and hdr? (emitters attr)) [0.0 Double/POSITIVE_INFINITY]
     :else [0.0 1.0]))
+
+(defn- valid-value? [attr value hdr?]
+  (let [[lo hi] (bounds attr hdr?)
+        valid? (fn [x] (and (time/finite-number? x) (<= lo x hi)))]
+    (if (or (= attr :color) (geometry attr))
+      (and (vector? value) (= 3 (count value)) (every? valid? value))
+      (valid? value))))
+
+(defn- valid-column? [attr ^doubles xs hdr?]
+  (let [[lo hi] (bounds attr hdr?) lo (double lo) hi (double hi)]
+    (loop [i 0]
+      (or (= i (alength xs))
+          (let [x (aget xs i)]
+            (and (Double/isFinite x) (<= lo x hi) (recur (inc i))))))))
+
+(defn- valid-opacity? [x]
+  (or (nil? x) (and (time/finite-number? x) (<= 0 x 1))))
+
+(defn- only-keys? [allowed data] (and (map? data) (every? allowed (keys data))))
+
+(defn- validate-block! [hdr? {:keys [kind assignments batch] :as block}]
+  (let [target-id? #(or (keyword? %) (string? %))
+        blends #{:replace :add :max}
+        valid-row? (fn [{:keys [target-id attribute value blend opacity] :as row}]
+                     (and (only-keys? #{:target-id :attribute :value :blend :opacity} row)
+                          (target-id? target-id) (continuous attribute) (valid-opacity? opacity)
+                          (or (nil? blend) (and (blends blend) (or (not (geometry attribute)) (= blend :replace)))) (valid-value? attribute value hdr?)))]
+    (case kind
+      :assignments (when-not (and (= #{:kind :assignments} (set (keys block)))
+                                  (vector? assignments) (every? valid-row? assignments)) (invalid! "Invalid predictive endpoint"))
+      :batch (let [{:keys [target-ids count outputs blend]} batch n (clojure.core/count target-ids)]
+               (when-not (and (= #{:kind :batch} (set (keys block)))
+                              (only-keys? #{:target-ids :outputs :count :blend :opacity} batch) (valid-opacity? (:opacity batch))
+                              (vector? target-ids) (every? target-id? target-ids)
+                              (or (nil? count) (= count n)) (map? outputs) (seq outputs)
+                              (or (nil? blend) (blends blend))
+                              (every? (fn [[attr {:keys [components type values] :as field}]]
+                                        (let [vec3? (or (= attr :color) (geometry attr))]
+                                          (and (only-keys? #{:type :values :components} field) (continuous attr) (= components (if vec3? 3 1))
+                                               (= type (if vec3? :vec3 :number)) (instance? double/1 values)
+                                               (= (alength ^doubles values) (* n components))
+                                               (valid-column? attr values hdr?))))
+                                      outputs))
+                 (invalid! "Invalid predictive endpoint")))
+      (invalid! "Invalid predictive endpoint"))))
+
+(defn validate-blocks! [blocks hdr?]
+  (when-not (vector? blocks) (invalid! "Expected ordered predictive blocks"))
+  (run! (partial validate-block! hdr?) blocks)
+  blocks)
+
+(defn blocks [context result]
+  (when-not (and (= (:state context) (:state result)) (= [] (:intents result))
+                 (false? (:done? result)) (vector? (:assignments result)))
+    (invalid! "A predictive sampler must only produce continuous native outputs"))
+  (validate-blocks! (:contributions (runtime/append-contributions result [])) (get-in context [:frame :hdr?])))
 
 (defn- scalar [a b t lo hi]
   (let [v (+ (double a) (* (double t) (- (double b) (double a))))]

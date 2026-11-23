@@ -147,3 +147,23 @@
     (is (< (abs (- (/ 0.15 8) (get-in progress [:assignments 0 :value]))) 1.0e-15))
     (is (== (/ 0.9 8) (get-in late [:assignments 0 :value])))
     (is (== 550 (get-in late [:keyframes "0:1" :end])))))
+
+(deftest invalid-future-columns-fall-back-through-the-current-frame
+  (let [compile (constantly (kf/predictable
+                             (fn [ctx]
+                               (let [ctx (typed-step ctx)]
+                                 (if (< (get-in ctx [:frame :beat]) 1) ctx
+                                   (assoc-in ctx [:contributions 0 :batch :outputs :dimmer :values]
+                                             (double-array [Double/NaN 0.0])))))))
+        result (advance (show {:interval {:beats 1}}) nil compile 0)]
+    (is (true? (get-in result [:keyframes "0:1" :forecast-failed?])))
+    (is (= [0.0] (:result (kf/inspect (get-in result [:keyframes "0:1"]) :one :dimmer))))))
+
+(deftest snapshot-checks-the-native-range-before-committing
+  (let [result (advance (show {:interval {:beats 1}}) nil (constantly (kf/predictable typed-step)) 0)
+        window (get-in result [:keyframes "0:1"])
+        path [:origin 0 :batch :outputs :dimmer :values]
+        checkpoint #(storage/freeze (assoc-in window path (double-array [% 0.0])))]
+    (doseq [value [-0.5 1.5 Double/NaN Double/POSITIVE_INFINITY]]
+      (is (thrown? clojure.lang.ExceptionInfo (storage/restore (checkpoint value) [] 0))))
+    (is (some? (storage/restore (assoc-in (checkpoint 1.5) [:inputs 5] true) [] 0)))))
