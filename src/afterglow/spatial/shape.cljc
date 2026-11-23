@@ -3,6 +3,8 @@
   A negative distance is inside. Boolean combinations use min/max distance fields."
   (:require #?(:clj [clojure.math :as math] :cljs [cljs.math :as math])))
 
+(def ^:private unit-stretch [1.0 1.0 1.0])
+
 (defn- box [lo hi] {:min lo :max hi})
 (defn- centered-box [p half] (box (mapv - p half) (mapv + p half)))
 (defn- centered-radius [p radius] (centered-box p [radius radius radius]))
@@ -57,6 +59,8 @@
       :difference {:inside? (fn [p] (and ((first contains-point?) p) (not-any? #(% p) (rest contains-point?))))
                    :distance (extrema max (into [(first distances)] (map #(comp - %)) (rest distances)))
                    :bounds (first boxes)})
+           :falloff-stretch (reduce (fn [a child] (mapv max a (:falloff-stretch child unit-stretch))) unit-stretch
+                                    (if (= op :difference) (take 1 children) children))
            :witnesses (let [children (if (= op :difference) (take 1 children) children)
                             ws (vec (mapcat :witnesses children))
                             n (count ws)]
@@ -77,17 +81,21 @@
       {:forward (fn [p] (mapv (fn [x k t] (+ (* x k) t)) p s offset))
        :inverse (fn [p] (mapv (fn [x k t] (/ (- x t) k)) p s offset))
        :inverse-delta (fn [d] (mapv / d s))
-       :min-scale (reduce min s)})))
+       :scale s :min-scale (reduce min s)})))
 
 (defn- transformed [{:keys [distance inside? bounds witnesses] :as plan} transform]
   (if-not transform plan
-    (let [{:keys [forward inverse min-scale]} transform
+    (let [{:keys [forward inverse min-scale scale]} transform
           move-witness (fn [w]
                          (if (map? w)
                            (-> w (update :center forward) (update :radius * min-scale))
                            (forward w)))]
       {:inside? (comp inside? inverse)
        :distance (fn [p] (* min-scale (distance (inverse p))))
+       ;; Distances scale by the smallest axis. A one-metre level set in
+       ;; this distance field can therefore extend farther along a long axis.
+       :falloff-stretch (mapv (fn [prior k] (* prior (/ k min-scale)))
+                              (:falloff-stretch plan unit-stretch) scale)
        :bounds (when bounds (update-vals bounds forward))
        :witnesses (mapv move-witness witnesses)})))
 

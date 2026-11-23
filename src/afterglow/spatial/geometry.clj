@@ -1,7 +1,9 @@
 (ns afterglow.spatial.geometry
   "Portable venue shapes in metres. The X index prunes sphere and box queries
   before testing the full shape. A rig's prepared index stays outside show files."
-  (:require [afterglow.spatial.shape :as field-shape]
+  (:require [afterglow.render.photometry :as photometry]
+            [afterglow.render.shutter :as shutter]
+            [afterglow.spatial.shape :as field-shape]
             [afterglow.time :as time]))
 
 (defn vec3? [v] (and (vector? v) (= 3 (count v)) (every? time/finite-number? v)))
@@ -54,6 +56,15 @@
 
 (defrecord Rig [ids rows xs directional])
 
+(def ^:private visible-emitters
+  (into #{} (keep (fn [[attr [response _]]] (when (pos? response) attr))) photometry/emitter-spectrum))
+
+(defn- optical-fixture [{:keys [channels beam-angle direction] :as fixture}]
+  (when (or beam-angle direction (:pan channels) (:tilt channels) (:dimmer channels)
+            (some visible-emitters (keys channels)))
+    (cond-> fixture
+      (or (:shutter channels) (:strobe channels)) (assoc ::shutters (shutter/profile channels)))))
+
 (defn prepare-rig [fixtures]
   (if (instance? Rig fixtures) fixtures
     (let [rows (->> fixtures
@@ -62,10 +73,8 @@
                              (invalid! "Spatial fixture needs an ID and a finite position" [id position]))
                            [id position]))
                     (sort-by (comp first second)) vec)]
-      (let [directional? (fn [{:keys [beam-angle channels direction]}]
-                           (or beam-angle direction (:pan channels) (:tilt channels) (:red channels) (:white channels) (:dimmer channels)))]
-        (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))
-               (filterv directional? fixtures))))))
+      (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))
+             (into [] (keep optical-fixture) fixtures)))))
 
 (defn- lower-bound [^doubles xs x]
   (loop [lo 0 hi (alength xs)]

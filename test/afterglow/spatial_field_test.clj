@@ -1,5 +1,6 @@
 (ns afterglow.spatial-field-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [afterglow.render.frame :as frame]
+            [clojure.test :refer [deftest is]]
             [afterglow.spatial :as spatial]
             [afterglow.spatial.field :as field]))
 
@@ -86,3 +87,51 @@
     (is (pos? (weight {})))
     (is (nil? (weight {:range-m 1})))
     (is (nil? (weight {:surfaces [{:id :wall :point [0 0 2] :normal [0 0 1]}]})))))
+
+(deftest scaled-feather-bounds-contain-every-positive-sampled-distance
+  (let [sphere {:shape :sphere :position [0 0 0] :radius 1 :scale [3 1 1]}
+        outer {:falloff {:outer-m 1.0} :selection #{:position :beam}}
+        nested {:shape :union :parts [sphere] :scale [2 1 1]}
+        ray {:id :ray :position [4.5 0 -2] :direction [0 0 1] :beam-angle 0.01 :channels {:red 1}}
+        fixture {:id :inside-feather :position [4.5 0 0]}
+        pair [fixture ray]]
+    (doseq [[where volume] [[[4.5 0 0] sphere] [[9 0 0] nested]
+                            [[9 1 0] {:shape :ball :position [0 1 0] :radius 0.1 :geometry nested}]]]
+      (let [v (merge volume outer)
+            {weight :weight-at} (field/prepare v)]
+        (is (= 0.5 (weight where)))
+        (is (= {:inside-feather 0.5} (:weights (field/positions v [(assoc fixture :position where)]))))))
+    (let [v (merge sphere outer)
+          result (field/sample v pair {:values {:ray {:emitted-color [1.0 0 0] :direction [0 0 1]}}})]
+      (is (pos? (get-in result [:weights :ray] 0.0))))))
+
+(deftest all-visible-native-emitter-channels-support-default-beam-selection
+  (let [housing {:id :lamp :position [0 0 0] :universe 0 :address 1}
+        volume {:shape :sphere :position [0 0 2] :radius 0.2 :selection #{:beam}}]
+    (doseq [attr [:green :blue :white :amber :warm-white :cold-white :cool-white :cyan :lime]]
+      (let [fixture (assoc housing :channels {attr 1})
+            output (frame/resolve-frame [fixture] [{:target-id :lamp :attribute attr :value 1.0}])]
+        (is (pos? (get-in (field/sample volume [fixture] output) [:weights :lamp] 0)) (name attr))))
+    (is (empty? (:directional (spatial/prepare-rig [(assoc housing :channels {:uv 1})]))))))
+
+(deftest profiled-gates-use-committed-coarse-dmx-in-rich-and-compact-frames
+  (let [volume {:shape :sphere :position [0 0 2] :radius 0.2 :selection #{:beam}}
+        closed [{:type :shutter-closed :start 0 :end 10}]]
+    (doseq [gate [:shutter :strobe]
+            [spec closed-level open-level] [[{:offset 2 :functions closed} 0.0 0.5]
+                                            [{:offset 2 :inverted-from 0 :functions closed} 1.0 0.0]
+                                            [{:offset 2 :fine-offset 3 :functions closed} (/ 10.7 255) 0.5]]]
+      (let [lamp {:id :lamp :position [0 0 0] :universe 0 :address 1 :channels {:green 1 gate spec}}
+            rig (spatial/prepare-rig [lamp])]
+        (doseq [[open? value] [[false closed-level] [true open-level]]]
+          (let [rows [{:target-id :lamp :attribute :green :value 1.0}
+                      {:target-id :lamp :attribute gate :value value}]
+                full (frame/resolve-frame [lamp] rows)
+                lean (frame/resolve-contributions [lamp] [{:kind :assignments :assignments rows}]
+                                                  {:include-values? false :compact-values? true})
+                compact (:compact lean)
+                reader (frame/compact-reader (frame/compact-index (:target-order compact)) compact [:emitted-color gate])]
+            (is (pos? (second (get-in full [:values :lamp :emitted-color]))))
+            (doseq [values [(:values full) {:lamp (first (frame/project-compact compact))} reader]]
+              (is (= open? (contains? (:weights (field/sample volume rig {:values values})) :lamp))
+                  (pr-str [gate spec value])))))))))

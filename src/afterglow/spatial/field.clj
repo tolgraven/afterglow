@@ -21,14 +21,14 @@
                    (time/finite-number? (+ inner-m outer-m)) (#{:linear :smoothstep} curve)
                    (set? selection) (set/subset? selection #{:position :beam :aimable}))
       (geometry/invalid! "Invalid volume strength, falloff or selection" volume))
-    (let [{:keys [distance bounds inside? witnesses]} (shape/prepare volume)
+    (let [{:keys [distance bounds inside? witnesses falloff-stretch] :or {falloff-stretch [1.0 1.0 1.0]}} (shape/prepare volume)
           width (+ inner-m outer-m)
           edge (fn [d] (cond (<= d (- inner-m)) 1.0 (>= d outer-m) 0.0
                              :else (fade curve (/ (- outer-m d) width))))
           radial? (and (#{:sphere :ball} (:shape volume)) (nil? (:geometry volume))
                        (or (nil? (:scale volume)) (apply == (:scale volume))))
           radius (* (or (:radius volume) 0.0) (get (:scale volume) 0 1.0))
-          expand (fn [corner sign] (mapv #(+ (double %) (* sign outer-m)) corner))]
+          expand (fn [corner sign] (mapv #(+ (double %1) (* sign outer-m %2)) corner falloff-stretch))]
       {:bounds (when bounds {:min (expand (:min bounds) -1) :max (expand (:max bounds) 1)})
        :center (shape/center bounds) :witnesses witnesses
         :selection selection :max-weight (double strength)

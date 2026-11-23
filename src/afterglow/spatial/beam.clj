@@ -2,6 +2,7 @@
   "Optical selection for weighted venue volumes, in metres."
   (:require [afterglow.render.frame :as frame]
             [afterglow.render.optics :as optics]
+            [afterglow.render.shutter :as shutter]
             [afterglow.spatial.geometry :as geometry]
             [afterglow.time :as time]))
 
@@ -35,9 +36,15 @@
    :intensity-threshold intensity-threshold
    :occluded? (when (seq surfaces) (optics/segment-occluder surfaces))})
 
-(defn- light-level [output]
+(defn- open-gate? [{:keys [channels] :as fixture} output]
+  (and (not= false (:shutter-open? output))
+       (or (not (or (:shutter channels) (:strobe channels)))
+           (let [gates (or (::geometry/shutters fixture) (shutter/profile channels))]
+             (shutter/open? gates (fn [attr fallback] (get output attr (get (:channels output) attr fallback))))))))
+
+(defn- light-level [fixture output]
   (let [rgb (:emitted-color output)]
-    (if (and (geometry/vec3? rgb) (not= false (:shutter-open? output)))
+    (if (and (geometry/vec3? rgb) (open-gate? fixture output))
       (max 0.0 (min 1.0 (double (reduce max rgb))))
       0.0)))
 
@@ -348,7 +355,7 @@
   [fixture output volume {:keys [bounds] :as sampling} options]
   (let [{:keys [selection range-m intensity-threshold] :as opts}
         (if (::prepared options) options (prepare-options options))
-        level (light-level output)
+        level (light-level fixture output)
         illuminated? (and (:beam selection) (pos? level) (>= level intensity-threshold))
         aimable? (and (:aimable selection) (every? #(contains? (:channels fixture) %) [:pan :tilt]))
         origin (:position fixture [0 0 0])]

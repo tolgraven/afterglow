@@ -27,7 +27,7 @@
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
    [:emitted-color :vec3 3] [:intensity :number 1] [:aim :vec3 3] [:direction :vec3 3]])
-(def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4})
+(def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4 :shutter 9})
 
 (defn- packed-number? [value]
   (or (instance? Double value) (instance? Float value) (integer? value)))
@@ -433,13 +433,14 @@
 
 (defn- create-compact [patch]
   (let [count (count (:fixtures patch))
-        arrays (object-array (map (fn [[_ _ components]] (double-array (* count components))) compact-specs))
-        masks (object-array (map (fn [_] (boolean-array count)) compact-specs))]
+        fields (cond-> compact-specs (contains? (::attribute-slots patch) :shutter) (conj [:shutter :number 1]))
+        arrays (object-array (map (fn [[_ _ components]] (double-array (* count components))) fields))
+        masks (object-array (map (fn [_] (boolean-array count)) fields))]
     {:arrays arrays :masks masks
      :view {:count count :target-order (:target-order patch)
             :fields (into {} (map-indexed (fn [index [attribute type components]]
                                            [attribute {:type type :components components
-                                                       :values (aget arrays index) :valid (aget masks index)}]) compact-specs))}}))
+                                                       :values (aget arrays index) :valid (aget masks index)}]) fields))}}))
 
 (defn- compact-scalar! [compact field index value]
   (let [^doubles values (aget ^objects (:arrays compact) (int field))
