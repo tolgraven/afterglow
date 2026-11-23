@@ -1,0 +1,21 @@
+{
+  "commit": "a129169ddd52ac11a7f7d971203505dd8ca742ed",
+  "rendering": "HTML retrieved from the GitHub Contents API, displayed in local Chromium with target paragraphs highlighted",
+  "links": [
+    {
+      "path": "AGENTS.md",
+      "label": "Tolglow\u2019s GitHub Issues",
+      "href": "https://github.com/tolgraven/tolglow/issues"
+    },
+    {
+      "path": "doc/architecture/README.md",
+      "label": "Implementation status and work on both projects",
+      "href": "https://github.com/tolgraven/tolglow/issues"
+    },
+    {
+      "path": ".github/PULL_REQUEST_TEMPLATE.md",
+      "label": "tracked issue",
+      "href": "https://github.com/tolgraven/tolglow/issues"
+    }
+  ]
+}
