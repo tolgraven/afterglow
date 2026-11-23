@@ -70,10 +70,20 @@
       (or (:shutter channels) (:strobe channels)) (assoc ::shutters (shutter/profile channels)))))
 
 (defn- position-columns [rows]
-  (when (every? (fn [[_ [_ y z]]] (and (double? y) (double? z))) rows)
-    ;; These arrays have the same rank order as :rows and are read-only once prepared.
-    [(double-array (map (comp second second) rows))
-     (double-array (map (comp peek second) rows))]))
+  ;; Publish the read-only columns in row rank order only after all coordinates qualify.
+  (let [size (count rows)
+        ^doubles ys (double-array size)
+        ^doubles zs (double-array size)]
+    (loop [i (int 0)]
+      (if (= i size)
+        [ys zs]
+        (let [point (nth (nth rows i) 1)
+              y (nth point 1)
+              z (nth point 2)]
+          (when (and (double? y) (double? z))
+            (aset ys i (double y))
+            (aset zs i (double z))
+            (recur (unchecked-inc-int i))))))))
 
 (defn prepare-rig [fixtures]
   (if (instance? Rig fixtures) fixtures
