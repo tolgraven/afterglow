@@ -86,3 +86,13 @@ Universe 257 maps to Art-Net Net 1, Sub-Net 0, Universe 0. Discovery selects the
 `rdm/command!` handles timed acknowledgements through QUEUED_MESSAGE. A GET with an overflow reply reads additional fragments up to 64 KiB. Each ArtRdm exchange checks both UIDs, transaction number, port-address and reply identity. Timeout after a SET leaves its physical outcome unknown. Read the parameter back before deciding whether to send it again.
 
 The protocol layout follows the published Art-Net 4 specification, revision 1.4dp, pages 83–93. Packet-vector and UDP loopback tests run in `lein test-pure`. Verification on a physical gateway is still pending. [Art-Net 4 specification](https://art-net.org.uk/downloads/art-net.pdf)
+
+
+A scheduled publication checks the clock again after it has packed the
+transport buffers. If the next nominal deadline has passed, it leaves the
+physical output on its previous sample and records `:expired-before-send`.
+The next slot can still consume a newer completion that arrived during
+packing. Buffered upper endpoints remain available through their own
+delayed publication opportunity. An unseen expired endpoint cannot become
+the new held source. An explicit blackout goes straight to the sink even
+when packing its idle values took a full period.

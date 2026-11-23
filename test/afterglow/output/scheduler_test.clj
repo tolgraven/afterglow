@@ -263,3 +263,77 @@
         (is (== 48 (get-in (scheduler/status owner) [:output-timing :sent-at-ms])))
         (is (== 75 (first @next-call)) "A send at 50 ms would bunch two real sink invocations"))
       (finally (scheduler/close! owner)))))
+
+(deftest packing-past-a-slot-cannot-introduce-an-expired-source
+  (doseq [mode [:direct :hold-fade :buffered-interpolation]]
+    (let [clock (atom 0) sent (atom []) owner (capture clock sent)
+          options (cond-> {:mode mode} (= mode :buffered-interpolation) (assoc :latency-ms 10))
+          pack presentation/materialize
+          offer! (fn [slot red]
+                   (let [deadline (* slot 25)
+                         token (scheduler/begin-frame! owner 1 @patch options false
+                                                       {:slot slot :started-at-ms @clock :deadline-ms deadline})]
+                     (scheduler/complete! owner token (frame red 0 0))))
+          publish! (fn [at] (reset! clock at) (scheduler/publish! owner at))
+          red (fn [] (get-in (last @sent) [:bytes 0 0]))]
+      (try
+        (offer! 1 40)
+        (if (= mode :buffered-interpolation)
+          (do (publish! 50) (is (= 40 (red))))
+          (do (publish! 25) (is (= 40 (red)))))
+        (offer! 3 200)
+        (when (= mode :buffered-interpolation)
+          (publish! 75)) ; the new sample is still an upper endpoint
+        (let [previous-sends (count @sent)
+              at (if (= mode :buffered-interpolation) 100 75)]
+          (with-redefs [presentation/materialize (fn [packet]
+                                                  (swap! clock + 35)
+                                                  (pack packet))]
+            (publish! at))
+          (is (= previous-sends (count @sent)) (name mode))
+          (is (= 1 (:expired-before-send (scheduler/status owner))))
+          (publish! (+ at 50))
+          (is (<= (red) 40) "Unsent bright frames cannot become the held output"))
+        (finally (scheduler/close! owner))))))
+
+(deftest a-buffered-sample-can-survive-packet-packing-in-an-earlier-slot
+  (let [clock (atom 0) sent (atom []) owner (capture clock sent)
+        pack presentation/materialize
+        options {:mode :buffered-interpolation :latency-ms 26}]
+    (try
+      (let [token (scheduler/begin-frame! owner 1 @patch options false
+                                          {:slot 1 :started-at-ms 0 :deadline-ms 25})]
+        (scheduler/complete! owner token (frame 144 0 0)))
+      (reset! clock 25)
+      (with-redefs [presentation/materialize (fn [packet] (reset! clock 58) (pack packet))]
+        (scheduler/publish! owner 25))
+      (is (empty? @sent))
+      (reset! clock 75)
+      (scheduler/publish! owner 75)
+      (is (= [144] (mapv #(get-in % [:bytes 0 0]) @sent)))
+      (finally (scheduler/close! owner)))))
+
+(deftest a-completion-arriving-during-an-expired-send-survives
+  (let [clock (atom 0) sent (atom []) owner (capture clock sent)
+        pack presentation/materialize
+        offer! (fn [slot red]
+                 (let [token (scheduler/begin-frame! owner 1 @patch {} false
+                                                     {:slot slot :started-at-ms @clock
+                                                      :deadline-ms (* slot 25)})]
+                   (scheduler/complete! owner token (frame red 0 0))))]
+    (try
+      (offer! 1 80)
+      (reset! clock 25)
+      (with-redefs [presentation/materialize (fn [packet]
+                                               (reset! clock 61)
+                                               (offer! 3 190)
+                                               (pack packet))]
+        (scheduler/publish! owner 25))
+      (reset! clock 75)
+      (scheduler/publish! owner 75)
+      (is (= [190] (mapv #(get-in % [:bytes 0 0]) @sent)))
+      (scheduler/begin-frame! owner 1 @patch {} true)
+      (with-redefs [presentation/materialize (fn [packet] (swap! clock + 50) (pack packet))]
+        (scheduler/publish! owner 75))
+      (is (= [190 0] (mapv #(get-in % [:bytes 0 0]) @sent)) "Explicit blackout reaches the sink")
+      (finally (scheduler/close! owner)))))

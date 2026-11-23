@@ -106,7 +106,8 @@
         (update next-state :history
                 (fn [history]
                   (update history (dec (count history)) merge
-                          (select-keys packet [:calibration :calibration-verified? :inputs-at-ms]))))
+                          (assoc (select-keys packet [:calibration :calibration-verified? :inputs-at-ms])
+                                 :due-at-ms due-at-ms))))
         next-state))))
 
 (defn- receipt! [owner gate packet published]
@@ -124,49 +125,70 @@
                    :dropped-before (.get drops)}]
       (if (.offer mailbox receipt) (.set drops 0) (.incrementAndGet drops)))))
 
-(defn- send-packet! [owner gate packet]
+(defn- send-packet! [owner gate packet expires-at]
   (if-let [send! (:send! owner)]
     (let [transport (policy/materialize packet)
           now (:now-ms owner) started (now)]
-      (send! (:universes transport) (:frame-id transport))
-      (let [finished (now)]
-        (receipt! owner gate packet finished)
-        (assoc packet :sent-at-ms started :sent-by-ms finished)))
+      (if (and expires-at (>= started expires-at) (not (:dark? gate)))
+        {:expired-before-send? true}
+        (do
+          (send! (:universes transport) (:frame-id transport))
+          (let [finished (now)]
+            (receipt! owner gate packet finished)
+            (assoc packet :sent-at-ms started :sent-by-ms finished)))))
     packet))
+
+(defn- current-policy [gate previous deadline-ms]
+  (if (= (:generation previous) (:generation gate))
+    (let [state (:policy previous)
+          history (:history state)
+          expired? (fn [{:keys [due-at-ms frame-id]}]
+                     (and due-at-ms deadline-ms (< due-at-ms deadline-ms)
+                          (not= frame-id (:last-source previous))))
+          expired (count (filter expired? history))]
+      (if (zero? expired) state
+          (-> state (assoc :history (filterv (complement expired?) history))
+              (update :expired-at-publication (fnil + 0) expired))))
+    (policy/new-state (:plan gate) (assoc (:options gate) :epoch (:epoch gate)))))
+
+(defn- dark-packet [gate packet now]
+  {:frame-id (:frame-id packet 0) :epoch (:epoch gate)
+   :calibration (:calibration packet) :calibration-verified? false
+   :universes (get-in gate [:plan :idle-universes])
+   :presentation {:mode (get-in gate [:options :mode]) :presented-at-ms now
+                  :blackout? (:dark? gate) :waiting? (nil? packet)}})
+
+(defn- commit-publication! [owner gate state entries packet]
+  ;; The producer may have coalesced an entry while the sink was packing.
+  ;; Remove only the entries used here, leaving newer arrivals untouched.
+  (doseq [entry entries] (.removeFirstOccurrence ^LinkedBlockingDeque (:queue owner) entry))
+  (reset! (:state owner) {:generation (:generation gate) :policy state :last-source (:frame-id packet)})
+  (swap! (:status owner) #(-> % (update :published inc)
+                              (assoc :last (:presentation packet)
+                                     :accepted (:accepted state) :dropped (:dropped state)
+                                     :expired-at-publication (:expired-at-publication state 0)))))
 
 (defn publish!
   "Present one physical deadline. Safe to call manually with an injected clock.
   Transport work is serialized here, independently from the show/effect owner."
   ([owner] (publish! owner nil))
   ([owner deadline-ms]
-  (locking (:lock owner)
-    (when-not @(:closed? owner)
-      (when-let [gate @(:gate owner)]
-        (let [now ((:now-ms owner))
-              old @(:state owner)
-              state (if (= (:generation old) (:generation gate)) (:policy old)
-                        (policy/new-state (:plan gate) (assoc (:options gate) :epoch (:epoch gate))))
-              completions (java.util.ArrayList. 3)
-              _ (.drainTo ^LinkedBlockingDeque (:queue owner) completions 3)
-              state (reduce #(admit-completion gate deadline-ms %1 %2) state completions)
-              {next-state :state packet :packet} (policy/present state now)
-              packet (if (or (:dark? gate) (nil? packet))
-                       {:frame-id (:frame-id packet 0) :epoch (:epoch gate)
-                        :calibration (:calibration packet) :calibration-verified? false
-                        :universes (get-in gate [:plan :idle-universes])
-                        :presentation {:mode (get-in gate [:options :mode]) :presented-at-ms now
-                                       :blackout? (:dark? gate) :waiting? (nil? packet)}}
-                       packet)]
-          (reset! (:state owner) {:generation (:generation gate) :policy next-state})
-          ;; A changed gate must not allow a previously bright sample to escape.
-          ;; No host code takes this lock while owning a renderer buffer.
-          (when (and packet (= (:generation gate) (:generation @(:gate owner))))
-            (let [sent (send-packet! owner gate packet)]
-              (swap! (:status owner) #(-> % (update :published inc)
-                                           (assoc :last (:presentation packet)
-                                                  :accepted (:accepted next-state) :dropped (:dropped next-state)
-                                                  :expired-at-publication (:expired-at-publication next-state 0))))
-              sent))))))))
+   (locking (:lock owner)
+     (when-not @(:closed? owner)
+       (when-let [gate @(:gate owner)]
+         (let [now ((:now-ms owner))
+               state (current-policy gate @(:state owner) deadline-ms)
+               entries (.toArray ^LinkedBlockingDeque (:queue owner))
+               state (reduce #(admit-completion gate deadline-ms %1 %2) state entries)
+               {next-state :state packet :packet} (policy/present state now)
+               packet (if (or (:dark? gate) (nil? packet)) (dark-packet gate packet now) packet)
+               period (or (:period-ms @(:timeline owner)) (get-in gate [:options :period-ms]))
+               expires-at (when deadline-ms (+ deadline-ms period))
+               sent (send-packet! owner gate packet expires-at)]
+           (if (:expired-before-send? sent)
+             (swap! (:status owner) update :expired-before-send (fnil inc 0))
+             (commit-publication! owner gate next-state entries packet))
+           sent))))))
 
 (defn drain-receipts!
   "Drain the optional bounded physical-output mailbox off the publisher thread."
@@ -194,6 +216,7 @@
           timing {:slot slot :deadline-ms due :started-at-ms started :finished-at-ms ((:now-ms owner))
                   :source-time-ms (:time-ms packet) :frame-id (:frame-id packet)
                   :sent-at-ms (:sent-at-ms packet) :sent-by-ms (:sent-by-ms packet)
+                  :expired-before-send? (boolean (:expired-before-send? packet))
                   :source-input-age-ms (when (and (:sent-at-ms packet) (:inputs-at-ms packet))
                                          (- (:sent-at-ms packet) (:inputs-at-ms packet)))}]
       (swap! (:status owner) #(-> % (assoc :output-timing timing)
