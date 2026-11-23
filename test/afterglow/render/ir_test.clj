@@ -187,3 +187,18 @@
                    {:a {:op :param :key :p :type :vec2} :b {:op :param :key :p}}
                    (into {} (map (fn [i] [(keyword (str "field" i)) (c i)]) (range 65)))]]
     (is (thrown? clojure.lang.ExceptionInfo (ir/emit-glsl-batch outputs)))))
+
+(deftest spatial-batch-samples-this-frames-clock-and-parameters
+  (let [position {:op :position :axis :z}
+        expression {:op :add :args [position {:op :param :key :rgb :type :vec3}
+                                    {:op :phrase} {:op :time :clock :absolute}]}
+        plan (ir/compile-batch {:color expression})
+        positions [[3 2 1] [-1 0 5]]
+        run (fn [env points] (vec (get-in (ir/evaluate-batch plan env points) [:outputs :color :values])))
+        first-frame {:params {:rgb [1 4 7]} :time-ms 4 :elapsed-beats 24 :meter {:beats-per-bar 3 :bars-per-phrase 4}}
+        second-frame {:params {:rgb [2 5 8]} :time-ms 8 :elapsed-beats 10 :meter {:beats-per-bar 5 :bars-per-phrase 2}}]
+    (doseq [env [first-frame second-frame first-frame]]
+      (let [expected (vec (mapcat #(ir/evaluate expression (assoc env :position %)) positions))]
+        (is (= (mapv double expected) (run env positions)))
+        (is (= (mapv double expected) (run env (double-array (mapcat identity positions)))))))
+    (is (thrown? clojure.lang.ExceptionInfo (run (dissoc second-frame :meter) positions)))))
