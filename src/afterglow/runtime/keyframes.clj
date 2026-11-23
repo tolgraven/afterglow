@@ -100,13 +100,14 @@
 
                  (and prior (= (:epoch prior) (:epoch window)) (identical? (:rig prior) (:rig window))
                       (= (first (:inputs prior)) (first (:inputs window)))
+                      (= (nth (:inputs prior) 5) (nth (:inputs window) 5))
                       (<= (get-in prior [:origin-clock :time-ms]) (:time-ms origin-clock))
                       (<= (get-in prior [:origin-clock :beat]) (:beat origin-clock)))
                  (:result prior)
 
                  :else @source)
         forecast (try
-                   (values/endpoints origin (sample (future-context ctx target-clock)))
+                   (values/endpoints origin (sample (future-context ctx target-clock)) (:rig window) (:curve options))
                    (catch Throwable error
                      (when-not (faults/recoverable? error) (throw error))
                      ;; A possible future error is not a current effect fault.

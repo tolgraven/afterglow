@@ -38,7 +38,7 @@
       (let [decode (fn [blocks]
                      (when-not (vector? blocks) (invalid!))
                      (values/validate-blocks! (values/map-columns unpack blocks) (nth inputs 5)))
-            [origin target] (values/endpoints (decode (:origin saved)) (decode (:target saved)))]
+            [origin target] (values/endpoints (decode (:origin saved)) (decode (:target saved)) fixtures (:curve options))]
         (assoc (select-keys saved window-keys)
                :epoch epoch :rig fixtures :origin origin :target target
                :result (values/blend origin target progress (nth inputs 5)))))))

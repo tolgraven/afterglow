@@ -99,7 +99,7 @@
         direct (run model nil 0 mapv) checkpoint (get-in direct [:keyframes "0:1"])
         saved (storage/freeze checkpoint)
         restored (storage/restore saved fixtures (:epoch model))]
-    (with-open [pool (executor/create {:workers 2})]
+    (with-open [pool (executor/create {:workers 2 :timeout-ms 5000})]
       (let [half (run (:model direct) {"0:1" restored} 1/2 (executor/mapper pool))
             output (render/resolve-contributions (render/compile-patch fixtures) (:contributions half) {})]
         (is (= [32 64] (mapv #(bit-and 255 %) (take 2 (get-in output [:universes 1])))))
@@ -167,3 +167,35 @@
     (doseq [value [-0.5 1.5 Double/NaN Double/POSITIVE_INFINITY]]
       (is (thrown? clojure.lang.ExceptionInfo (storage/restore (checkpoint value) [] 0))))
     (is (some? (storage/restore (assoc-in (checkpoint 1.5) [:inputs 5] true) [] 0)))))
+
+(deftest disabling-hdr-resamples-the-current-output-before-publication
+  (let [model (show {:interval {:beats 1}})
+        compile (constantly (kf/predictable
+                             (fn [ctx]
+                               (assoc ctx :assignments [{:target-id :lamp :attribute :dimmer
+                                                         :value (if (get-in ctx [:frame :hdr?]) 1.5 0.5)}]))))
+        first (engine/advance model {:time-ms 0 :hdr? true} compile)
+        next (engine/advance (:model first) {:time-ms 25 :hdr? false :keyframes (:keyframes first)} compile)]
+    (is (= 1.5 (get-in first [:assignments 0 :value])))
+    (is (= 0.5 (get-in next [:assignments 0 :value])))))
+
+(deftest movement-chords-crossing-the-fixture-use-its-real-curved-path
+  (let [model (show {:interval {:beats 1}})
+        fixtures [{:id :lamp :position [10.0 0.0 0.0]}]]
+    (doseq [attr [:direction :aim] batch? [false true]]
+      (let [step (fn [ctx]
+                   (let [angle (* Math/PI (get-in ctx [:frame :beat]))
+                         origin (if (= attr :aim) 10.0 0.0)
+                         point [(+ origin (Math/cos angle)) (Math/sin angle) 0.0]]
+                     (if batch?
+                       (runtime/append-contributions ctx [{:kind :batch :batch {:target-ids [:lamp]
+                           :outputs {attr {:type :vec3 :components 3 :values (double-array point)}}}}])
+                       (assoc ctx :assignments [{:target-id :lamp :attribute attr :value point}]))))
+            tick (fn [prev beat]
+                   (engine/advance (assoc-in (or (:model prev) model) [:transport :beat] beat)
+                                   {:time-ms (* 500 beat) :fixtures fixtures :keyframes (:keyframes prev)}
+                                   (constantly (kf/predictable step))))
+            first (tick nil 0) half (tick first 1/2)
+            sample (kf/inspect (get-in half [:keyframes "0:1"]) :lamp attr)]
+        (is (:forecast-failed? sample))
+        (is (== 1.0 (get-in sample [:result 0 1])))))))

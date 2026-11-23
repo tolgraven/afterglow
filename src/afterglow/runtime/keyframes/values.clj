@@ -169,7 +169,7 @@
                   (and (= (dissoc left :outputs) (dissoc right :outputs))
                        (same-columns? (:outputs left) (:outputs right)))))))
 
-(defn endpoints [origin target]
+(defn- align-endpoints [origin target]
   (if (and (= (count origin) (count target)) (every? true? (map same-layout? origin target)))
     [origin target]
     (let [start (rows origin)
@@ -177,6 +177,47 @@
       (when-not (every? true? (map #(= (dissoc %1 :value) (dissoc %2 :value)) start end))
         (invalid! "Predictive effect changed its assignment properties"))
       [[{:kind :assignments :assignments start}] [{:kind :assignments :assignments end}]])))
+
+(defn- geometry-block? [{:keys [kind assignments batch]}]
+  (case kind
+    :batch (some geometry (keys (:outputs batch)))
+    :assignments (some (comp geometry :attribute) assignments)))
+
+(defn- geometry-rows [{:keys [kind assignments batch]}]
+  (case kind
+    :batch (batch-rows (update batch :outputs select-keys geometry))
+    :assignments (filter (comp geometry :attribute) assignments)))
+
+(defn- can-overshoot? [curve]
+  (let [shape (if (map? curve) (:type curve) curve)]
+    (or (= shape :spring)
+        (and (= shape :cubic-bezier)
+             (some #(not (<= 0 % 1)) (map (:points curve) [1 3]))))))
+
+(defn- check-chord! [overshoot? positions left right]
+  (let [position (if (= :aim (:attribute left)) (positions (:target-id left) [0 0 0]) [0 0 0])
+        from (mapv - (:value left) position)
+        to (mapv - (:value right) position)
+        dot (fn [a b] (reduce + (map * a b)))
+        m (Math/sqrt (double (dot from from)))
+        n (Math/sqrt (double (dot to to)))]
+    (when-not (and (Double/isFinite m) (Double/isFinite n) (pos? m) (pos? n))
+      (invalid! "Aim or direction reaches zero distance"))
+    (let [cosine (dot (map #(/ % m) from) (map #(/ % n) to))]
+      ;; If the chord passes through the fixture, interpolation loses the
+      ;; direction even though the actual sampler may follow a curved path.
+      (when (or (< cosine -0.999999999999)
+                (and overshoot? (> cosine 0.999999999999) (not (== m n))))
+        (invalid! "Use live movement samples along a singular aim or direction chord")))))
+
+(defn endpoints [origin target fixtures curve]
+  (let [[origin target :as aligned] (align-endpoints origin target)]
+    (when (some geometry-block? origin)
+      (let [positions (into {} (map (juxt :id #(or (:position %) [0 0 0]))) fixtures)
+            pairs (map vector (mapcat geometry-rows origin) (mapcat geometry-rows target))
+            overshoot? (can-overshoot? curve)]
+        (doseq [[left right] pairs] (check-chord! overshoot? positions left right))))
+    aligned))
 
 (defn read-values [blocks target attribute]
   (let [relevant? (fn [row] (and (= target (:target-id row)) (= attribute (:attribute row))))
