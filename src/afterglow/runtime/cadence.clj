@@ -42,22 +42,31 @@
     (+ (double old) (* fraction (- (double sample) (double old))))
     (double sample)))
 
-(defn- update-entry [entry version sample fraction frame limit]
-  (let [entry (if (and entry (= version (:version entry))) entry
+(defn- record-sample [entry {:keys [calls total-ms predictive?]} fraction frame]
+  (let [per-call (/ total-ms calls)]
+    (-> entry
+        (assoc :cost-ms (smooth (:cost-ms entry) per-call fraction)
+               :previous-sample-ms (:last-sample-ms entry)
+               :last-sample-ms per-call :sampled-at frame
+               :predictive? predictive?)
+        (update :evaluations (fnil + 0) calls)
+        (update :sampled-frames (fnil inc 0)))))
+
+(defn- update-entry [entry version sample {:keys [smoothing max-stride min-cost-ms]} frame]
+  (let [prior (if (and entry (= version (:version entry))) entry
                 {:version version :stride 1 :changed-at frame})
-        entry (update entry :stride min limit)]
-    (if-not sample entry
-      (let [{:keys [calls total-ms predictive?]} sample
-            cost (smooth (:cost-ms entry) (/ total-ms calls) fraction)]
-        (cond-> (-> entry (assoc :cost-ms cost :predictive? predictive?)
-                    (update :evaluations (fnil + 0) calls)
-                    (update :sampled-frames (fnil inc 0)))
-          (not predictive?) (assoc :stride 1))))))
+        {:keys [previous-sample-ms last-sample-ms predictive?] :as updated}
+        (cond-> prior sample (record-sample sample smoothing frame))
+        cheap? (and previous-sample-ms (< (max previous-sample-ms last-sample-ms) min-cost-ms))]
+    (if (and (> (:stride updated) 1) (or cheap? (false? predictive?)))
+      (assoc updated :stride 1 :changed-at frame)
+      (update updated :stride min max-stride))))
 
 (defn- slowdown-candidate [entries {:keys [max-stride min-cost-ms]}]
   (->> entries
-       (keep (fn [[id {:keys [predictive? cost-ms stride changed-at]}]]
-               (when (and predictive? (>= cost-ms min-cost-ms) (< stride max-stride))
+       (keep (fn [[id {:keys [predictive? cost-ms stride changed-at sampled-at previous-sample-ms last-sample-ms]}]]
+               (when (and predictive? previous-sample-ms (> sampled-at changed-at) (< stride max-stride)
+                          (>= (min previous-sample-ms last-sample-ms cost-ms) min-cost-ms))
                  [id (/ cost-ms stride) changed-at])))
        (sort-by (fn [[id saving changed-at]] [(- saving) changed-at (pr-str id)]))
        ffirst))
@@ -77,7 +86,8 @@
   IDs to their definition identities/versions. Epoch changes start a fresh history.
   :samples comes from observer, :period-ms is the actual output period and
   :elapsed-ms includes complete host work. Only eligible expensive effects slow
-  down. At most one interval changes per hysteresis window. State is disposable."
+  down. Each pressure window can slow one effect. Two real cheap samples
+  restore that instance regardless of the scene load. State is disposable."
   [previous {:keys [epoch versions samples period-ms elapsed-ms]} config]
   (when-not (and (time/finite-number? period-ms) (pos? period-ms)
                  (time/finite-number? elapsed-ms) (not (neg? elapsed-ms)))
@@ -87,7 +97,7 @@
         frame (inc (:frame prior 0))
         entries (reduce-kv (fn [m id version]
                              (assoc m id (update-entry (get-in prior [:effects id]) version
-                                                       (get samples id) smoothing frame max-stride))) {} versions)
+                                                       (get samples id) config frame))) {} versions)
         measured (smooth (:frame-ms prior) elapsed-ms smoothing)
         budget (* period-ms (- 1.0 headroom))
         missed (smooth (:late-rate prior) (if (> elapsed-ms period-ms) 1.0 0.0) smoothing)

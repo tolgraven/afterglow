@@ -58,3 +58,29 @@
     (is (= [:external :a :b :cheap] (mapv :instance-id ranking)))
     (is (every? #(= 8 (:evaluations %) (:sampled-frames %)) ranking))
     (is (empty? (:keyframe-intervals limited)))))
+
+(deftest warmup-spikes-and-later-cheap-effects-under-pressure
+  (let [config (cadence/settings {:pressure-frames 1 :min-cost-ms 0.5})
+        step (fn [state cost-ms]
+               (cadence/advance state {:epoch 1 :versions {:effect 1} :period-ms 25 :elapsed-ms 35
+                                       :samples (if cost-ms {:effect (cost cost-ms true)} {})} config))
+        spike (step nil 12)
+        expensive (step spike 5)
+        still-expensive (step expensive nil)
+        cheap-once (step still-expensive 0.1)
+        interpolated (step cheap-once nil)
+        cheap-twice (step interpolated 0.2)]
+    (is (empty? (:keyframe-intervals spike)))
+    (is (> (get-in expensive [:effects :effect :stride]) 1))
+    (is (= (:keyframe-intervals expensive) (:keyframe-intervals still-expensive)))
+    (is (> (get-in interpolated [:effects :effect :stride]) 1))
+    (is (empty? (:keyframe-intervals cheap-twice)))
+    (is (> (:frame-ms cheap-twice) 25))
+    (is (> (get-in cheap-twice [:effects :effect :cost-ms]) 0.5))
+    (is (empty? (:keyframe-intervals (step cheap-twice 15))))))
+
+(deftest live-cost-floor-reclassifies-a-slowed-instance
+  (let [state (nth (iterate #(tick % 35) nil) 6)
+        frame {:epoch 1 :versions version :samples {} :elapsed-ms 35 :period-ms 25}]
+    (is (seq (:keyframe-intervals state)))
+    (is (empty? (:keyframe-intervals (cadence/advance state frame (assoc opts :min-cost-ms 10)))))))
