@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is]]
             [afterglow.spatial :as spatial]
             [afterglow.spatial.field :as field]
+            [afterglow.spatial.geometry :as geometry]
             [afterglow.spatial.shape :as shape]))
 
 (def fixtures
@@ -16,6 +17,72 @@
            (:weights (field/positions volume (spatial/prepare-rig fixtures)))))
     (is (= {:center 1.0 :rim 1.0} (:weights (field/positions (dissoc volume :strength :falloff) fixtures))))
     (is (empty? (:weights (field/positions (assoc volume :selection #{:beam}) fixtures))))))
+
+(deftest packed-position-admission-retains-inclusive-x-ranked-rows
+  (let [a [0.0 -0.0 1.0]
+        b [0.0 0.0 -1.0]
+        fixtures [{:id :tie :position a}
+                  {:id :x-max :position [1.0 0.0 0.0]}
+                  {:id :z-after :position [0.0 0.0 (Math/nextUp 1.0)]}
+                  {:id :x-min :position [-1.0 -0.0 -1.0]}
+                  {:id :tie :position b}
+                  {:id :y-before :position [0.0 (Math/nextDown -0.0) 0.0]}
+                  {:id :y-after :position [0.0 (Math/nextUp 0.0) 0.0]}
+                  {:id :x-before :position [(Math/nextDown -1.0) 0.0 0.0]}
+                  {:id :x-after :position [(Math/nextUp 1.0) 0.0 0.0]}
+                  {:id :z-before :position [0.0 0.0 (Math/nextDown -1.0)]}]
+        bounds {:min [-1.0 -0.0 -1.0] :max [1.0 0.0 1.0]}
+        rig (geometry/prepare-rig fixtures)
+        large 9007199254740992N
+        large-rig (geometry/prepare-rig [{:id :next :position [(inc large) 0.0 0.0]}
+                                         {:id :edge :position [large 0.0 0.0]}
+                                         {:id :outside :position [(+ large 2) 0.0 0.0]}])
+        large-edge [(double large) 0.0 0.0]]
+    (with-redefs [geometry/candidates (fn [& _] (throw (ex-info "Expected packed positions" {})))]
+      (let [rows (geometry/reduce-box-candidates rig bounds conj [])]
+        (is (= [:x-min :tie :tie :x-max] (mapv first rows)))
+        (is (identical? a (second (nth rows 1))))
+        (is (identical? b (second (nth rows 2)))))
+      (is (= :x-min (geometry/reduce-box-candidates rig bounds (fn [_ [id]] (reduced id)) nil)))
+      ;; The X index stores doubles, including the large integer that rounds to the edge.
+      (is (= [:edge :next]
+             (mapv first (geometry/reduce-box-candidates large-rig {:min large-edge :max large-edge} conj [])))))))
+
+(deftest packed-position-weights-agree-with-an-older-unpacked-rig
+  (let [later [0.5 0.25 0.0]
+        fixtures [{:id :tie :position [0.5 0.0 0.0]}
+                  {:id :other :position [-0.25 0.0 -0.0]}
+                  {:id :tie :position later}
+                  {:id :outside :position [4.0 0.0 0.0]}]
+        {:keys [ids rows xs directional] :as rig} (geometry/prepare-rig fixtures)
+        unpacked (geometry/->Rig ids rows xs directional)
+        sphere {:shape :sphere :position [0.0 0.0 0.0] :radius 0.5 :strength 0.8
+                :falloff {:inner-m 0.25 :outer-m 0.75 :curve :smoothstep}}
+        box {:shape :rounded-box :position [0.0 0.0 0.0] :size [2.0 2.0 2.0] :rounding 0.3}
+        bits (fn [volume rig]
+               (update-vals (:weights (field/positions volume rig))
+                            #(Double/doubleToRawLongBits (double %))))]
+    (doseq [volume [sphere (assoc sphere :scale [2.0 0.5 1.0] :translation [0.25 0.0 0.0])
+                    {:shape :difference :parts [box (assoc sphere :radius 0.25)]}]]
+      (is (= (bits volume unpacked) (bits volume rig))))
+    (is (= ((:weight-at (field/prepare sphere)) later)
+           (get-in (field/positions sphere rig) [:weights :tie])))))
+
+(deftest positional-admission-falls-back-for-mixed-coordinates-and-unsupported-boxes
+  (let [fixtures [{:id :plain :position [0.0 0.0 0.0]}]
+        sphere {:shape :sphere :position [0.0 0.0 0.0] :radius 1.0}
+        mixed (into fixtures [{:id :mixed :position [0.0 1/2 0.25M]}])
+        unbounded {:shape :polyhedron :planes [{:normal [1 0 0] :distance 1}]}
+        disjoint {:shape :intersection :parts [sphere (assoc sphere :position [3.0 0.0 0.0])]}
+        extreme (assoc sphere :scale [1.0 Double/MIN_VALUE 1.0])
+        candidates geometry/candidates
+        calls (atom 0)]
+    (with-redefs [geometry/candidates (fn [rig bounds] (swap! calls inc) (candidates rig bounds))]
+      (is (= {:plain 1.0 :mixed 1.0} (:weights (field/positions sphere mixed))))
+      (is (= {:plain 1.0} (:weights (field/positions unbounded fixtures))))
+      (is (empty? (:weights (field/positions disjoint fixtures))))
+      (is (empty? (:weights (field/positions extreme fixtures))))
+      (is (= 4 @calls)))))
 
 (def cube {:shape :rounded-box :position [0 0 0] :size [4 2 2] :rounding 0})
 (def cut {:shape :sphere :radius 0.5 :position [0 0 0]})

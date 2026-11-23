@@ -90,13 +90,9 @@
 
 (defn- position-weights [{:keys [weight-at bounds selection]} rig]
   (if-not (contains? selection :position) {}
-    (let [[_ ymin zmin] (:min bounds)
-          [_ ymax zmax] (:max bounds)
-          collect (fn [weights [id [_ y z :as p]]]
-                    (if (and bounds (or (< y ymin) (> y ymax) (< z zmin) (> z zmax)))
-                      weights
-                      (let [w (weight-at p)] (if (pos? w) (assoc! weights id w) weights))))]
-      (persistent! (reduce collect (transient {}) (geometry/candidates rig bounds))))))
+    (let [collect (fn [weights [id p]]
+                    (let [w (weight-at p)] (if (pos? w) (assoc! weights id w) weights)))]
+      (persistent! (geometry/reduce-box-candidates rig bounds collect (transient {}))))))
 
 (defn positions
   "Sample the emitting positions of the given patch. Return weights by head ID."

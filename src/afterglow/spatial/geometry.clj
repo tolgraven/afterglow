@@ -69,6 +69,12 @@
     (cond-> fixture
       (or (:shutter channels) (:strobe channels)) (assoc ::shutters (shutter/profile channels)))))
 
+(defn- position-columns [rows]
+  (when (every? (fn [[_ [_ y z]]] (and (double? y) (double? z))) rows)
+    ;; These arrays have the same rank order as :rows and are read-only once prepared.
+    [(double-array (map (comp second second) rows))
+     (double-array (map (comp peek second) rows))]))
+
 (defn prepare-rig [fixtures]
   (if (instance? Rig fixtures) fixtures
     (let [rows (->> fixtures
@@ -77,8 +83,9 @@
                              (invalid! "Spatial fixture needs an ID and a finite position" [id position]))
                            [id position]))
                     (sort-by (comp first second)) vec)]
-      (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))
-             (into [] (keep optical-fixture) fixtures)))))
+      (assoc (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))
+                    (into [] (keep optical-fixture) fixtures))
+             ::position-columns (delay (position-columns rows))))))
 
 (defn- lower-bound [^doubles xs x]
   (loop [lo 0 hi (alength xs)]
@@ -86,14 +93,55 @@
       (let [mid (unsigned-bit-shift-right (+ lo hi) 1)]
         (if (< (aget xs mid) x) (recur (inc mid) hi) (recur lo mid))))))
 
+(defn- candidate-window [xs lo hi]
+  (when-not (> lo hi)
+    [(lower-bound xs (double lo)) (lower-bound xs (Math/nextUp (double hi)))]))
+
 (defn candidates
   "Wire-identified fixture positions within a field's X bounds. A nil box is unbounded."
   [{:keys [rows xs]} bounds]
   (if-not bounds
     rows
-    (let [lo (first (:min bounds)) hi (first (:max bounds))]
-      (if (> lo hi) []
-        (subvec rows (lower-bound xs (double lo)) (lower-bound xs (Math/nextUp (double hi))))))))
+    (if-let [[start end] (candidate-window xs (first (:min bounds)) (first (:max bounds)))]
+      (subvec rows start end)
+      [])))
+
+(defn- finite-double-point? [point]
+  (and (vector? point) (= 3 (count point))
+       (every? #(and (double? %) (Double/isFinite (double %))) point)))
+
+(defn- packed-box? [lo hi]
+  (and (finite-double-point? lo) (finite-double-point? hi)
+       (every? true? (map <= lo hi))))
+
+(defn- reduce-packed-candidates [rf init rows [start end] [ys zs] lo hi]
+  (let [^doubles ys ys ^doubles zs zs
+        ymin (double (nth lo 1)) ymax (double (nth hi 1))
+        zmin (double (nth lo 2)) zmax (double (nth hi 2))
+        end (int end)]
+    (loop [i (int start), result init]
+      (if (= i end)
+        result
+        (let [y (aget ys i) z (aget zs i)]
+          (if (or (< y ymin) (> y ymax) (< z zmin) (> z zmax))
+            (recur (unchecked-inc-int i) result)
+            (let [result (rf result (nth rows i))]
+              (if (reduced? result)
+                @result
+                (recur (unchecked-inc-int i) result)))))))))
+
+(defn reduce-box-candidates
+  "Reduce admitted position rows in the rig's existing X rank order. The X
+  window uses index coordinates, and Y/Z compare the original positions."
+  [{:keys [rows xs] :as rig} {lo :min hi :max :as bounds} rf init]
+  (if-let [columns (when (packed-box? lo hi) (some-> (::position-columns rig) deref))]
+    (reduce-packed-candidates rf init rows (candidate-window xs (first lo) (first hi)) columns lo hi)
+    (let [[_ ymin zmin] lo [_ ymax zmax] hi
+          admit (fn [result [_ [_ y z] :as row]]
+                  (if (and bounds (or (< y ymin) (> y ymax) (< z zmin) (> z zmax)))
+                    result
+                    (rf result row)))]
+      (reduce admit init (candidates rig bounds)))))
 
 (defn fixtures-in [rig volume]
   (let [{:keys [inside? bounds]} (field-shape/prepare volume)]
