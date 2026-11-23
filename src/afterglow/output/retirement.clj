@@ -15,10 +15,10 @@
                                    (let [start (linear-address [universe (dec address)])]
                                      [start (+ start (dec footprint))]))))
                          fixtures)]
-      (into {} (remove (fn [[slot value]]
+      (into {} (remove (fn [[slot]]
                          (let [address (linear-address slot)
                                [_ last-reserved] (first (rsubseq reserved <= address))]
-                           (or (zero? value) (mapped slot)
+                           (or (mapped slot)
                                (and last-reserved (<= address last-reserved))))))
             off-bytes))))
 
