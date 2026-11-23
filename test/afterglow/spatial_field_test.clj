@@ -2,7 +2,8 @@
   (:require [afterglow.render.frame :as frame]
             [clojure.test :refer [deftest is]]
             [afterglow.spatial :as spatial]
-            [afterglow.spatial.field :as field]))
+            [afterglow.spatial.field :as field]
+            [afterglow.spatial.shape :as shape]))
 
 (def fixtures
   [{:id :center :position [0 0 0]} {:id :rim :position [1 0 0]}
@@ -158,3 +159,22 @@
     (is (empty? (:weights (field/sample volume rig {}))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle"
                           (field/sample volume rig {:values {:bad {:emitted-color [1 1 1]}}})))))
+
+(deftest compiled-sphere-distances-agree-with-the-inverse-transform
+  (doseq [kind [:sphere :ball]
+          scale [[1 1 1] [2.5 2.5 2.5] [1/8 2 1.25]]
+          radius [0 2.25]]
+    (let [local {:shape kind :radius radius :position [1.5M -2 3]}
+          world (assoc local :scale scale :translation [1/4 3.0 -1.0])
+          sphere (shape/prepare local)
+          transform (shape/coordinates world (:bounds sphere))
+          projected (shape/prepare world)
+          at-edge ((:forward transform) [(+ 1.5 radius) -2 3])
+          points [[0 0 0] [2/3 1M -5] at-edge
+                  (update at-edge 0 #(Math/nextDown (double %)))
+                  (update at-edge 0 #(Math/nextUp (double %)))]]
+      (doseq [p points]
+        (let [original ((:inverse transform) p)]
+          (is (== (* (:min-scale transform) ((:distance sphere) original))
+                  ((:distance projected) p)))
+          (is (= ((:inside? sphere) original) ((:inside? projected) p))))))))
