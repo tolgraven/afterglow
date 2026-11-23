@@ -1,0 +1,21 @@
+(require '[afterglow.control.devices.transports :as t])
+(let [calls (atom 0)
+      entered (promise)
+      release (promise)
+      identify (fn [] (swap! calls inc) (deliver entered (.isDaemon (Thread/currentThread))) @release [:test-controller])
+      list! (#'t/port-scanner identify 200)
+      sample (fn [label]
+               (let [start (System/nanoTime)
+                     result (try (list!) (catch clojure.lang.ExceptionInfo error (:reason (ex-data error))))]
+                 (println (format "%-21s %-26s %6.1f ms    %d" label (str result) (/ (- (System/nanoTime) start) 1e6) @calls))))]
+  (println "Afterglow | controlled delayed MIDI driver")
+  (println "Action                Caller result                 Wait       Scans")
+  (sample "First enumeration")
+  (sample "Refresh while busy")
+  (assert (true? (deref entered 3000 false)))
+  (deliver release true)
+  (sample "Collect ready ports")
+  (sample "Refresh again")
+  (println "Discovery thread is a daemon:" @entered)
+  (println "Real Linux JVM enumeration:" (mapv :name (t/midi-ports))))
+(shutdown-agents)
