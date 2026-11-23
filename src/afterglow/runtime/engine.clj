@@ -466,7 +466,7 @@
                          {:show-id (:show-id model) :epoch (:epoch model)
                           :revision (:revision model) :number frame-number
                           :time-ms time-ms :delta-ms delta-ms
-                          :variables (:variables model) :master (:master model)
+                          :variables (get frame :resolved-variables (:variables model)) :master (:master model)
                           :blackout? (:blackout? model) :transport (:transport model)})
          clock (musical-time/frame-clock snapshot)
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))

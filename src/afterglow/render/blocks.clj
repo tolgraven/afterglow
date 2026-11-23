@@ -25,11 +25,15 @@
      :inputs {:frequency 0.7 :rate 0.25 :depth 0.45 :phase {:op :beat}}
      :expression (op :mix 1.0 (op :multiply a b) (op :clamp (input :depth) 0.0 1.0))}))
 
+(defn fog-optical-depth-expression
+  "Dimensionless optical depth along a uniform segment of a light ray."
+  [extinction density distance]
+  (op :multiply (op :max 0.0 extinction) (op :max 0.0 density) (op :max 0.0 distance)))
+
 (defn fog-transmission-expression
   "Fraction of unscattered light after travelling distance metres in uniform fog."
   [extinction density distance]
-  (op :exp (op :subtract (op :multiply (op :max 0.0 extinction)
-                                         (op :max 0.0 density) (op :max 0.0 distance)))))
+  (op :exp (op :subtract (fog-optical-depth-expression extinction density distance))))
 
 (def library
   "Data-only prefab library. Each input default may be replaced by an expression.
