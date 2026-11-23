@@ -6,6 +6,7 @@
   cache and commits a successful result before performing returned intents."
   (:require [afterglow.runtime :as runtime]
             [afterglow.runtime.faults :as faults]
+            [afterglow.runtime.keyframes :as keyframes]
             [afterglow.time :as musical-time]
             [afterglow.control.params :as params]
             [afterglow.control.system :as system]))
@@ -252,7 +253,9 @@
                                    (system/system-release? instance) (assoc :phase :running))
                    result (if expired?
                             (assoc context :done? true)
-                            (step (assoc context :frame private-frame :instance step-instance :state input-state)))
+                            (let [ctx (assoc context :frame private-frame :instance step-instance :state input-state)]
+                              (if (or (:keyframes program) (:measure-effect private-frame) (seq (:keyframe-intervals private-frame)))
+                                (keyframes/evaluate step ctx) (step ctx))))
                    valid? (valid-step-shape? result)
                    ;; Validate block shapes before opacity can discard a hidden
                    ;; contribution, preserving the kernel failure contract.
@@ -385,6 +388,7 @@
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
     {:model (faults/record-events (assoc model :instances instances) events)
      :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
+     :keyframes (into {} (keep (fn [{:keys [id keyframe done?]}] (when (and keyframe (not done?)) [id keyframe]))) evaluations)
      :fault-events events
      ;; Private evaluation records never enter the model or a saved show. A
      ;; renderer can reject one malformed output without running healthy code twice.
