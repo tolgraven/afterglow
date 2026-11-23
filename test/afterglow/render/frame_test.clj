@@ -102,14 +102,25 @@
 (deftest multi-universe-coarse-fine-and-inversion
   (let [fixture {:id :head :position [0 0 0] :universe 2 :address 512
                  :channels {:pan [1 2] :dimmer {:offset 3 :inverted-from 0}}}
-        half (frame/resolve-frame [fixture] [(assignment :head :pan 0.5)
-                                            (assignment :head :dimmer 0.25)])
-        full (frame/resolve-frame [fixture] [(assignment :head :pan 1.0)])]
-    (is (= [128] (bytes-at half 2 512)))
-    (is (= [0 191] (bytes-at half 3 1 2)))
-    (is (= [255] (bytes-at full 2 512)))
-    (is (= [255] (bytes-at full 3 1)))
-    (is (= [2 3] (vec (keys (:universes half)))))))
+        patch (frame/compile-patch [(assoc rgb :universe 9) fixture])]
+    (doseq [include-values? [true false]]
+      (let [options {:include-values? include-values? :compact-values? true}
+            half (frame/resolve-frame patch [(assignment :head :pan 0.5)
+                                             (assignment :head :dimmer 0.25)] options)
+            full (frame/resolve-frame patch [(assignment :head :pan 1.0)] options)
+            idle (frame/idle-universes patch)
+            buffers [(:universes half) (:universes full) idle]]
+        (doseq [universes buffers]
+          (is (sorted? universes))
+          (is (= [2 3 9] (vec (keys universes))))
+          (is (= [512 512 512] (mapv #(alength ^bytes %) (vals universes)))))
+        (is (= 9 (count (distinct (mapcat vals buffers)))))
+        (is (= [128] (bytes-at half 2 512)))
+        (is (= [0 191] (bytes-at half 3 1 2)))
+        (is (= [255] (bytes-at full 2 512)))
+        (is (= [255] (bytes-at full 3 1)))
+        (is (= [0 0 0] (bytes-at full 9 1 2 3)))
+        (is (every? #(every? zero? %) (vals idle)))))))
 
 (deftest invalid-patches-and-assignments-are-rejected
   (doseq [fixtures [[rgb rgb]
