@@ -237,6 +237,7 @@
   "Frame inputs shared by every position, with source paths for diagnostics."
   [expression path]
   (case (:op expression)
+    (:const :position) []
     (:param :time :beat :bar :phrase)
     (let [{:keys [evaluate type]} (analyze expression path 0)]
       (for [component (range (width type))]
@@ -375,6 +376,9 @@
 
 (def ^:private doubles-class (class (double-array 0)))
 
+(defn- invalid-position! [index]
+  (invalid! [:positions index] "Position must contain three finite coordinates"))
+
 (defn- load-position!
   "Copy a finite world-space xyz triple into this evaluation's private storage."
   [positions flat? index ^doubles xyz]
@@ -383,15 +387,15 @@
       (dotimes [axis 3]
         (let [value (aget ^doubles positions (+ base axis))]
           (when-not (Double/isFinite value)
-            (invalid! [:positions index] "Position must contain three finite coordinates"))
+            (invalid-position! index))
           (aset xyz axis value))))
     (let [point (nth positions index)]
       (when-not (and (vector? point) (= 3 (count point)))
-        (invalid! [:positions index] "Position must contain three finite coordinates"))
+        (invalid-position! index))
       (dotimes [axis 3]
         (let [value (nth point axis)]
           (when-not (finite? value)
-            (invalid! [:positions index] "Position must contain three finite coordinates"))
+            (invalid-position! index))
           (aset xyz axis (double value)))))))
 
 (defn evaluate-batch

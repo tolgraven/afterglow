@@ -815,27 +815,29 @@
 
 (def ^:private doubles-class (class (double-array 0)))
 
+(defn- ordered-prefix-length [ids target-order]
+  (let [limit (min (count ids) (count target-order))]
+    (loop [row 0]
+      (if (and (< row limit) (= (nth ids row) (nth target-order row)))
+        (recur (inc row))
+        row))))
+
+(defn- fixture-index [by-id id]
+  (if-let [fixture (get by-id id)]
+    (::index fixture)
+    (fail! "Unknown batch target" {:target-id id})))
+
 (defn- batch-target-indices
   "A nil index means each batch row already addresses its patch row. This
   includes ordered prefixes (e.g. all strip pixels before the moving heads)."
   [{:keys [target-order by-id]} ids]
   (when-not (identical? ids target-order)
     (let [n (count ids)
-          prefix-limit (min n (count target-order))
-          prefix (loop [row 0]
-                   (if (and (< row prefix-limit) (= (nth ids row) (nth target-order row)))
-                     (recur (inc row))
-                     row))]
+          prefix (long (ordered-prefix-length ids target-order))]
       (when (< prefix n)
         (let [indices (int-array n)]
-          (dotimes [row prefix] (aset indices row (int row)))
-          (loop [row prefix]
-            (when (< row n)
-              (let [id (nth ids row)
-                    fixture (get by-id id)]
-                (when-not fixture (fail! "Unknown batch target" {:target-id id}))
-                (aset indices row (int (::index fixture))))
-              (recur (inc row))))
+          (dotimes [row n]
+            (aset indices row (int (if (< row prefix) row (fixture-index by-id (nth ids row))))))
           indices)))))
 
 (defn- validate-batches [patch batches & [layer?]]
