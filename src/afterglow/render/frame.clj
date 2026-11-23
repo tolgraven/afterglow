@@ -20,7 +20,7 @@
 (def ^:private rgb-attributes [:red :green :blue])
 
 ;; Final fields, no mutable buffers: safe to share between render workers/frames.
-(deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot])
+(deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot ^boolean coarseRange])
 (deftype DenseChannel [^long kind ^long slot ^long compactIndex scatter fallback])
 (deftype EmitterTint [attribute ^long slot ^double red ^double green ^double blue])
 (deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints])
@@ -68,12 +68,17 @@
            (finite? (- (:max-deg spec) (:min-deg spec)))
            (< (:min-deg spec) (:max-deg spec)))))
 
+(defn- function-range? [attribute channel]
+  (or (= attribute :fog) (seq (:functions channel))))
+
 (defn- compile-scatter [universe-indices attribute {:keys [coarse fine inverted-from] :as channel}]
-  (assoc channel ::compact-index (get compact-channel-indices attribute)
+  (assoc channel ::coarse-range? (boolean (function-range? attribute channel))
+         ::compact-index (get compact-channel-indices attribute)
          ::scatter (when (or (nil? inverted-from) (packed-number? inverted-from))
                      (ChannelScatter. (long (get universe-indices (first coarse))) (long (second coarse))
                                       (long (if fine (get universe-indices (first fine)) -1))
-                                      (long (if fine (second fine) -1)) (double (or inverted-from -1.0))))))
+                                      (long (if fine (second fine) -1)) (double (or inverted-from -1.0))
+                                      (boolean (function-range? attribute channel))))))
 
 (defn- validate-footprints! [fixtures slots]
   (when (some #(contains? % :footprint) fixtures)
@@ -422,6 +427,13 @@
     (write-off-bytes! buffers (:fog-off-bytes patch))
     buffers))
 
+(defn- fine-code ^long [^double value coarse-range?]
+  (if coarse-range?
+    ;; Profile function boundaries are specified in physical coarse-byte units.
+    (let [coarse (long value)]
+      (bit-or (bit-shift-left coarse 8) (Math/round (* 255.0 (- value coarse)))))
+    (Math/round (* 257.0 value))))
+
 (defn- pack-scatter! [^objects buffers ^ChannelScatter channel ^double level]
   (let [value (* 255.0 level)
         pivot (.-pivot channel)
@@ -430,10 +442,10 @@
         index (int (.-index channel))]
     (if (neg? (.-fineUniverse channel))
       (aset coarse index (unchecked-byte (Math/round value)))
-      (let [^bytes fine (aget buffers (int (.-fineUniverse channel)))]
-        (aset coarse index (unchecked-byte (int value)))
-        (aset fine (int (.-fineIndex channel))
-                   (unchecked-byte (Math/round (* 255.0 (- value (int value))))))))))
+      (let [^bytes fine (aget buffers (int (.-fineUniverse channel)))
+            code (fine-code value (.-coarseRange channel))]
+        (aset coarse index (unchecked-byte (unsigned-bit-shift-right code 8)))
+        (aset fine (int (.-fineIndex channel)) (unchecked-byte code))))))
 
 (defn- create-compact [patch]
   (let [count (count (:fixtures patch))
@@ -595,16 +607,17 @@
 (defn pack-value!
   "Write normalized [0,1] channel level to exclusively owned byte arrays.
   This low-level function mutates supplied buffers; resolve-frame creates and
-  owns them. Fine channels preserve legacy fractional-255 packing: .5 becomes
-  coarse 127/fine 128, 1.0 becomes coarse 255/fine 0."
-  [universes {:keys [coarse fine inverted-from]} level]
+  owns them. Continuous coarse/fine pairs span codes 0 through 65535. Profiled
+  function ranges retain their physical coarse-byte boundaries."
+  [universes {:keys [coarse fine inverted-from] :as channel} level]
   (when-not (unit? level) (fail! "Channel level must be finite and within [0,1]" {:value level}))
   (let [value (* 255.0 (double level))
         value (if (and (some? inverted-from) (>= value inverted-from))
                 (- 255.0 (- value inverted-from)) value)]
     (if fine
-      (do (put-byte! universes coarse (int value))
-          (put-byte! universes fine (Math/round (* 255.0 (- value (int value))))))
+      (let [code (fine-code value (::coarse-range? channel))]
+        (put-byte! universes coarse (unsigned-bit-shift-right code 8))
+        (put-byte! universes fine (bit-and code 255)))
       (put-byte! universes coarse (Math/round value)))))
 
 (defn- write-packed-assignment!

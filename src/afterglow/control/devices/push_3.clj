@@ -98,6 +98,11 @@
       (= target :master)
       (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
         {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
+      (not fine?)
+      (let [command (parameter-command model (:selected-instance state) param
+                      (fn [value [low high] schema]
+                        (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0)))))))]
+        {:state state :commands (if command [command] [])})
       :else
       (if-let [{:keys [instance schema value]} (numeric-parameter model (:selected-instance state) param)]
         (let [[cache bits] (when fine? (edit/patch-step (:shift-patch state) model instance param))

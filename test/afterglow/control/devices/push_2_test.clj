@@ -333,3 +333,14 @@
         (is (= [:parameters :history 2] ((juxt :display-mode :parameter-view :history-beats) (view h))))
         (is (= before @(:show h))))
       (finally (finish! h)))))
+
+(deftest shift-encoder-follows-the-fixtures-coarse-fine-pan
+  (let [h (harness)]
+    (try
+      (swap! (:show h) assoc :rig {:fixtures [{:id :light :channels {:pan [1 2]}}]})
+      (swap! (:show h) assoc-in [:registry :effects :wash :outputs] {:pan {:op :param :key :level}})
+      (let [id (launch! h 36) before (:level (values h id))]
+        (receive! h [0xb0 49 127])
+        (receive! h [0xb0 72 1])
+        (is (= (+ before (/ 1.0 65535)) (:level (values h id)))))
+      (finally (finish! h)))))

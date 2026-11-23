@@ -34,7 +34,7 @@
   Unknown/discrete channels, function ranges, nonlinear curves and partial
   inversions hold. :presentation :hold explicitly opts a channel out. Fade uses
   a fixture's linear hardware dimmer once, else its linear emitter channels.
-  Coarse/fine metadata follows the renderer's fractional-255 convention."
+  Coarse/fine interpolation uses the full 16-bit word across both universes."
   [patch-or-fixtures]
   (let [patch (if (vector? patch-or-fixtures) (frame/compile-patch patch-or-fixtures) patch-or-fixtures)]
     (when-not (= :afterglow.render.frame/patch (:type patch))
@@ -172,7 +172,7 @@
         value (double (.nth coarse (int (.-coarseIndex channel))))
         value (if (neg? (.-fineUniverse channel)) value
                   (let [^clojure.lang.IPersistentVector fine (aget universes (int (.-fineUniverse channel)))]
-                    (+ value (/ (double (.nth fine (int (.-fineIndex channel)))) 255.0))))]
+                    (/ (+ (* value 256.0) (double (.nth fine (int (.-fineIndex channel))))) 257.0)))]
     (if (.-inverted channel) (- 255.0 value) value)))
 
 (defn- write-word! [^objects universes ^PackedChannel channel ^double value]
@@ -182,7 +182,8 @@
         ^clojure.lang.ITransientVector coarse (aget universes coarse-universe)]
     (if (neg? (.-fineUniverse channel))
       (aset universes coarse-universe (.assocN coarse (int (.-coarseIndex channel)) (Math/round value)))
-      (let [whole (long value) fraction (Math/round (* 255.0 (- value whole)))
+      (let [word (Math/round (* 257.0 value))
+            whole (unsigned-bit-shift-right word 8) fraction (bit-and word 255)
             fine-universe (int (.-fineUniverse channel))]
         (aset universes coarse-universe (.assocN coarse (int (.-coarseIndex channel)) whole))
         (let [^clojure.lang.ITransientVector fine (aget universes fine-universe)]

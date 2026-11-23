@@ -104,10 +104,10 @@
         half (frame/resolve-frame [fixture] [(assignment :head :pan 0.5)
                                             (assignment :head :dimmer 0.25)])
         full (frame/resolve-frame [fixture] [(assignment :head :pan 1.0)])]
-    (is (= [127] (bytes-at half 2 512)))
-    (is (= [128 191] (bytes-at half 3 1 2)))
+    (is (= [128] (bytes-at half 2 512)))
+    (is (= [0 191] (bytes-at half 3 1 2)))
     (is (= [255] (bytes-at full 2 512)))
-    (is (= [0] (bytes-at full 3 1)))
+    (is (= [255] (bytes-at full 3 1)))
     (is (= [2 3] (vec (keys (:universes half)))))))
 
 (deftest invalid-patches-and-assignments-are-rejected
@@ -162,7 +162,7 @@
   (let [forward (frame/resolve-frame [moving] [(assignment :moving :aim [1 2 4])])
         right (frame/resolve-frame [moving] [(assignment :moving :aim [2 2 3])])
         above (frame/resolve-frame [moving] [(assignment :moving :direction [0 1 0])])]
-    (is (= [127 128 127 128] (bytes-at forward 1 1 2 3 4)))
+    (is (= [128 0 128 0] (bytes-at forward 1 1 2 3 4)))
     (is (near? 0.75 (get-in right [:values :moving :pan])))
     (is (near? 90.0 (get-in right [:values :moving :pan-deg])))
     (is (= [1.0 0.0 0.0] (get-in right [:values :moving :direction])))
@@ -178,7 +178,7 @@
         calibrated (frame/resolve-frame [legacy] [(assignment :moving :direction [1 0 0])])]
     (is (near? 0.5 (get-in result [:values :moving :pan])))
     (is (near? (/ 169.5 255) (get-in calibrated [:values :moving :pan])))
-    (is (= [169 128] (bytes-at calibrated 1 1 2)))))
+    (is (= [170 42] (bytes-at calibrated 1 1 2)))))
 
 (deftest pan-continuity-and-unreachable-aim
   (let [wide (assoc moving :calibration {:pan {:min-deg -360 :max-deg 360}
@@ -555,7 +555,7 @@
                     {:kind :assignments :assignments [(assignment :moving :focus second-value :add)]}]
             expected (frame/resolve-contributions fixtures blocks {:master master :compact-values? true})
             actual (frame/resolve-contributions fixtures blocks {:master master :include-values? false :compact-values? true})]
-        (is (= [204 0] (bytes-at actual 1 5 6)))
+        (is (= [204 204] (bytes-at actual 1 5 6)))
         (is (= (buffer-values expected) (buffer-values actual)))
         (is (= (frame/project-compact (:compact expected)) (frame/project-compact (:compact actual))))))
     (let [blocks [light {:kind :assignments :assignments [(assoc (assignment :moving :aim [1 2 4]) :opacity 0)]}]
