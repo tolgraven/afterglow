@@ -124,7 +124,7 @@
         mismatches
         (for [pivot [nil 0 0.7001 30.1 41.3 65.04260156355254 209.678 255]
               fine [nil [0 1]]
-              :let [channel {:coarse [0 0] :fine fine :inverted-from pivot}]
+              :let [channel {::frame/coarse-range? true :coarse [0 0] :fine fine :inverted-from pivot}]
               value (concat [0.0 255.0 (double (or pivot 0))]
                             (for [coarse (range 255) fraction [0.0 0.3 0.5 0.9999]] (+ coarse fraction)))
               :let [level (fog/physical-level channel value)

@@ -93,9 +93,11 @@
         schema (get-in instance [:definition :params param])
         current (get-in instance [:params param])]
     (if (and schema (or (= mode :absolute) (not (zero? value))))
-      (let [next-value (parameter-edit/edit schema current value
-                                            {:mode mode :component component :fine? (:shift? state)})]
-        {:state state :commands (if (= current next-value) []
+      (let [[cache bits] (when (and (:shift? state) (= mode :relative))
+                           (parameter-edit/patch-step (:shift-patch state) model instance param))
+            next-value (parameter-edit/edit schema current value
+                                            {:mode mode :component component :fine? (:shift? state) :dmx-bits bits})]
+        {:state (cond-> state cache (assoc :shift-patch cache)) :commands (if (= current next-value) []
                                     [{:op :param/set :instance-id instance-id :param param :value next-value}])})
       {:state state})))
 
@@ -264,7 +266,8 @@
     {:state state :lifecycle :suspend}
     (not (:ready? state)) {:state state}
     (and (= :control-change (:type event)) (= 49 (:controller event)))
-    {:state (assoc state :shift? (pos? (:raw-value event)))}
+    {:state (cond-> (assoc state :shift? (pos? (:raw-value event)))
+              (zero? (:raw-value event)) (dissoc :shift-patch))}
     (and (= :control-change (:type event)) (= 86 (:controller event)))
     {:state (assoc state :record? (pos? (:raw-value event)))}
     (and (= :note-on (:type event)) (<= 0 (:note event) 9))
@@ -404,7 +407,7 @@
 (defn- stop [device-id state _model _envelope disconnected?]
   {:state (assoc (targets/clear-selection state) :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                        :last-touch-strip nil :display-buttons #{}
-                       :touches {} :touch-order [] :shift? false :record? false :pressed-pads #{} :pad-instances {})
+                       :touches {} :touch-order [] :shift? false :shift-patch nil :record? false :pressed-pads #{} :pad-instances {})
    :commands (mapv (fn [id] {:op :instance/end :instance-id id})
                    (keep :instance-id (vals (get-in state [:holds :gestures]))))
    :midi (if (or disconnected? (not (:ready? state))) []
@@ -425,7 +428,7 @@
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
   (let [initial {:page-id page-id :origin [0 0] :palettes {} :next-palette 0
                  :ready? false :pads {} :holds {} :last-leds {} :led-retries 0 :display-buttons #{}
-                 :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
+                 :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                  :pressed-pads #{} :pad-instances {}}]
     {:id :push-2 :capabilities capabilities :initial-state initial
      :decode (partial decode device-id)
@@ -447,7 +450,7 @@
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
      :reset-model #(assoc (targets/clear-selection %) :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
-                           :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
+                           :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                            :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]
             (let [hold (when-let [gesture (:gesture-id command)]

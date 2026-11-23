@@ -193,6 +193,25 @@
         (is (empty? (:errors (session/snapshot device)))))
       (finally (session/close! device)))))
 
+(deftest captured-shift-encoder-edits-one-patched-code
+  (let [{:keys [show receive device]} (harness {:button-bindings {:right :shift}})]
+    (try
+      (swap! show assoc :rig {:fixtures [{:id :light :channels {:pan [1 2]}}]})
+      (swap! show assoc-in [:registry :effects :wash :outputs] {:pan {:op :param :key :level}})
+      (session/open! device)
+      (@receive [0x93 12 100])
+      (let [instance (first (keys (:instances @show)))
+            level #(get-in @show [:instances instance :params :level])
+            old (level)]
+        (@receive [0xb4 23 127])
+        (@receive [0xb2 19 1])
+        (is (= (+ old (/ 1.0 65535)) (level)))
+        (let [fine (level)]
+          (@receive [0xb4 23 0])
+          (@receive [0xb2 19 1])
+          (is (= (+ fine 0.01) (level)))))
+      (finally (session/close! device)))))
+
 (deftest tethered-display-follows-captured-controls-and-mpe-selection
   (doseq [[profile-options note] [[{} [0x93 12 100]]
                                   [{:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1 2]}

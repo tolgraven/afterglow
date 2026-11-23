@@ -2,7 +2,8 @@
   "Pure typed editing for encoders, touch strips and other normalized controls.
   No device addresses, mutable state, clocks or command admission live here."
   (:require [afterglow.control.bindings :as bindings]
-            [afterglow.control.params :as params]))
+            [afterglow.control.params :as params]
+            [afterglow.control.resolution :as resolution]))
 
 (defn ordered-parameters
   "Explicit :param-order wins; schema :order and stable key order fill the rest."
@@ -56,6 +57,15 @@
                    :else (/ (- (second bounds) (first bounds)) 100.0))]
     (if (and fine? (not= :integer (:type schema))) (/ base 10.0) base)))
 
+(defn patch-step
+  "Keep one immutable width index per held Shift gesture and rig snapshot.
+  A patch replacement during that gesture invalidates the index on the next edit."
+  [cache model instance parameter]
+  (let [fixtures (get-in model [:rig :fixtures])
+        cache (if (and cache (identical? fixtures (:fixtures cache))) cache
+                  {:fixtures fixtures :widths (resolution/patch-widths fixtures)})]
+    [cache (resolution/parameter-bits (:widths cache) (:definition instance) parameter (:targets instance))]))
+
 (defn- discrete-index [values value]
   (or (first (keep-indexed #(when (= %2 value) %1) values)) 0))
 
@@ -74,10 +84,12 @@
   (let [component (component-index schema component)
         absolute? (= :absolute mode)
         fraction (when absolute? (bindings/clamp input [0 1]))
+        physical-step (when (and fine? (not absolute?) (not= :integer (:type schema)))
+                        (resolution/fine-step (:dmx-bits options) (or (:bounds schema) [0 1])))
         number-edit (fn [current bounds]
                       (let [result (if absolute?
                                      (+ (first bounds) (* fraction (- (second bounds) (first bounds))))
-                                     (+ current (* input (step schema (or (:bounds schema) bounds) fine?))))]
+                                     (+ current (* input (or physical-step (step schema (or (:bounds schema) bounds) fine?)))))]
                         (bindings/clamp result bounds)))
         result
         (case (:type schema)
@@ -93,9 +105,9 @@
                   (nth values (int (bindings/clamp index [0 (dec (count values))]))))
           :color (let [hsv (rgb->hsv (color-to-control schema value))
                        changed (if (and (zero? component) (not absolute?))
-                                 (mod (+ (nth hsv component) (* input (if fine? 0.001 0.01))) 1.0)
+                                 (mod (+ (nth hsv component) (* input (or (when fine? (resolution/fine-step (:dmx-bits options) [0 1])) (if fine? 0.001 0.01)))) 1.0)
                                  (if absolute? fraction
-                                     (bindings/clamp (+ (nth hsv component) (* input (if fine? 0.001 0.01))) [0 1])))]
+                                     (bindings/clamp (+ (nth hsv component) (* input (or (when fine? (resolution/fine-step (:dmx-bits options) [0 1])) (if fine? 0.001 0.01)))) [0 1])))]
                    (control-to-color schema (hsv->rgb (assoc hsv component changed))))
           (:vector :range)
           (let [bounds (numeric-range schema (nth value component))

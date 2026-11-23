@@ -1,7 +1,8 @@
 (ns afterglow.render.emission
   "Read and adjust light at the output of a composed frame. Levels include the
   operator master. Non-emission channels retain their packed values."
-  (:require [afterglow.render.emission.dense :as dense]
+  (:require [afterglow.render.dmx :as dmx]
+            [afterglow.render.emission.dense :as dense]
             [afterglow.render.frame :as frame]
             [afterglow.render.photometry :as photometry]))
 
@@ -11,8 +12,10 @@
 (defn- drive ^double [raw pivot]
   (/ (if (and pivot (>= raw pivot)) (+ pivot (- 255.0 raw)) raw) 255.0))
 
-(defn- channel-level [universes {:keys [coarse fine inverted-from]}]
-  (drive (+ (read-byte-at universes coarse) (if fine (/ (read-byte-at universes fine) 255.0) 0.0))
+(defn- channel-level [universes {:keys [coarse fine inverted-from] :as channel}]
+  (drive (if fine
+           (dmx/coarse-units (read-byte-at universes coarse) (read-byte-at universes fine) (::frame/coarse-range? channel))
+           (read-byte-at universes coarse))
          inverted-from))
 
 (defn levels
@@ -43,7 +46,7 @@
   (let [word (long (dense/packed-word channel (unit! value) down?))
         put! (fn [[u slot] v] (aset-byte ^bytes (get buffers u) (int slot) (unchecked-byte v)))]
     (if fine
-      (do (put! coarse (quot word 255)) (put! fine (rem word 255)))
+      (do (put! coarse (unsigned-bit-shift-right word 8)) (put! fine (bit-and word 255)))
       (put! coarse word))))
 
 (defn- display-values [fixture raw]

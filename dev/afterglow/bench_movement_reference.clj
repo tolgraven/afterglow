@@ -41,8 +41,10 @@
     (throw (ex-info "Moving-head reference mismatch" (assoc details :expected expected :actual actual)))))
 
 (defn- expected-bytes [level fine?]
-  (let [scaled (* 255.0 (double level)) coarse (long scaled)]
-    (if fine? [coarse (Math/round (* 255.0 (- scaled coarse)))] [(Math/round scaled)])))
+  (if fine?
+    (let [code (Math/round (* 65535.0 (double level)))]
+      [(quot code 256) (rem code 256)])
+    [(Math/round (* 255.0 (double level)))]))
 
 (defn- slot-byte [universes fixture offset]
   (let [slot (+ (dec (:address fixture)) (dec offset))
@@ -92,6 +94,8 @@
     (check! 0.5 (:pan rotated) {:case :rotated-forward})
     (check! 0.5 (:tilt pitched) {:case :pitched-forward})
     (check! (/ 2.0 3.0) (:pan rolled) {:case :rolled-right})
-    (check! [127 128] (expected-bytes 0.5 true) {:case :fractional-255})
-    (check! [255 0] (expected-bytes 1.0 true) {:case :full-scale})
+    (check! [0 255] (expected-bytes (/ 255.0 65535.0) true) {:case :before-carry})
+    (check! [1 0] (expected-bytes (/ 256.0 65535.0) true) {:case :after-carry})
+    (check! [128 0] (expected-bytes 0.5 true) {:case :midpoint})
+    (check! [255 255] (expected-bytes 1.0 true) {:case :full-scale})
     true))

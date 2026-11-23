@@ -1,14 +1,16 @@
 (ns afterglow.render.emission.dense
   "Compiled output addresses for applying frame-wide emission policies. Each
   processor returns privately owned buffers and reuses immutable patch layout."
-  (:require [afterglow.render.photometry :as photometry]))
+  (:require [afterglow.render.dmx :as dmx]
+            [afterglow.render.photometry :as photometry]))
 
-(deftype Lane [^long u ^long i ^long fu ^long fi ^double pivot spec ^double red ^double green ^double blue])
+(deftype Lane [^long u ^long i ^long fu ^long fi ^double pivot ^boolean coarseRange spec ^double red ^double green ^double blue])
 (deftype Head [id ^long index ^long start dimmer ^objects emitters ^double red ^double green ^double blue])
 
 (defn- lane [indices spec tint]
   (let [[u i] (:coarse spec) [fu fi] (:fine spec) [r g b] tint]
-    (Lane. (long (indices u)) (long i) (if fu (long (indices fu)) -1) (long (or fi -1)) (double (or (:inverted-from spec) -1)) spec
+    (Lane. (long (indices u)) (long i) (if fu (long (indices fu)) -1) (long (or fi -1)) (double (or (:inverted-from spec) -1))
+           (boolean (:afterglow.render.frame/coarse-range? spec)) spec
            (double r) (double g) (double b))))
 
 (defn compile-layout [fixtures universes light-key]
@@ -34,7 +36,8 @@
   representable DMX step. Quantizing across that boundary can turn a tiny
   correction into full output, so consider the runs separately."
   [channel x down?]
-  (let [scale (if (:fine channel) 255 1)
+  (let [coarse-range? (and (:fine channel) (:afterglow.render.frame/coarse-range? channel))
+        scale (cond coarse-range? 255 (:fine channel) 257 :else 1)
         pivot (:inverted-from channel)
         maximum (* 255 scale)
         split (if pivot (long (Math/ceil (* scale (double pivot)))) (inc maximum))
@@ -53,16 +56,20 @@
                          (when (<= lo adjacent hi)
                            [adjacent (decode (/ adjacent (double scale)) pivot)]))))))
         left (choose (* scale raw) 0 (dec split) false)
-        right (when pivot (choose (* scale (+ pivot (- 255.0 raw))) split maximum true))]
-    (cond (nil? left) (first right)
-          (nil? right) (first left)
-          (<= (abs (- x (second left))) (abs (- x (second right)))) (first left)
-          :else (first right))))
+        right (when pivot (choose (* scale (+ pivot (- 255.0 raw))) split maximum true))
+        code (cond
+               (nil? left) (first right)
+               (nil? right) (first left)
+               (<= (abs (- x (second left))) (abs (- x (second right)))) (first left)
+               :else (first right))]
+    (if coarse-range?
+      (bit-or (bit-shift-left (quot code 255) 8) (rem code 255))
+      code)))
 
 (defn- level ^double [^objects buffers ^Lane lane]
   (let [raw (bit-and 255 (aget ^bytes (aget buffers (.-u lane)) (.-i lane)))
         x (if (neg? (.-fu lane)) (double raw)
-            (+ raw (/ (bit-and 255 (aget ^bytes (aget buffers (.-fu lane)) (.-fi lane))) 255.0)))]
+            (dmx/coarse-units raw (bit-and 255 (aget ^bytes (aget buffers (.-fu lane)) (.-fi lane))) (.-coarseRange lane)))]
     (let [pivot (.-pivot lane)] (/ (if (and (>= pivot 0.0) (>= x pivot)) (+ pivot (- 255.0 x)) x) 255.0))))
 
 (defn- write! [^objects buffers ^Lane lane ^double x down?]
@@ -74,8 +81,8 @@
                        (if down? (let [i (long (Math/floor v))]
                                    (if (> (/ i 255.0) x) (dec i) i))
                          (Math/round v)))))]
-    (aset-byte ^bytes (aget buffers (.-u lane)) (.-i lane) (unchecked-byte (if fine? (quot word 255) word)))
-    (when fine? (aset-byte ^bytes (aget buffers (.-fu lane)) (.-fi lane) (unchecked-byte (rem word 255))))))
+    (aset-byte ^bytes (aget buffers (.-u lane)) (.-i lane) (unchecked-byte (if fine? (unsigned-bit-shift-right word 8) word)))
+    (when fine? (aset-byte ^bytes (aget buffers (.-fu lane)) (.-fi lane) (unchecked-byte (bit-and word 255))))))
 
 (defn- packed [frame layout]
   (object-array (map (:universes frame) (:universes layout))))
