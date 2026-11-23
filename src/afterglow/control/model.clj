@@ -125,6 +125,10 @@
     (require! (or (= definition previous)
                    (> (:version definition) (latest-version model kind id)))
               :stale-definition-version "Publication must advance the definition version")
+    (when (and (= :effects kind) (not= (:params previous) (:params definition)))
+      (let [errors (params/dependent-cue-errors (get-in model [:registry :cues]) definition)]
+        (require! (empty? errors) :incompatible-cue-presets
+                  "Effect edit invalidates cue parameters" {:errors errors})))
     {:model (cond-> (-> model
                        (assoc-in [:registry kind id] definition)
                        (assoc-in [:registry :versions [kind id (:version definition)]] definition))

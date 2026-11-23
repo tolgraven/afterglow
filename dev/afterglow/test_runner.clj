@@ -13,7 +13,7 @@
     afterglow.control.codecs.x-touch-test afterglow.control.devices.x-touch-test
     afterglow.control.devices.session-test afterglow.control.devices.transports-test
     afterglow.output.artnet-test afterglow.output.ola-test afterglow.output.scheduler-test
-    afterglow.rdm.transport-test afterglow.spatial-test afterglow.spatial-field-test afterglow.spatial.beam-test
+    afterglow.rdm.artnet-test afterglow.rdm.transport-test afterglow.spatial-test afterglow.spatial-field-test afterglow.spatial.beam-test
     afterglow.render.atmosphere-test afterglow.render.emission-test afterglow.render.hdr-test afterglow.render.atmosphere.calibration-test afterglow.render.compute-test afterglow.render.photometry-test afterglow.render.frame-test afterglow.render.ir-test afterglow.render.optics-test afterglow.render.edge-tracking-test afterglow.render.layers-test afterglow.render.presentation-test])
 
 (def suites

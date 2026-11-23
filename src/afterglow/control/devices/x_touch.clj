@@ -3,6 +3,7 @@
   use the shared commands; all banks, holds, touch ownership and feedback diffs
   are passed as data. Physical hardware has not been verified."
   (:require [afterglow.control.bindings :as bindings]
+            [afterglow.control.params :as params]
             [afterglow.control.codecs.x-touch :as codec]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.transports :as transports]))
@@ -28,7 +29,7 @@
       (let [schema (get-in instance [:definition :params (:param target)])
             value (get-in instance [:params (:param target)]) component (:component target)
             component? (and (integer? component) (vector? value) (< -1 component (count value)))
-            schema (if component? {:type :number :bounds (if (= :color (:type schema)) [0 1] (:bounds schema))
+            schema (if component? {:type :number :bounds (if (= :color (:type schema)) (params/color-bounds schema) (:bounds schema))
                                    :default (get (:default schema) component)} schema)
             value (if component? (nth value component) value)]
         (when (and schema (or (nil? component) component?)

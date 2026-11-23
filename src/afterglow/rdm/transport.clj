@@ -1,43 +1,20 @@
 (ns afterglow.rdm.transport
-  "Owned, cancellable OLA RPC connection used only by an RDM job."
-  (:require [afterglow.rdm.codec :as codec])
-  (:import [java.net Socket InetSocketAddress SocketTimeoutException]
-           [java.io EOFException]))
+  "Owned, cancellable RDM job connections and shared E1.20 command handling."
+  (:require [afterglow.rdm.artnet :as artnet]
+            [afterglow.rdm.codec :as codec]
+            [afterglow.rdm.deadline :as deadline]
+            [afterglow.rdm.ola :as ola])
+  (:import [java.net SocketTimeoutException]))
 
-(defn remaining-ms [deadline]
-  (let [remaining (- deadline (System/nanoTime))]
-    (when-not (pos? remaining) (throw (SocketTimeoutException. "RDM job deadline exceeded")))
-    (long (max 1 (Math/ceil (/ remaining 1.0e6))))))
+(def remaining-ms deadline/remaining-ms)
 
 (defn open!
-  "Open one OLA connection. register! owns cancellation before connect starts.
-  Job owner also closes the socket at its absolute deadline, bounding writes."
-  [{:keys [host port timeout-ms]} deadline register!]
-  (let [socket (Socket.) sequence (volatile! 0)]
-    (try
-      (register! #(.close socket))
-      (.connect socket (InetSocketAddress. ^String host (int port)) (int (min timeout-ms (remaining-ms deadline))))
-      (.setTcpNoDelay socket true)
-      {:close! #(.close socket)
-       :request! (fn [method request]
-                   (let [id (vswap! sequence inc)
-                         packet (codec/rpc-packet id method request)
-                         input (.getInputStream socket)
-                         output (.getOutputStream socket)
-                         read! (fn [n]
-                                 (let [buffer (byte-array n)]
-                                   (loop [offset 0]
-                                     (when (< offset n)
-                                       (.setSoTimeout socket (int (min timeout-ms (remaining-ms deadline))))
-                                       (let [count (.read input buffer offset (- n offset))]
-                                         (when (neg? count) (throw (EOFException. "OLA closed the RDM connection")))
-                                         (recur (+ offset count))))) buffer))]
-                     (remaining-ms deadline)
-                     (.write output ^bytes packet)
-                     (.flush output)
-                     (let [size (codec/message-size (read! 4))]
-                       (codec/decode-reply id method request (mapv #(bit-and 255 %) (read! size))))))}
-      (catch Throwable error (.close socket) (throw error)))))
+  "Open the configured RDM transport for one job. OLA is the default."
+  [{:keys [transport] :as config} deadline register!]
+  (case transport
+    (nil :ola) (ola/open! config deadline register!)
+    :art-net (artnet/open! config deadline register!)
+    (codec/fail! "Unknown RDM transport" {:transport transport})))
 
 (def nack-reasons
   {0 :unknown-pid 1 :format-error 2 :hardware-fault 3 :proxy-reject 4 :write-protect
@@ -69,8 +46,8 @@
           (recur))))))
 
 (defn command!
-  "Resolve ACK_TIMER by bounded QUEUED_MESSAGE polling. OLA owns ACK_OVERFLOW
-  assembly and transport transaction validation. Never re-send a delayed SET."
+  "Resolve ACK_TIMER by bounded QUEUED_MESSAGE polling. The selected transport owns
+  ACK_OVERFLOW assembly and transaction validation. Never re-send a delayed SET."
   [request! request deadline current?]
   (let [request (codec/validate-command request)
         query (assoc request :pid 0x20 :command :get :data [1] :sub-device 0)
