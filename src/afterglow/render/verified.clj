@@ -2,7 +2,7 @@
   "Independently reproduce every field in an audience participant's slice.
   The physical output uses the local float64 reference, even for a successful check."
   (:require [afterglow.render.ir :as ir])
-  (:import [java.nio ByteBuffer ByteOrder]
+  (:import [java.nio ByteBuffer ByteOrder FloatBuffer]
            [java.util Arrays]))
 
 (defn- slice [points width start n]
@@ -11,8 +11,8 @@
         (Arrays/copyOfRange ^doubles points (int (* width start)) (int (* width (+ start n))))
         :else (subvec (vec points) start (+ start n))))
 
-(defn- close? [expected actual]
-  (and (Double/isFinite expected) (Float/isFinite actual)
+(defn- close? [^double expected ^double actual]
+  (and (Double/isFinite expected) (Double/isFinite actual)
        (<= (abs (- expected actual)) (* 1.0e-5 (max 1.0 (abs expected))))))
 
 (defn readback
@@ -33,3 +33,26 @@
                                (recur (inc i)))))))
                 (:outputs plan)))
       cpu)))
+
+(def ^:private random-source (java.security.SecureRandom.))
+
+(defn- indices [n]
+  (if (<= n 4) (range n)
+    (loop [rows #{}]
+      (if (= 4 (count rows)) rows (recur (conj rows (.nextInt random-source n)))))))
+
+(defn agree?
+  "Compare all corresponding float32 values. Then independently verify up to
+  four unpredictable rows selected after receipt. Colluding participants can
+  still agree on an incorrect unsampled value: full verification is stronger."
+  [group env job ^bytes a ^bytes b]
+  (let [^FloatBuffer la (.asFloatBuffer (.order (ByteBuffer/wrap a) ByteOrder/LITTLE_ENDIAN))
+        ^FloatBuffer rb (.asFloatBuffer (.order (ByteBuffer/wrap b) ByteOrder/LITTLE_ENDIAN)) width (* Float/BYTES (get-in group [:packet :plan :stride]))
+        sample (fn [i]
+                 (let [row (Arrays/copyOfRange a (int (* width i)) (int (* width (inc i))))]
+                   (readback group env {:start (+ (:start job) i) :count 1} row)))]
+    (and (= (alength a) (alength b) (* width (:count job)))
+         (loop [i 0]
+           (or (= i (.limit la))
+               (and (close? (.get la (int i)) (.get rb (int i))) (recur (inc i)))))
+         (every? sample (indices (:count job))))))

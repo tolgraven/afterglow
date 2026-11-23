@@ -24,3 +24,30 @@
       (is (= 1 (:rejected (pool/status owner))))
       (is (not (pool/connected? owner @handle)))
       (finally (pool/close! owner)))))
+
+(deftest independent-guests-repeat-the-same-slice-and-a-disagreement-drops-the-entire-batch
+  (let [owner (pool/create) g (rt/group) observed (atom []) delta (atom 0.0)
+        connect (fn [id]
+                  (let [handle (promise)]
+                    (deliver handle
+                      (pool/connect! owner {:max-result-floats 7 :verification :redundant :subject id}
+                        (fn [{:keys [op job start count] program :id}]
+                          (case op
+                            :prepare (pool/receive! owner @handle {:op :ready :id program})
+                            :run (do (swap! observed conj [id start count])
+                                     (pool/receive! owner @handle
+                                       {:op :result :job job :values (rt/result-bytes
+                                         (map #(+ % (if (= id "b") @delta 0.0)) (range start (+ start count))))}))))))
+                    @handle))
+        a (connect "a") b (connect "b")
+        run #(pool/evaluate! owner g {} (rt/deadline))]
+    (try
+      (is (nil? (run)))
+      (is (= (mapv first rt/points) (vec (get-in (run) [:outputs :dimmer :values]))))
+      (is (= #{["a" 0 7] ["b" 0 7]} (set @observed)))
+      (reset! delta 0.1)
+      (is (nil? (run)))
+      (is (pool/connected? owner a))
+      (is (not (pool/connected? owner b)))
+      (is (= (mapv first rt/points) (vec (get-in (run) [:outputs :dimmer :values]))) "Single remaining peer uses full verification")
+      (finally (pool/close! owner)))))
