@@ -118,7 +118,7 @@
               (ex-info "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer})
               source)))))
 
-(defn- apply-member [high? state blocks rows blend-value validate!]
+(defn- apply-member [high? state blocks rows blend-value validate! allowed]
   (let [{:keys [source native-layer] :as first-block} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
@@ -127,10 +127,12 @@
         state
         (let [inherited (when (= targets :previous)
                           (keys (if (:inherit-backdrop? native-layer) (:fields state) (:sources state))))
-              initial (zipmap (concat (:target-ids native-layer) inherited) (repeat []))
+              target-ids (concat (:target-ids native-layer) inherited)
+              initial (zipmap (if allowed (filter #(contains? allowed %) target-ids) target-ids)
+                              (repeat []))
               inputs (reduce (fn [acc block]
                                (reduce (fn [m a] (update m (:target-id a) (fnil conj []) a))
-                                       acc (rows block nil)))
+                                       acc (rows block allowed)))
                              initial blocks)
               apply-row (partial set-assignment high? blend-value validate!)]
           (reduce-kv
@@ -160,25 +162,33 @@
 
 (defn- ordered-members [blocks]
   (let [ordered (sort-by #(get-in % [:native-layer :member]) blocks)
-        opacity (get-in (first ordered) [:native-layer :opacity] 1)]
+        group (:native-layer (first ordered))
+        opacity (:opacity group 1)]
     (doseq [block ordered]
-      (when-not (= opacity (get-in block [:native-layer :opacity] 1))
-        (throw (faults/attributed-error (ex-info "Layer opacity must agree across members" {})
+      (when-not (and (= opacity (get-in block [:native-layer :opacity] 1))
+                     (= (:target-weights group) (get-in block [:native-layer :target-weights])))
+        (throw (faults/attributed-error (ex-info "Layer opacity and target weights must agree across members" {})
                                         (:source block)))))
     (partition-by (juxt #(get-in % [:native-layer :member]) :source) ordered)))
 
 (defn- group-blocks [high? backdrop blocks rows blend-value validate!]
   (let [members (ordered-members blocks)
-        opacity (get-in (first blocks) [:native-layer :opacity] 1)]
-    (if (zero? opacity)
+        group (:native-layer (first blocks))
+        opacity (:opacity group 1)
+        weights (:target-weights group)
+        _ (when (and (some? weights) (not (and (map? weights) (every? unit? (vals weights)))))
+            (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {})
+                                            (:source (first blocks)))))
+        allowed (when weights (into #{} (keep (fn [[id weight]] (when (pos? weight) id))) weights))]
+    (if (or (zero? opacity) (and allowed (empty? allowed)))
       []
       (let [{:keys [fields sources]}
-            (reduce #(apply-member high? %1 %2 rows blend-value validate!) {:fields backdrop :sources {}} members)
+            (reduce #(apply-member high? %1 %2 rows blend-value validate! allowed) {:fields backdrop :sources {}} members)
             writes (for [[id attrs] (sort-by (comp pr-str key) sources)
                          [field source] (sort-by key attrs)
                          :when (not= :beat-ratio field)]
                      [source {:target-id id :attribute field :value (rgb (get-in fields [id field]))
-                              :opacity opacity}])]
+                              :opacity (if weights (* opacity (weights id)) opacity)}])]
         (mapv (fn [run] {:kind :assignments :source (ffirst run) :assignments (mapv second run)})
               (partition-by first writes))))))
 
@@ -193,7 +203,8 @@
   "An opaque physical replacement is already in the downstream renderer's
   representation. Musical fields, native colors and blends use the typed fold."
   [{:keys [native-layer kind assignments compiled]}]
-  (and (opaque? (:opacity native-layer 1))
+  (and (nil? (:target-weights native-layer))
+       (opaque? (:opacity native-layer 1))
        (opaque? (:member-opacity native-layer 1))
        (empty? (:transforms native-layer))
        (case kind
@@ -227,7 +238,10 @@
 (defn compose
   "Compose tagged blocks at the last member's position in the ordinary priority
   stream. Only affected target rows are read into the native backdrop. Each
-  target/field result retains the source of its final contributing member."
+  target/field result retains the source of its final contributing member.
+  Optional :target-weights maps head IDs to [0,1]. Omitted heads receive no
+  group output. Multiply the final group opacity by this weight once, after
+  composing all native transforms and their inputs."
   ([blocks rows blend-value validate!] (compose blocks rows blend-value validate! false))
   ([blocks rows blend-value validate! high?]
   (if-not (some :native-layer blocks)
