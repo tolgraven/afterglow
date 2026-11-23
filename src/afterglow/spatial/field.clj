@@ -20,14 +20,17 @@
                    (time/finite-number? (+ inner-m outer-m)) (#{:linear :smoothstep} curve)
                    (set? selection) (set/subset? selection #{:position :beam :aimable}))
       (geometry/invalid! "Invalid volume strength, falloff or selection" volume))
-    (let [{:keys [distance bounds]} (shape/prepare volume)
+    (let [{:keys [distance bounds inside?]} (shape/prepare volume)
           width (+ inner-m outer-m)
           edge (fn [d] (cond (<= d (- inner-m)) 1.0 (>= d outer-m) 0.0
                              :else (fade curve (/ (- outer-m d) width))))
           expand (fn [corner sign] (mapv #(+ (double %) (* sign outer-m)) corner))]
       {:bounds (when bounds {:min (expand (:min bounds) -1) :max (expand (:max bounds) 1)})
        :center (when bounds (mapv #(* 0.5 (+ %1 %2)) (:min bounds) (:max bounds)))
-       :selection selection :weight-at (fn [p] (* (double strength) (edge (distance p))))})))
+        :selection selection
+       :weight-at (if (zero? width)
+                    (fn [p] (if (inside? p) (double strength) 0.0))
+                    (fn [p] (* (double strength) (edge (distance p)))))})))
 
 (defn- position-weights [{:keys [weight-at bounds selection]} rig]
   (if (contains? selection :position)

@@ -44,20 +44,25 @@
 
 (defn- compound [op children]
   (let [distances (mapv :distance children)
-        boxes (mapv :bounds children)]
+        boxes (mapv :bounds children)
+        contains-point? (mapv :inside? children)]
     (case op
-      :union {:distance (extrema min distances)
+      :union {:inside? (fn [p] (boolean (some #(% p) contains-point?)))
+              :distance (extrema min distances)
               :bounds (when (every? some? boxes) (reduce (partial merge-bounds min max) boxes))}
-      :intersection {:distance (extrema max distances)
+      :intersection {:inside? (fn [p] (every? #(% p) contains-point?))
+                     :distance (extrema max distances)
                      :bounds (when-let [finite (seq (remove nil? boxes))]
                                (reduce (partial merge-bounds max min) finite))}
-      :difference {:distance (extrema max (into [(first distances)] (map #(comp - %)) (rest distances)))
+      :difference {:inside? (fn [p] (and ((first contains-point?) p) (not-any? #(% p) (rest contains-point?))))
+                   :distance (extrema max (into [(first distances)] (map #(comp - %)) (rest distances)))
                    :bounds (first boxes)})))
 
 (defn- translate [{:keys [distance bounds] :as plan} offset]
   (if (or (nil? offset) (every? zero? offset))
     plan
-    {:distance (fn [point] (distance (mapv - point offset)))
+    {:inside? (fn [point] ((:inside? plan) (mapv - point offset)))
+     :distance (fn [point] (distance (mapv - point offset)))
      :bounds (when bounds (update-vals bounds #(mapv + offset %)))}))
 
 (defn prepare
@@ -74,4 +79,6 @@
                :cylinder (cylinder spec)
                :polyhedron {:distance (extrema max (mapv half-space planes)) :bounds nil}
                (:union :intersection :difference) (compound shape (mapv prepare parts)))]
-    (translate plan translation)))
+    (translate (cond-> plan (nil? (:inside? plan))
+                 (assoc :inside? (fn [p] (<= ((:distance plan) p) 0.0))))
+               translation)))

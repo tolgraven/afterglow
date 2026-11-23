@@ -3,6 +3,7 @@
   HDR field. Transport, cue ownership and running user callbacks belong to the host."
   (:require [afterglow.spatial.geometry :as geometry]
             [afterglow.spatial.motion :as motion]
+            [afterglow.spatial.trace :as trace]
             [afterglow.time :as time]
             [clojure.set :as set]))
 
@@ -25,7 +26,7 @@
       (when (= shape :ball) (motion/validate! {:bounds bounds} volume)))
     config))
 
-(defrecord Scene [bounds gravity volumes order balls])
+(defrecord Scene [bounds gravity volumes order balls traces])
 
 (defn prepare
   "Validate resolved settings and establish permanent ordering for a configuration.
@@ -34,7 +35,11 @@
   (if (instance? Scene config) config
     (let [{:keys [bounds gravity volumes] :or {bounds default-bounds gravity default-gravity volumes {}}} (validate! config)
           order (vec (sort-by pr-str (keys volumes)))]
-      (->Scene bounds gravity volumes order (filterv #(= :ball (:shape (volumes %))) order)))))
+      (let [balls (filterv #(= :ball (:shape (volumes %))) order)
+            traces (into {} (keep (fn [id]
+                                    (when-let [geometry (get-in volumes [id :geometry])]
+                                      [id (trace/prepare geometry)]))) balls)]
+        (->Scene bounds gravity volumes order balls traces)))))
 
 (defn prepare-rig [fixtures] (geometry/prepare-rig fixtures))
 
@@ -63,36 +68,41 @@
                 (not= before after) (update :events into (transitions id before after now)))))
           state ids))
 
-(defn- observe-segment [state id rig radius start finish p0 p1]
+(defn- observe-segment [state id sweep start finish p0 p1]
   (if (every? true? (map == p0 p1)) state
     (let [was (get-in state [:members id] #{})
-          hits (geometry/sweep rig p0 p1 radius)
+          hits (sweep p0 p1)
           event (fn [type fixture t]
                   {:type type :volume-id id :fixture-id fixture :time-ms (+ start (* (- finish start) t))})
-          [inside events] (reduce (fn [[inside events] [fixture entry exit stays?]]
-                                    [(cond-> inside stays? (conj fixture))
-                                     (cond-> events
-                                       (not (was fixture)) (conj (event :spatial/enter fixture entry))
-                                       (not stays?) (conj (event :spatial/exit fixture exit)))])
-                                  [#{} (:events state)] hits)
-          ;; A fixture exactly on the starting surface can fall outside
-          ;; a tangent test by one floating-point unit.
-          leaving (set/difference was inside (into #{} (map first) hits))]
+          leaving (set/difference was (into #{} (map first) hits))
+          follow (fn [[inside events] [fixture entry exit stays?]]
+                   [(if stays? (conj inside fixture) (disj inside fixture))
+                    (cond-> events
+                      (not (inside fixture)) (conj (event :spatial/enter fixture entry))
+                      (not stays?) (conj (event :spatial/exit fixture exit)))])
+          [inside events] (reduce follow [(set/difference was leaving) (:events state)] hits)]
       (-> state (assoc-in [:members id] inside)
           (assoc :events (into events (map #(event :spatial/exit % 0.0)) (sort-by pr-str leaving)))))))
 
-(defn- observe-motion [out before ids volumes rig start wall-paths]
+(defn- volume-sweep [rig {:keys [radius translation]} trace]
+  (let [sweep (if trace (partial geometry/sweep-geometry rig trace)
+                  (fn [from to] (geometry/sweep rig from to radius)))]
+    (if translation
+      (fn [from to] (sweep (mapv + from translation) (mapv + to translation)))
+      sweep)))
+
+(defn- observe-motion [out before ids volumes traces rig start wall-paths]
   (reduce
     (fn [state id]
       (let [p0 (get-in before [:bodies id :position]) p1 (get-in state [:bodies id :position])
-            radius (:radius (volumes id)) end (+ start motion/step-ms)]
+            sweep (volume-sweep rig (volumes id) (traces id)) end (+ start motion/step-ms)]
         (if-let [waypoints (get wall-paths id)]
           (loop [state state t0 start p0 p0 remaining (seq waypoints)]
             (if-let [[offset p] (first remaining)]
               (let [t (+ start offset)]
-                (recur (observe-segment state id rig radius t0 t p0 p) t p (next remaining)))
-              (observe-segment state id rig radius t0 end p0 p1)))
-          (observe-segment state id rig radius start end p0 p1))))
+                (recur (observe-segment state id sweep t0 t p0 p) t p (next remaining)))
+              (observe-segment state id sweep t0 end p0 p1)))
+          (observe-segment state id sweep start end p0 p1))))
     out ids))
 
 (defn- signals [{:keys [shape position radius min max]} body]
@@ -149,7 +159,7 @@
                               next (motion/step (:bodies current) (:contacts current) balls volumes scene t)]
                           (observe-motion (-> current (assoc :bodies (:bodies next) :contacts (:contacts next))
                                               (update :events into (:events next)))
-                                          current balls volumes rig t (:wall-paths next))))
+                                          current balls volumes (:traces scene) rig t (:wall-paths next))))
                       initial (range steps))
         state (assoc (dissoc final :events) :epoch (:epoch clock) :time-ms now :playing? playing? :remainder-ms remainder)]
     {:state state :members (:members final) :dropped-ms dropped

@@ -32,3 +32,18 @@
     (is (= 1.0 (point {:shape :intersection :parts [cube cut]} [0.1 0 0])))
     (is (= 0.0 (point {:shape :intersection :parts [cube cut]} [1 0 0])))
     (is (= 1.0 (point {:shape :union :parts [cube (assoc cut :position [3 0 0])]} [3 0 0])))))
+
+(deftest throw-through-a-cutout-emits-contact-for-both-solid-pieces
+  (let [body {:shape :ball :position [0 1 0] :velocity [1000 0 0] :radius 0.1
+              :geometry {:shape :difference
+                         :parts [{:shape :box :min [-1 -0.2 -0.2] :max [1 0.2 0.2]}
+                                 {:shape :box :min [-0.3 -1 -1] :max [0.3 1 1]}]}}
+        rig [{:id :pixel :position [2 1 0]}]
+        scene (spatial/prepare {:bounds {:min [-10 0 -10] :max [10 5 10]}
+                                :gravity [0 0 0] :volumes {:body body}})
+        step (fn [prev t] (spatial/advance prev scene {:epoch 1 :time-ms t} rig {}))
+        result (step (:state (step nil 0)) 5)]
+    (is (= [:spatial/enter :spatial/exit :spatial/enter :spatial/exit]
+           (mapv :type (:events result))))
+    (is (every? #(< (abs %) 1.0e-8) (map - [1.0 1.7 2.3 3.0] (map :time-ms (:events result)))))
+    (is (empty? (get-in result [:members :body])))))

@@ -42,21 +42,10 @@
   spec)
 
 (defn inside?
-  "A point on a surface belongs to the volume. A convex polyhedron accepts the
-  half-spaces dot(normal, point) <= distance; combine primitives with CSG."
-  [{:keys [shape position radius min max height parts planes translation geometry] :as spec} point]
-  (if (or translation geometry (= shape :rounded-box))
-    (<= ((:distance (field-shape/prepare spec)) point) 0.0)
-    (case shape
-    (:ball :sphere) (<= (dist2 position point) (* (double radius) (double radius)))
-    :box (every? true? (map <= min point max))
-    :cylinder (let [[x y z] point [cx cy cz] position dx (- x cx) dz (- z cz)]
-                (and (<= (abs (- y cy)) (/ height 2.0))
-                     (<= (+ (* dx dx) (* dz dz)) (* radius radius))))
-    :polyhedron (every? (fn [{:keys [normal distance]}] (<= (reduce + (map * normal point)) distance)) planes)
-    :union (boolean (some #(inside? % point) parts))
-    :intersection (every? #(inside? % point) parts)
-    :difference (and (inside? (first parts) point) (not-any? #(inside? % point) (next parts))))))
+  "A point on a primitive boundary belongs to it. A difference removes the
+  subtracting shape's boundary as well as its interior."
+  [spec point]
+  ((:inside? (field-shape/prepare spec)) point))
 
 (defrecord Rig [ids rows xs directional])
 
@@ -89,8 +78,8 @@
         (subvec rows (lower-bound xs (double lo)) (lower-bound xs (Math/nextUp (double hi))))))))
 
 (defn fixtures-in [rig volume]
-  (let [{:keys [distance bounds]} (field-shape/prepare volume)]
-    (into #{} (keep (fn [[id point]] (when (<= (distance point) 0.0) id)))
+  (let [{:keys [inside? bounds]} (field-shape/prepare volume)]
+    (into #{} (keep (fn [[id point]] (when (inside? point) id)))
           (candidates rig bounds))))
 
 (defn sweep
@@ -116,3 +105,12 @@
                  (if (and (>= chord2 0.0) (<= enter leave))
                    (conj! hits [id enter leave (<= (dist2 [a b c] [ex ey ez]) rr)])
                    hits)))))))
+
+(defn sweep-geometry [rig {:keys [intervals bounds]} from to]
+  (let [delta (mapv - from to)
+        swept (when bounds {:min (mapv + (mapv min from to) (:min bounds))
+                            :max (mapv + (mapv max from to) (:max bounds))})
+        contacts (fn [[id p]]
+                   (map (fn [[entry exit]] [id entry exit (== 1.0 exit)])
+                        (intervals (mapv - p from) delta)))]
+    (into [] (mapcat contacts) (candidates rig swept))))
