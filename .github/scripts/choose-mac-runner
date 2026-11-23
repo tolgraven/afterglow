@@ -2,6 +2,7 @@
 """Route this commit to its Mac test result when a trusted worker has claimed it."""
 
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 import json
 import os
 import sys
@@ -39,9 +40,20 @@ def reported_result(repository, sha, token, context):
 
 def select_runner(repository, sha, token, context, *, offer):
     started = time.monotonic()
+    last_status = started
     while True:
-        result = reported_result(repository, sha, token, context)
-        elapsed = time.monotonic() - started
+        now = time.monotonic()
+        elapsed = now - started
+        try:
+            result = reported_result(repository, sha, token, context)
+            last_status = now
+        except (URLError, TimeoutError, HTTPException, ValueError, KeyError, TypeError) as error:
+            interval = CLAIM_WAIT if offer else HEARTBEAT_LIFETIME.total_seconds()
+            if elapsed >= MAX_WAIT or now - last_status >= interval:
+                print(f"Mac status unavailable ({type(error).__name__}). Using hosted macOS.", file=sys.stderr)
+                return "hosted"
+            time.sleep(10)
+            continue
         if result == "success":
             return "local"
         if result == "failure":
@@ -57,11 +69,7 @@ def select_runner(repository, sha, token, context, *, offer):
 
 if __name__ == "__main__":
     context = f"{CONTEXT}/{os.environ['GITHUB_RUN_ID']}.{os.environ['GITHUB_RUN_ATTEMPT']}"
-    try:
-        runner = select_runner(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"],
-                               os.environ["GH_TOKEN"], context, offer=sys.argv[1] == "offer")
-    except (URLError, TimeoutError) as error:
-        print(f"Mac status unavailable ({type(error).__name__}). Using hosted macOS.", file=sys.stderr)
-        runner = "hosted"
+    runner = select_runner(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"],
+                           os.environ["GH_TOKEN"], context, offer=sys.argv[1] == "offer")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         print(f"runner={runner}", file=output)
