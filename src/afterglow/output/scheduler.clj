@@ -3,7 +3,7 @@
   completions; the publisher never takes the show-owner lock or runs effects."
   (:require [afterglow.render.presentation :as policy]
             [afterglow.output.timeline :as timeline])
-  (:import [java.util.concurrent LinkedBlockingDeque ArrayBlockingQueue Executors ScheduledExecutorService TimeUnit]
+  (:import [java.util.concurrent ArrayBlockingQueue Executors ScheduledExecutorService TimeUnit]
            [java.util.concurrent.atomic AtomicLong]))
 
 (defn validate-options [options]
@@ -21,7 +21,7 @@
      :gate (atom nil) :counter (atom 0)
      :receipts (when receipt-capacity (ArrayBlockingQueue. (int receipt-capacity)))
      :receipt-drops (AtomicLong. 0)
-     :queue (LinkedBlockingDeque. 3) :lock (Object.) :closed? (atom false)
+     :queue (atom []) :lock (Object.) :closed? (atom false)
      :scheduler (atom nil) :timeline (atom nil) :ready (atom nil) :state (atom nil)
      :status (atom {:published 0 :coalesced 0})}))
 
@@ -61,6 +61,19 @@
       (timeline/deadline grid (+ (:slot token) slots))
       (+ (:time-ms token) (* slots period)))))
 
+(defn- enqueue! [owner entry]
+  (let [append (fn [pending]
+                 (if (and (some? pending) (= (:generation entry) (:generation @(:gate owner))))
+                   (if (< (count pending) 3)
+                     (conj pending entry)
+                     (conj (into [] (next pending)) entry))
+                   pending))
+        [before after] (swap-vals! (:queue owner) append)]
+    (when-not (identical? before after)
+      (when (= 3 (count before))
+        (swap! (:status owner) update :coalesced inc))
+      true)))
+
 (defn complete!
   "Freeze an exclusively owned renderer result and offer without blocking the
   evaluator. At most three completions wait; excess oldest packets coalesce."
@@ -82,18 +95,12 @@
           latency (if (= :buffered-interpolation (:mode options)) (:latency-ms options) 0)
           due (when (:slot token) (+ (:time-ms token) latency))
           expiry (when due (publication-expiry @(:timeline owner) token (:period-ms options) latency))
-          entry {:generation (:generation token) :packet packet :due-at-ms expiry}
-          ^LinkedBlockingDeque queue (:queue owner)]
+          entry {:generation (:generation token) :packet packet :due-at-ms expiry}]
       (when (:slot token)
         (reset! (:ready owner) (assoc (select-keys token [:slot :time-ms :show-time-ms :beat :inputs-at-ms]) :ready-at-ms ready)))
       (if (and due (> ready due))
         (do (swap! (:status owner) update :missed-render-deadlines (fnil inc 0)) false)
-        (do
-          (when-not (.offerLast queue entry)
-            (.pollFirst queue)
-            (swap! (:status owner) update :coalesced inc)
-            (.offerLast queue entry))
-          true)))))
+        (enqueue! owner entry)))))
 
 (defn- admit-completion [gate deadline-ms state {:keys [generation due-at-ms packet]}]
   (cond
@@ -151,6 +158,20 @@
               (update :expired-at-publication (fnil + 0) expired))))
     (policy/new-state (:plan gate) (assoc (:options gate) :epoch (:epoch gate)))))
 
+(defn- keep-presented-source [state previous gate]
+  ;; Three accepted future endpoints can occupy the entire policy history.
+  ;; Keep the actual lower source as well, with its original bytes and time,
+  ;; so direct hold, a fresh fade, or a buffered interpolation can use it.
+  (if (and (= (:generation gate) (:generation previous))
+           (:last-source previous)
+           (or (empty? (:history state))
+               (> (:frame-id (first (:history state))) (:last-source previous))))
+    (if-let [held (some #(when (= (:last-source previous) (:frame-id %)) %)
+                        (get-in previous [:policy :history]))]
+      (update state :history #(into [held] %))
+      state)
+    state))
+
 (defn- dark-packet [gate packet now]
   {:frame-id (:frame-id packet 0) :epoch (:epoch gate)
    :calibration (:calibration packet) :calibration-verified? false
@@ -161,7 +182,13 @@
 (defn- commit-publication! [owner gate state entries packet]
   ;; The producer may have coalesced an entry while the sink was packing.
   ;; Remove only the entries used here, leaving newer arrivals untouched.
-  (doseq [entry entries] (.removeFirstOccurrence ^LinkedBlockingDeque (:queue owner) entry))
+  (swap! (:queue owner)
+         (fn [pending]
+           (cond
+             (nil? pending) nil
+             (identical? pending entries) []
+             :else (let [acknowledged? (fn [entry] (some #(identical? entry %) entries))]
+                     (into [] (remove acknowledged?) pending)))))
   (reset! (:state owner) {:generation (:generation gate) :policy state :last-source (:frame-id packet)})
   (swap! (:status owner) #(-> % (update :published inc)
                               (assoc :last (:presentation packet)
@@ -177,17 +204,19 @@
      (when-not @(:closed? owner)
        (when-let [gate @(:gate owner)]
          (let [now ((:now-ms owner))
-               state (current-policy gate @(:state owner) deadline-ms)
-               entries (.toArray ^LinkedBlockingDeque (:queue owner))
+               previous @(:state owner)
+               state (current-policy gate previous deadline-ms)
+               entries @(:queue owner)
                state (reduce #(admit-completion gate deadline-ms %1 %2) state entries)
-               {next-state :state packet :packet} (policy/present state now)
+               {next-state :state packet :packet} (policy/present (keep-presented-source state previous gate) now)
                packet (if (or (:dark? gate) (nil? packet)) (dark-packet gate packet now) packet)
                period (or (:period-ms @(:timeline owner)) (get-in gate [:options :period-ms]))
                expires-at (when deadline-ms (+ deadline-ms period))
                sent (send-packet! owner gate packet expires-at)]
            (if (:expired-before-send? sent)
              (swap! (:status owner) update :expired-before-send (fnil inc 0))
-             (commit-publication! owner gate next-state entries packet))
+             (when (and (not @(:closed? owner)) (= (:generation gate) (:generation @(:gate owner))))
+               (commit-publication! owner gate next-state entries packet)))
            sent))))))
 
 (defn drain-receipts!
@@ -198,7 +227,7 @@
 
 (defn status [owner]
   (merge @(:status owner) {:scheduled? (some? @(:scheduler owner)) :closed? @(:closed? owner)
-                          :pending (.size ^LinkedBlockingDeque (:queue owner))
+                          :pending (count @(:queue owner))
                           :options (:options @(:gate owner))
                           :render-timing (dissoc @(:timeline owner) :costs :wake-lags)}))
 
@@ -287,7 +316,7 @@
   (locking (:lock owner)
     (reset! (:closed? owner) true)
     (when-let [^ScheduledExecutorService scheduler @(:scheduler owner)] (.shutdownNow scheduler))
-    (.clear ^LinkedBlockingDeque (:queue owner))
+    (reset! (:queue owner) nil)
     (when-let [^ArrayBlockingQueue mailbox (:receipts owner)] (.clear mailbox))
     (reset! (:state owner) nil))
   nil)

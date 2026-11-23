@@ -337,3 +337,44 @@
         (scheduler/publish! owner 75))
       (is (= [190 0] (mapv #(get-in % [:bytes 0 0]) @sent)) "Explicit blackout reaches the sink")
       (finally (scheduler/close! owner)))))
+
+(deftest acknowledgement-keeps-newer-completions-and-close-fences-the-mailbox
+  (let [clock (atom 0) sent (atom []) owner (capture clock sent)
+        offer! (fn [id]
+                 (reset! clock id)
+                 (scheduler/complete! owner (scheduler/begin-frame! owner 0 @patch {} false) (frame id 0 0)))
+        pack presentation/materialize freeze presentation/freeze-frame]
+    (try
+      (offer! 1)
+      (with-redefs [presentation/materialize (fn [packet]
+                                               (doseq [n [2 3 4]] (offer! n))
+                                               (pack packet))]
+        (scheduler/publish! owner))
+      (is (= 3 (:pending (scheduler/status owner))))
+      (scheduler/publish! owner)
+      (is (= [1 4] (mapv #(get-in % [:bytes 0 0]) @sent)))
+      (is (zero? (:pending (scheduler/status owner))))
+      (with-redefs [presentation/freeze-frame (fn [token rendered]
+                                                (scheduler/close! owner)
+                                                (freeze token rendered))]
+        (is (nil? (offer! 5))))
+      (is (zero? (:pending (scheduler/status owner))))
+      (finally (scheduler/close! owner)))))
+
+(deftest three-future-endpoints-cannot-evict-the-physical-lower-source
+  (doseq [[mode expected] [[:direct 80] [:hold-fade 60] [:buffered-interpolation 110]]]
+    (let [clock (atom 0) sent (atom []) owner (capture clock sent)
+          options {:mode mode :latency-ms 25 :fade-ms 100}
+          offer! (fn [slot red]
+                   (let [token (scheduler/begin-frame! owner 1 @patch options false
+                                                       {:slot slot :started-at-ms @clock :deadline-ms (* 25 slot)})]
+                     (scheduler/complete! owner token (frame red 0 0))))
+          publish! (fn [at] (reset! clock at) (scheduler/publish! owner at))]
+      (try
+        (offer! 1 80)
+        (publish! (if (= mode :buffered-interpolation) 50 25))
+        (doseq [slot [5 6 7]] (offer! slot 200))
+        (let [packet (publish! 75)]
+          (is (= 1 (:frame-id packet)) (name mode))
+          (is (= expected (get-in packet [:universes 0 0])) (name mode)))
+        (finally (scheduler/close! owner))))))

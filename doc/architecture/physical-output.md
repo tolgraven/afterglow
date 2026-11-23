@@ -96,3 +96,11 @@ packing. Buffered upper endpoints remain available through their own
 delayed publication opportunity. An unseen expired endpoint cannot become
 the new held source. An explicit blackout goes straight to the sink even
 when packing its idle values took a full period.
+
+
+The publisher snapshots a bounded, three-entry completion mailbox. A
+successful send acknowledges only entries in its snapshot. Newer arrivals
+survive. Closing the mailbox fences workers still freezing output. The
+publisher also retains the original lower source from its last physical
+send so three future samples cannot displace a held level, fade origin or
+buffered interpolation endpoint.
