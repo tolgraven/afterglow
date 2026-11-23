@@ -49,3 +49,12 @@ position before comparing the two directions. A direction field already uses
 the emitter as its origin. A singular chord takes the live path, including
 parallel vectors of unequal length under an overshooting curve. If endpoint
 target order changes, alignment first recovers a common assignment order.
+
+All workers checking absolute aim on the same frame share one fixture-position
+lookup. The first aim request builds it from that frame's frozen fixture vector.
+Later intervals reuse it while the vector is identical. A replacement rig gets
+a fresh lookup, including when the fixture IDs stayed the same and only
+positions changed. Relative direction and color require no position index.
+The committed keyframe map carries the lookup as runtime metadata. When its
+last window ends the reference is released. Checkpoints contain only the
+saved native values and clock data.

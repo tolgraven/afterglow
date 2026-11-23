@@ -220,6 +220,53 @@
       (is (= [start collinear] (values/endpoints start collinear fixtures :linear)))
       (is (thrown? clojure.lang.ExceptionInfo (values/endpoints start collinear fixtures :spring))))))
 
+(deftest repeated-aim-windows-use-the-current-rig-position
+  (let [original [{:id :lamp :position [0 0 0]}]
+        moved [{:id :lamp :position [4.5 0 0]}]
+        scenes (atom []) index values/fixture-positions
+        first-model (show {:interval {:beats 1}})
+        model (:model (control/apply-command first-model
+                        {:op :effect/launch :effect-id :pulse :time-ms 0 :source :test :command-id "second"
+                         :show-id (:show-id first-model) :epoch (:epoch first-model)}))
+        step (kf/predictable
+              (fn [ctx]
+                (assoc ctx :assignments [{:target-id :lamp :attribute :aim
+                                          :value [(inc (get-in ctx [:frame :beat])) 0 0]}])))
+        advance-rig (fn [mapper previous beat rig]
+                      (engine/advance (assoc-in (or (:model previous) model) [:transport :beat] beat)
+                                      {:time-ms (* 500 beat) :fixtures rig :keyframes (:keyframes previous)}
+                                      (constantly step) mapper))]
+    (with-open [pool (executor/create {:workers 2 :timeout-ms 10000})]
+      (with-redefs [values/fixture-positions (fn [rig] (swap! scenes conj rig) (index rig))]
+        (let [tick (partial advance-rig (executor/mapper pool))
+              prior (reduce #(tick %1 %2 original) nil [0 1 2])
+              saved (storage/freeze (get-in prior [:keyframes "0:1"]))
+              later (tick prior 3 moved)
+              failure (with-redefs [values/fixture-positions (fn [_] (throw (ex-info "index failed" {})))]
+                        (tick later 4 original))
+              idle (tick (assoc-in failure [:model :instances] {}) 5 original)]
+          (is (= 2 (count (:keyframes prior))))
+          (is (= [original moved] @scenes))
+          (is (not-any? delay? (tree-seq coll? seq saved)))
+          (is (not (get-in prior [:keyframes "0:1" :forecast-failed?])))
+          (is (true? (get-in later [:keyframes "0:1" :forecast-failed?])))
+          (is (= [4 0 0] (get-in later [:assignments 0 :value])))
+          (is (every? :forecast-failed? (vals (:keyframes failure))))
+          (is (= [[5 0 0] [5 0 0]] (mapv :value (:assignments failure))))
+          (is (empty? (:keyframes idle)))
+          (is (nil? (meta (:keyframes idle)))))))))
+
+
+(deftest relative-direction-checks-need-no-rig-scan
+  (let [direction [1.0 0.0 0.0]
+        rows [{:kind :assignments :assignments [{:attribute :direction :target-id :lamp :value direction}]}]
+        packed [{:kind :batch :batch {:target-ids [:lamp] :outputs
+                                     {:direction {:type :vec3 :components 3 :values (double-array direction)}}}}]
+        rig [{:id :lamp :position direction}]]
+    (with-redefs [values/fixture-positions (fn [_] (throw (AssertionError. "Unexpected fixture scan")))]
+      (doseq [blocks [rows packed]]
+        (is (= [blocks blocks] (values/endpoints blocks blocks rig :linear)))))))
+
 (defn- traced-model []
   (let [opts {:interval {:beats 1} :progress {:mode :replace :param :progress}}]
     (-> (show opts)
