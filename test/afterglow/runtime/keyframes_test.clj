@@ -298,6 +298,56 @@
         (is (:forecast-failed? sample))
         (is (== 1.0 (get-in sample [:result 0 1])))))))
 
+(deftest invariant-geometry-keeps-the-ordinary-forecast-check-and-fallback
+  (let [model (show nil)
+        fixtures [{:id :lamp :position [10.0 0.0 0.0]}]
+        id "0:1"]
+    (doseq [[attribute point valid?] [[:aim [10.0 0.0 0.0] false]
+                                     [:aim [11.0 0.0 0.0] true]
+                                     [:direction [0.0 0.0 0.0] false]
+                                     [:direction [1.0 0.0 0.0] true]]
+            batch? [false true]]
+      (let [run (fn [wrap]
+                  (let [calls (atom 0)
+                        step (wrap (fn [ctx]
+                                     (swap! calls inc)
+                                     (if batch?
+                                       (runtime/append-contributions
+                                        ctx [{:kind :batch
+                                              :batch {:target-ids [:lamp]
+                                                      :outputs {attribute {:type :vec3 :components 3
+                                                                           :values (double-array point)}}}}])
+                                       (assoc ctx :assignments [{:target-id :lamp :attribute attribute :value point}]))))
+                        advance (fn [previous time-ms]
+                                  (engine/advance (:model previous)
+                                                  {:time-ms time-ms :fixtures fixtures :keyframes (:keyframes previous)
+                                                   :keyframe-intervals {id {:ms 100}}}
+                                                  (constantly step)))
+                        frames (vec (rest (reductions advance {:model model} [0 25 175])))]
+                    {:frames frames :calls @calls}))
+            ordinary (run kf/predictable)
+            invariant (run kf/time-invariant)
+            inspected (fn [lane]
+                        (mapv #(kf/inspect (get-in % [:keyframes id]) :lamp attribute) (:frames lane)))]
+        (is (= (inspected ordinary) (inspected invariant)))
+        (is (= (repeat 3 (not valid?)) (map (comp boolean :forecast-failed?) (inspected invariant))))
+        (is (= (if valid? 4 5) (:calls ordinary)))
+        (is (= (if valid? 1 3) (:calls invariant)))))))
+
+(deftest authored-shared-endpoints-still-interpolate-signed-zero
+  (let [model (show {:interval {:ms 100}})
+        step (kf/time-invariant
+              #(assoc % :assignments [{:target-id :lamp :attribute :white :value -0.0}]))
+        initial (advance model nil (constantly step) 0)
+        path [:keyframes "0:1"]
+        origin (get-in initial (conj path :origin))
+        shared (assoc-in initial (conj path :target) origin)
+        regular (advance (:model initial) initial (constantly step) 1/20)
+        at-quarter (advance (:model initial) shared (constantly step) 1/20)
+        bits #(Double/doubleToRawLongBits (get-in % [:assignments 0 :value]))]
+    (is (= Long/MIN_VALUE (bits initial)))
+    (is (= 0 (bits regular) (bits at-quarter)))))
+
 (deftest packed-aim-and-direction-check-every-head-in-its-own-coordinate-space
   (let [fixtures [{:id :left :position [0 2 0]} {:id :right :position [5 0 0]}]
         make-column (fn [a b] {:type :vec3 :components 3 :values (double-array (concat a b))})

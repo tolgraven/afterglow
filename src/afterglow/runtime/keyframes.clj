@@ -16,9 +16,10 @@
 
 (defn time-invariant
   "Certify that a predictable step and its interpolant produce identical
-  native fields for every clock under one input signature. Automatic keyframes
-  can reuse one read-only sample at both endpoints. Authored windows retain
-  normal sampling. The step must not expose clock-specific observations."
+  native fields, including their numeric representation, for every clock
+  under one input signature. Automatic keyframes can reuse one validated
+  read-only sample at both endpoints. Authored windows retain normal sampling.
+  The step must not expose clock-specific observations."
   [step]
   (vary-meta (predictable step) assoc ::time-invariant {:sampler step}))
 
@@ -98,7 +99,7 @@
         progress (amount ctx (:progress options) curve-fn (/ (- now start) (- end start)))]
     (assoc (vary-meta window assoc ::ease curve-fn)
            :progress progress
-           :result (if (identical? origin target) origin
+           :result (if (and (::constant-window (meta window)) (identical? origin target)) origin
                        (values/blend origin target progress (get-in ctx [:frame :hdr?]))))))
 
 (defn- started [prior unit now span same?]
@@ -225,9 +226,15 @@
       (assoc window :forecast-failed? true :result @source))))
 
 (defn- constant-window [window prior sample ctx]
-  (let [endpoint (if prior (:origin prior) (sample ctx))]
-    (vary-meta (assoc window :origin endpoint :target endpoint :result endpoint :progress 0.0)
-               assoc ::constant-window true)))
+  (vary-meta
+   (if prior
+     (let [endpoint (:origin prior)]
+       (assoc window :origin endpoint :target endpoint :result endpoint :progress 0.0))
+     ;; Validate the first sample as both endpoints on the frozen rig. A
+     ;; geometry rejection still opens an ordinary live-sampling interval.
+     (let [endpoint (delay (sample ctx))]
+       (fresh-window window nil false (fn [_] @endpoint) ctx)))
+   assoc ::constant-window true))
 
 (defn- run-window [step ctx options prior adaptive paths constant?]
   (let [{:keys [frame instance]} ctx
@@ -253,9 +260,10 @@
         (when (and options (not= options (:options prior))) (validate! options))
         ;; At the end of a failed forecast evaluate the *real* frame before
         ;; attempting another prediction. This runs the normal fault boundary.
-        (if constant?
-          (constant-window window (when same-inputs? prior) sample ctx)
-          (fresh-window window (when-not (:forecast-failed? prior) prior) same-inputs? sample ctx))))))
+        (let [usable (when-not (:forecast-failed? prior) prior)]
+          (if constant?
+            (constant-window window (when same-inputs? usable) sample ctx)
+            (fresh-window window usable same-inputs? sample ctx)))))))
 
 (defn evaluate
   "Run either a real step or a lightweight interpolation; all cached results
