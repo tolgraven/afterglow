@@ -382,7 +382,7 @@
                                       :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
                                                   selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
                                               (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
-                                      (if cue (rgb (views/cue-view model (:id cue))) [0 0 0])))])))
+                                      (if cue (rgb (views/pad-view model (:id cue))) [0 0 0])))])))
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
                   (take batch-size (filter (fn [[xy color]] (not= color (get-in state [:last-leds xy])))
                                            (sort-by key desired))))

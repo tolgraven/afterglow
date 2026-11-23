@@ -106,3 +106,16 @@ The complete `./bin/test parity` lane passes 290 tests / 3,188 assertions. The
 control cases exercise the actual MIDI decoder, composable session, parameter
 validation, versioned cue publication and shared command reducer with capture
 transports. No MIDI port, native display or physical lighting output is opened.
+
+## Cue pad visualization
+
+An optional session feedback source acquires a handle with `:open!` and calls
+`:project! [handle local-state committed-model]` on refresh. The private
+projection may supply `:afterglow.control.views/pad-colors`, keyed by cue ID with
+normalized RGB vectors. Push 2 samples the active page through this projection
+and keeps its authored selection swatch on the display. Missing previews fall
+back to parameter color, authored cue color or hex swatch. Normal, active and
+releasing pads retain their relative brightness. The session calls `:close!`
+on suspension, disconnection and projection failure. Cue launches and other
+input commands always use the committed model. The paired Tolglow host owns
+page interest, musical sampling and interpolation.
