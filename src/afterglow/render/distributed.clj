@@ -4,7 +4,7 @@
   (:require [afterglow.render.ir :as ir])
   (:import [java.nio ByteBuffer ByteOrder]
            [java.util UUID]
-           [java.util.concurrent TimeUnit]))
+           [java.util.concurrent CompletableFuture TimeUnit TimeoutException]))
 
 (def ^:private max-heads 262144)
 (def ^:private max-floats 1048576)
@@ -74,7 +74,7 @@
   (locking (:lock pool)
     (when-let [p (get @(:peers pool) id)]
       (swap! (:peers pool) dissoc id)
-      (when-let [done (get-in p [:job :done])] (deliver done nil)))))
+      (when-let [done (get-in p [:job :done])] (.complete ^CompletableFuture done nil)))))
 
 (defn close! [pool]
   (locking (:lock pool)
@@ -101,7 +101,7 @@
           (if valid?
             (swap! (:peers pool) update id dissoc :job)
             (do (swap! (:state pool) update :rejected inc) (disconnect! pool id)))
-          (deliver (:done active) (when valid? values)))
+          (.complete ^CompletableFuture (:done active) (when valid? values)))
         :else nil)))
   nil)
 
@@ -141,7 +141,7 @@
                            needed (- remaining (reduce + 0 (subvec capacities (inc index))))
                            cnt (min remaining (capacities index) (max equally needed))]
                        (if (zero? cnt) (recur remaining offset (inc index) jobs)
-                         (let [job {:id (token) :peer id :send! (:send! peer) :done (promise)
+                         (let [job {:id (token) :peer id :send! (:send! peer) :done (CompletableFuture.)
                                     :start offset :count cnt :floats (* stride cnt)}]
                            (swap! (:peers pool) assoc-in [id :job] job)
                            (recur (- remaining cnt) (+ offset cnt) (inc index) (conj jobs job))))))))}))))
@@ -154,7 +154,11 @@
   (mapv (fn [{:keys [done]}]
           (let [ns-left (- deadline (System/nanoTime))]
             (when (pos? ns-left)
-              (deref done (.toMillis TimeUnit/NANOSECONDS ns-left) nil)))) jobs))
+              (try (.get ^CompletableFuture done ns-left TimeUnit/NANOSECONDS)
+                   (catch TimeoutException _ nil)
+                   (catch InterruptedException _
+                     (.interrupt (Thread/currentThread))
+                     nil))))) jobs))
 
 (defn- unpack [plan n jobs chunks]
   (let [outputs (into {} (map (fn [{:keys [attribute components type]}]
