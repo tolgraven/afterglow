@@ -120,6 +120,24 @@
     (is (nil? (weight {:range-m 1})))
     (is (nil? (weight {:surfaces [{:id :wall :point [0 0 2] :normal [0 0 1]}]})))))
 
+(deftest receiver-planes-preserve-contacts-on-edges-and-through-openings
+  (let [fixture {:id :spot :position [0 1 0] :direction [0 0 1]
+                 :beam-angle 12 :lens-radius-m 0.12 :channels {:red 1}}
+        volume {:shape :sphere :radius 0.15 :position [0 1 4] :selection #{:beam}}
+        wall {:id :panel :point [0 1 2] :normal [0 0 -2] :size [2 2]}
+        weight (fn [surfaces]
+                 (let [observe (field/prepare-observations
+                                {:surfaces surfaces :values {:spot {:emitted-color [0.8 0 0]}}})]
+                   (get-in ((field/sampler [fixture] observe) volume) [:weights :spot])))]
+    (doseq [clear [[] [(assoc wall :point [0 1 0])] [(assoc wall :point [0 1 5])]
+                   [(assoc wall :point [3 1 2])]
+                   [(assoc wall :point [-3 1 2]) (assoc wall :point [3 1 2])]]]
+      (is (= 0.8 (weight clear)) (str clear)))
+    (doseq [blocked [[wall] [(assoc wall :normal [1.0e-7 0 -1])]
+                     [(assoc wall :point [6 1 2]) wall]
+                     [(assoc wall :point [0 1 0]) wall (assoc wall :point [0 1 5])]]]
+      (is (nil? (weight blocked)) (str blocked)))))
+
 (deftest scaled-feather-bounds-contain-every-positive-sampled-distance
   (let [sphere {:shape :sphere :position [0 0 0] :radius 1 :scale [3 1 1]}
         outer {:falloff {:outer-m 1.0} :selection #{:position :beam}}
