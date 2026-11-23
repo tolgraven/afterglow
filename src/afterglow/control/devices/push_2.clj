@@ -317,20 +317,21 @@
         brightness (cond (:releasing? cue) 0.45 (:active? cue) 1.0 :else 0.25)]
     (mapv #(int (Math/round (* 255.0 brightness (bindings/clamp % [0 1])))) color)))
 
-(defn display-view
-  "Device-independent labels/values. A display transport draws this map."
-  [state model]
+(defn- cue-index [model]
+  (let [active (views/active-instances model)]
+    {:active active :by-cue (group-by :cue-id active)}))
+
+(defn- indexed-display [state model {:keys [active by-cue]}]
   (let [state (selected-state state model)
         instance (get-in model [:instances (:selected-instance state)])
         bank (parameter-bank state instance)
-        active (views/active-instances model)
         active-index (or (first (keep-indexed #(when (= (:id instance) (:id %2)) %1) active)) 0)
         active-offset (* 8 (quot active-index 8))
         cue (get-in model [:registry :cues (:selected-cue state)])
         effect (or (:definition instance) (get-in model [:registry :effects (:effect-id cue)]))
         defaults (merge (into {} (map (fn [[k schema]] [k (:default schema)]) (:params effect)))
                         (:params cue) (:saved-params cue))
-        cue-view (when cue (views/cue-view model (:id cue)))]
+        cue-view (when cue (views/cue-view model (:id cue) by-cue))]
     (merge (display/view-options state model)
            {:title "Tolglow" :page (:page-id state) :origin (:origin state)
      :status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
@@ -363,8 +364,13 @@
                             :component component :component-label (nth (parameter-edit/components schema) component)
                             :preview-samples (:preview-samples schema)})) (:ids bank))
      :cells (mapv (fn [x] (when-let [cue (cue-at state model (codec/pad-note x 0))]
-                            (views/cue-view model (:id cue)))) (range 8))
+                            (views/cue-view model (:id cue) by-cue))) (range 8))
      :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))})))
+
+(defn display-view
+  "Device-independent labels/values. A display transport draws this map."
+  [state model]
+  (indexed-display state model (cue-index model)))
 
 (defn- strip-feedback [state model]
   (if-let [target (system-touch state)]
@@ -408,7 +414,8 @@
                 (assoc state :fault :led-timeout)
                 timed-out? (-> state (assoc :awaiting-led-ack? false :last-leds {}) (update :led-retries (fnil inc 0)))
                 :else state)
-        display (display-view state model)
+        index (cue-index model)
+        display (indexed-display state model index)
         display-changed? (not= display (:last-display state))
         state (assoc state :last-display display)
         strip (strip-feedback state model)
@@ -427,7 +434,7 @@
                                       :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
                                                   selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
                                               (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
-                                      (if cue (rgb (views/pad-view model (:id cue))) [0 0 0])))])))
+                                      (if cue (rgb (views/pad-view model (:id cue) (:by-cue index))) [0 0 0])))])))
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
                   (next-led-batch desired state batch-size))
         [last-x last-y] (first (peek changes))

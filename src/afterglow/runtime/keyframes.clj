@@ -26,9 +26,13 @@
       (with-meta run (cond-> info sample (assoc ::sampler (comp sample transform))))
       run)))
 
-(defn validate! [{:keys [interval curve progress] :as options}]
-  (when-not (and (map? options) (every? #{:interval :curve :progress} (keys options))
-                 (empty? (time/validate-duration interval)) (pos? (val (first interval))))
+(defn- positive-duration? [duration]
+  (and (empty? (time/validate-duration duration)) (pos? (val (first duration)))))
+
+(defn validate! [{:keys [curve progress] :as options}]
+  (when-not (and (map? options) (every? #{:interval :max-interval :curve :progress} (keys options))
+                 (or (contains? options :interval) (contains? options :max-interval))
+                 (every? positive-duration? (vals (select-keys options [:interval :max-interval]))))
     (throw (ex-info "Keyframes need a positive musical or millisecond interval" {:keyframes options})))
   (easing/sample (or curve :linear) 0.5)
   (when (and (some? progress)
@@ -39,13 +43,16 @@
     (throw (ex-info "Keyframe progress needs a mode and one parameter or variable" {:progress progress})))
   options)
 
-(defn- duration [interval adaptive clock]
+(defn- duration [{:keys [interval max-interval]} adaptive clock]
   (let [normalize #(time/normalize-duration % (:meter clock))
+        ms #(time/estimate-ms % (:bpm clock))
         authored (when interval (normalize interval))
-        adaptive (when adaptive (normalize adaptive))]
-    (cond (nil? adaptive) authored
-          (nil? authored) adaptive
-          (> (time/estimate-ms adaptive (:bpm clock)) (time/estimate-ms authored (:bpm clock))) adaptive
+        requested (when adaptive (normalize adaptive))
+        limit (when (and adaptive max-interval) (normalize max-interval))
+        bounded (if (and limit (>= (ms requested) (ms limit))) limit requested)]
+    (cond (nil? bounded) authored
+          (nil? authored) bounded
+          (> (ms bounded) (ms authored)) bounded
           :else authored)))
 
 (defn- clock-at [clock unit coord]
@@ -117,7 +124,8 @@
   ;; An arbitrary certified reader can capture its input. Keep previous
   ;; observers, worker timers and window history outside that private scope.
   (-> ctx
-      (update :frame dissoc :keyframes :measure-effect :keyframe-intervals)
+      (update :frame #(-> % (dissoc :keyframes :measure-effect :keyframe-intervals)
+                          (vary-meta dissoc ::positions)))
       (update :instance vary-meta dissoc ::runtime/observe)))
 
 (defn- signature [instance frame options clock paths]
@@ -125,8 +133,35 @@
    (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
    (:targets instance) (:started-at-beat instance) (input-generation paths frame)])
 
+(defn with-rig-positions
+  "Give all predicting workers one lazy lookup on this frozen rig. Successful
+  frames retain its immutable result in the keyframe map's private metadata."
+  [{:keys [fixtures keyframes] :as frame}]
+  (let [prior (meta keyframes)
+        saved (when (identical? fixtures (::rig prior)) (::positions prior))]
+    (vary-meta frame assoc ::positions (or saved (delay (values/fixture-positions fixtures))))))
+
+(defn- completed-positions [lookup]
+  (cond
+    (map? lookup) lookup
+    (and lookup (realized? lookup))
+    ;; A worker may have rejected a speculative endpoint. Never publish a
+    ;; failed lookup or let reading its exception abort healthy effects.
+    (try @lookup
+         (catch Throwable error
+           (when-not (faults/recoverable? error) (throw error))))))
+
+(defn committed-windows [frame evaluations]
+  (let [windows (into {} (keep (fn [{:keys [id keyframe done?]}]
+                                 (when (and keyframe (not done?)) [id keyframe]))) evaluations)]
+    (if-let [positions (when (seq windows) (completed-positions (::positions (meta frame))))]
+      (with-meta windows {::rig (:fixtures frame) ::positions positions})
+      windows)))
+
 (defn- fresh-window [window prior same-inputs? sample ctx]
   (let [{:keys [options origin-clock target-clock]} window
+        rig (:rig window)
+        positions (or (::positions (meta (:frame ctx))) (delay (values/fixture-positions rig)))
         source (delay (sample ctx))
         previous-time (when (and same-inputs? prior) (time/coordinate origin-clock (:unit prior)))
         origin (cond
@@ -137,6 +172,11 @@
                        :else @source)
 
                  (and prior (= (:epoch prior) (:epoch window)) (identical? (:rig prior) (:rig window))
+                      ;; An automatic prediction follows the live clock across a
+                      ;; tempo/meter edit. An authored tween keeps its last result.
+                      (or (:interval options)
+                          (and (= (:bpm origin-clock) (get-in prior [:origin-clock :bpm]))
+                               (= (:meter origin-clock) (get-in prior [:origin-clock :meter]))))
                       (= (first (:inputs prior)) (first (:inputs window)))
                       (= (nth (:inputs prior) 5) (nth (:inputs window) 5))
                       (= (declared-variables (:inputs prior)) (declared-variables (:inputs window)))
@@ -146,7 +186,7 @@
 
                  :else @source)
         forecast (try
-                   (values/endpoints origin (sample (future-context ctx target-clock)) (:rig window) (:curve options))
+                   (values/indexed-endpoints origin (sample (future-context ctx target-clock)) positions (:curve options))
                    (catch Throwable error
                      (when-not (faults/recoverable? error) (throw error))
                      ;; A possible future error is not a current effect fault.
@@ -161,7 +201,7 @@
 (defn- run-window [step ctx options prior adaptive paths]
   (let [{:keys [frame instance]} ctx
         clock (time/frame-clock frame)
-        {:keys [unit value]} (duration (:interval options) adaptive clock)
+        {:keys [unit value]} (duration options adaptive clock)
         _ (when-not (and (time/finite-number? value) (pos? value))
             (throw (ex-info "Invalid predictive cadence" {:interval value})))
         now (time/coordinate clock unit)
@@ -194,7 +234,7 @@
         eligible? (and sampler (= :running (:phase instance)) (not (get-in instance [:system :paused?]))
                        (not= false (:playing? frame)) (time/finite-number? (:beat frame))
                        (time/finite-number? (:bpm frame)) (pos? (:bpm frame)))]
-    (if (and eligible? (or options adaptive))
+    (if (and eligible? (or (:interval options) adaptive))
       (let [prior (get-in frame [:keyframes (:id instance)])
             dependencies (variable-dependencies (::variable-paths (meta step)) (get-in instance [:definition :blocks])
                                                 (::dependencies prior))

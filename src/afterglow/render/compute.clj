@@ -2,6 +2,8 @@
   "Frame-owned expression evaluation followed by calibrated fixture rendering.
   Native stages are independent opt-ins. The reference path is float64 on CPU."
   (:require [afterglow.render.fields :as fields]
+            [afterglow.render.distributed :as distributed]
+            [afterglow.render.chain :as chain]
             [afterglow.render.frame :as frame]
             [afterglow.render.gpu.movement :as movement]
             [afterglow.render.ir :as ir]
@@ -40,10 +42,11 @@
   ([] (open! {}))
   ([{:keys [compute-backend movement-backend budget-ms gpu-options]
      :or {compute-backend :cpu movement-backend :cpu budget-ms 25 gpu-options {}}}]
-   (doseq [[key backend] [[:compute-backend compute-backend] [:movement-backend movement-backend]]]
-     (when-not (#{:cpu :native-gpu} backend)
+   (doseq [[key backend allowed] [[:compute-backend compute-backend #{:cpu :native-gpu :distributed}]
+                                  [:movement-backend movement-backend #{:cpu :native-gpu}]]]
+     (when-not (allowed backend)
        (throw (ex-info "Unknown render backend" {key backend}))))
-   (when (or (= :native-gpu compute-backend) (= :native-gpu movement-backend))
+   (when (or (not= :cpu compute-backend) (= :native-gpu movement-backend))
      (when-not (and (integer? budget-ms)
                     (<= 1 budget-ms (if (= :native-gpu movement-backend) 10000 Integer/MAX_VALUE)))
        (throw (ex-info "Invalid GPU time budget for the selected backend" {:budget-ms budget-ms})))
@@ -56,7 +59,11 @@
      (let [mover (when (= :native-gpu movement-backend)
                    (movement/open! {:budget-ms budget-ms :timeout-ms (:timeout-ms gpu-options 1000)}))]
        (try
-         (merge {:budget-ns (* 1000000 budget-ms) :movement mover}
+         (merge {:budget-ns (* 1000000 budget-ms) :movement mover :chains (chain/create-cache)}
+                (when (= :distributed compute-backend)
+                  {:pool (distributed/create)
+                   :state (atom {:requested :distributed :active :distributed :gpu-budget-ms budget-ms
+                                 :native-dispatches 0 :cpu-fallbacks 0 :deadline-fallbacks 0})})
                 (when (= :native-gpu compute-backend) (open-expressions! gpu-options budget-ms)))
          (catch Throwable error
            (when mover
@@ -66,13 +73,14 @@
 (defn expressions-enabled?
   "Whether a compiler can select native expression groups for this owner."
   [owner]
-  (= :native-gpu (:active (some-> owner :state deref))))
+  (contains? #{:native-gpu :distributed} (:active (some-> owner :state deref))))
 
 (defn status
   "Current expression backend, native session metrics and fallback counters."
   [owner]
   (if-let [state (:state owner)]
-    (cond-> @state (:session owner) (assoc :session ((:status @native) (:session owner))))
+    (cond-> @state (:pool owner) (assoc :pool (distributed/status (:pool owner)))
+            (:session owner) (assoc :session ((:status @native) (:session owner))))
     {:requested :cpu :active :cpu}))
 
 (defn movement-status
@@ -85,7 +93,8 @@
 (defn close!
   "Release the owned workers and graphics contexts after active draws finish."
   [owner]
-  (try (when-let [session (:session owner)] ((:close! @native) session))
+  (try (when-let [pool (:pool owner)] (distributed/close! pool))
+       (when-let [session (:session owner)] ((:close! @native) session))
        (finally
          (when-let [state (:state owner)] (swap! state assoc :active :stopped))
          (when-let [mover (:movement owner)] (movement/close! mover)))))
@@ -99,9 +108,12 @@
    (let [positions (if (instance? double/1 positions) (aclone ^doubles positions) positions)
          uvs (when (:surface-uv? cpu-plan)
                (if (instance? double/1 surface-uvs) (aclone ^doubles surface-uvs) surface-uvs))]
-     (merge {:cpu-plan cpu-plan :positions positions :surface-uvs uvs}
+     (merge {:expressions expressions :cpu-plan cpu-plan :positions positions :surface-uvs uvs}
             (try {:shader ((:group @native) expressions positions uvs)}
                  (catch Throwable error {:preparation-error (failure error)}))))))
+
+(defn group-preparer [owner]
+  (if (:pool owner) distributed/prepare-group prepare-group))
 
 (defn- cpu-result! [owner {:keys [cpu-plan positions surface-uvs]} env detail]
   (when-let [state (:state owner)]
@@ -130,6 +142,10 @@
     (not (expressions-enabled? owner)) (cpu-result! owner group env nil)
     preparation-error (cpu-result! owner group env (assoc preparation-error :stage :prepare))
     (>= (System/nanoTime) deadline) (cpu-result! owner group env late)
+    (:pool owner)
+    (let [attempt (try {:batch (distributed/evaluate! (:pool owner) group env deadline)}
+                       (catch Exception error {:error (failure error)}))]
+      (or (:batch attempt) (cpu-result! owner group env (:error attempt))))
     :else
     (let [session (:session owner)
           result (try (draw! session shader env deadline)
@@ -150,8 +166,16 @@
   (let [deadline (when owner (+ frame-start-ns (:budget-ns owner)))
         evaluate-fields (fields/frame-evaluator (partial evaluate! owner deadline))
         mover (:movement owner)]
-    (fn [patch blocks options]
-      (let [contributions (evaluate-fields blocks)]
-        (if mover
-          (movement/resolve-contributions! mover patch contributions (assoc options :deadline-nanos deadline))
-          (frame/resolve-contributions patch contributions options))))))
+    (fn render [patch blocks options]
+      (let [resolve! (fn [blocks]
+                       (let [contributions (evaluate-fields blocks)]
+                         (if mover
+                           (movement/resolve-contributions! mover patch contributions (assoc options :deadline-nanos deadline))
+                           (frame/resolve-contributions patch contributions options))))
+            fused (if (expressions-enabled? owner)
+                    (chain/fuse (:chains owner) (group-preparer owner) blocks)
+                    blocks)]
+        (if (identical? fused blocks) (resolve! blocks)
+          (try (resolve! fused)
+               ;; Original requests attribute faults to individual running cues.
+               (catch Exception _ (resolve! blocks))))))))

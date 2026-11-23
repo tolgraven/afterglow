@@ -120,6 +120,24 @@
     (is (nil? (weight {:range-m 1})))
     (is (nil? (weight {:surfaces [{:id :wall :point [0 0 2] :normal [0 0 1]}]})))))
 
+(deftest receiver-planes-preserve-contacts-on-edges-and-through-openings
+  (let [fixture {:id :spot :position [0 1 0] :direction [0 0 1]
+                 :beam-angle 12 :lens-radius-m 0.12 :channels {:red 1}}
+        volume {:shape :sphere :radius 0.15 :position [0 1 4] :selection #{:beam}}
+        wall {:id :panel :point [0 1 2] :normal [0 0 -2] :size [2 2]}
+        weight (fn [surfaces]
+                 (let [observe (field/prepare-observations
+                                {:surfaces surfaces :values {:spot {:emitted-color [0.8 0 0]}}})]
+                   (get-in ((field/sampler [fixture] observe) volume) [:weights :spot])))]
+    (doseq [clear [[] [(assoc wall :point [0 1 0])] [(assoc wall :point [0 1 5])]
+                   [(assoc wall :point [3 1 2])]
+                   [(assoc wall :point [-3 1 2]) (assoc wall :point [3 1 2])]]]
+      (is (= 0.8 (weight clear)) (str clear)))
+    (doseq [blocked [[wall] [(assoc wall :normal [1.0e-7 0 -1])]
+                     [(assoc wall :point [6 1 2]) wall]
+                     [(assoc wall :point [0 1 0]) wall (assoc wall :point [0 1 5])]]]
+      (is (nil? (weight blocked)) (str blocked)))))
+
 (deftest scaled-feather-bounds-contain-every-positive-sampled-distance
   (let [sphere {:shape :sphere :position [0 0 0] :radius 1 :scale [3 1 1]}
         outer {:falloff {:outer-m 1.0} :selection #{:position :beam}}
@@ -222,3 +240,36 @@
             local-point (inverse point)]
         (is (== ((:distance local) local-point) ((:distance world) point)))
         (is (= ((:inside? local) local-point) ((:inside? world) point)))))))
+
+(deftest spherical-samples-retain-distance-and-falloff-precision
+  (let [center [0.25 -0.5 1.75]
+        radius 2.25
+        distances [0.0 (Math/nextDown 1.75) 1.75 (Math/nextUp 1.75)
+                   2.1 2.25 (Math/nextDown 3.0) 3.0 (Math/nextUp 3.0)]
+        points (into [[1/3 1/7 2/9] [0.125M 1.25M 2.3M] [2 1 1]]
+                     (map (fn [d] [(+ 0.25 d) -0.5 1.75])) distances)]
+    (doseq [curve [:linear :smoothstep]
+            [inner outer] [[0.0 0.0] [0.5 0.75] [0.0 0.75] [1/2 3/4]]
+            strength [0.8 -0.0]
+            :let [spec {:shape :sphere :radius radius :strength strength :position center
+                        :falloff {:curve curve :inner-m inner :outer-m outer}}
+                  sphere (field/prepare spec)
+                  ;; A one-child union exercises the general signed-distance evaluator.
+                  generic (field/prepare (assoc spec :shape :union :parts [spec]))]]
+      (doseq [point points]
+        (is (= (Double/doubleToRawLongBits ((:weight-at generic) point))
+               (Double/doubleToRawLongBits ((:weight-at sphere) point)))
+            (str [curve inner outer strength point])))
+      (doseq [d distances
+              :let [delta (- d radius)
+                    phase (cond (<= delta (- inner)) 1.0 (>= delta outer) 0.0
+                                :else (/ (- outer delta) (+ outer inner)))
+                    expected (* strength (if (= :smoothstep curve) (* phase phase (- 3 (* 2 phase))) phase))]]
+        (is (= (Double/doubleToRawLongBits expected)
+               (Double/doubleToRawLongBits ((get-in sphere [:radial :by-distance]) d)))))))
+  ;; Exact subtraction before conversion to double matters at a large integral centre.
+  (let [b 9007199254740992N
+        spec {:shape :sphere :position [b 0 0] :radius 1.0}
+        weights (:weights (field/positions spec [{:id :edge :position [(inc b) 0 0]}
+                                                 {:id :outside :position [(+ b 2) 0 0]}]))]
+    (is (= {:edge 1.0} weights))))

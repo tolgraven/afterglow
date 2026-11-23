@@ -106,3 +106,11 @@ model, intents, selected previews and ArtDMX bytes agreed. The p95 wall times
 were 758 and 1,810 ms respectively on this shared machine. All 18 measured
 frames exceeded 25 ms. This profile uses Tolglow `2a6b8ce`, Afterglow
 `742d17b`, a 768 MiB heap and two effect workers with in-memory output.
+
+The sphere sampler prepares its radius, fade widths and response curve once
+per volume sample. For floating-point widths it can reuse the same unboxed
+response when evaluating fixture positions and when finding the strongest
+point reached by a beam. Sampling a fixture position keeps the nested `hypot`
+calculation used by the shape’s signed distance. Translated and scaled spheres
+retain their local-coordinate distance. Decimal or fractional widths and large
+integral world coordinates preserve the original arithmetic at the boundary.

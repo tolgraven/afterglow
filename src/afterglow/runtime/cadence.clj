@@ -18,6 +18,16 @@
       (throw (ex-info "Invalid adaptive keyframe settings" {:options options})))
     s))
 
+(defn maximum-stride
+  "Largest whole-frame automatic interval allowed by an effect at the current
+  tempo and meter. An authored interval already at that limit needs no governor."
+  [{:keys [interval max-interval]} {:keys [bpm meter]} period-ms global-max]
+  (if max-interval
+    (let [span-ms #(time/estimate-ms (time/normalize-duration % meter) bpm)
+          limit (max 1 (long (min global-max (/ (span-ms max-interval) period-ms))))]
+      (if (and interval (<= (* limit period-ms) (span-ms interval))) 1 limit))
+    global-max))
+
 (defn observer
   "Create a worker-safe observer for one frame. Costs use monotonic nanoseconds.
   Responses and exceptions pass through unchanged. The host reads :samples only
@@ -52,19 +62,19 @@
         (update :evaluations (fnil + 0) calls)
         (update :sampled-frames (fnil inc 0)))))
 
-(defn- update-entry [entry version sample {:keys [smoothing max-stride min-cost-ms]} frame]
+(defn- update-entry [entry version sample {:keys [smoothing min-cost-ms]} frame limit]
   (let [prior (if (and entry (= version (:version entry))) entry
                 {:version version :stride 1 :changed-at frame})
         {:keys [previous-sample-ms last-sample-ms predictive?] :as updated}
         (cond-> prior sample (record-sample sample smoothing frame))
-        cheap? (and previous-sample-ms (< (max previous-sample-ms last-sample-ms) min-cost-ms))]
-    (if (and (> (:stride updated) 1) (or cheap? (false? predictive?)))
-      (assoc updated :stride 1 :changed-at frame)
-      (update updated :stride min max-stride))))
+        cheap? (and previous-sample-ms (< (max previous-sample-ms last-sample-ms) min-cost-ms))
+        stride (if (or cheap? (false? predictive?)) 1 (min (:stride updated) limit))]
+    (cond-> (assoc updated :max-stride limit :stride stride)
+      (< stride (:stride updated)) (assoc :changed-at frame))))
 
-(defn- slowdown-candidate [entries {:keys [max-stride min-cost-ms]}]
+(defn- slowdown-candidate [entries {:keys [min-cost-ms]}]
   (->> entries
-       (keep (fn [[id {:keys [predictive? cost-ms stride changed-at sampled-at previous-sample-ms last-sample-ms]}]]
+       (keep (fn [[id {:keys [predictive? cost-ms stride max-stride changed-at sampled-at previous-sample-ms last-sample-ms]}]]
                (when (and predictive? previous-sample-ms (> sampled-at changed-at) (< stride max-stride)
                           (>= (min previous-sample-ms last-sample-ms cost-ms) min-cost-ms))
                  [id (/ cost-ms stride) changed-at])))
@@ -83,21 +93,25 @@
 
 (defn advance
   "Fold a completed frame into the release policy. :versions maps active instance
-  IDs to their definition identities/versions. Epoch changes start a fresh history.
+  IDs to their definition identities/versions. Optional :max-strides maps active
+  IDs to individual whole-frame limits. Epoch changes start a fresh history.
   :samples comes from observer, :period-ms is the actual output period and
   :elapsed-ms includes complete host work. Only eligible expensive effects slow
   down. Each pressure window can slow one effect. Two real cheap samples
   restore that instance regardless of the scene load. State is disposable."
-  [previous {:keys [epoch versions samples period-ms elapsed-ms] :as timings} config]
+  [previous {:keys [epoch versions samples period-ms elapsed-ms max-strides] :as timings} config]
   (when-not (and (time/finite-number? period-ms) (pos? period-ms)
                  (time/finite-number? elapsed-ms) (not (neg? elapsed-ms)))
     (throw (ex-info "Frame timings require a positive period and nonnegative elapsed time" {})))
+  (when-not (or (nil? max-strides) (and (map? max-strides) (every? pos-int? (vals max-strides))))
+    (throw (ex-info "Per-effect maximum strides must be positive frame counts" {:max-strides max-strides})))
   (let [{:keys [smoothing headroom pressure-frames recovery-frames max-stride]} config
         prior (when (= epoch (:epoch previous)) previous)
         frame (inc (:frame prior 0))
         entries (reduce-kv (fn [m id version]
                              (assoc m id (update-entry (get-in prior [:effects id]) version
-                                                       (get samples id) config frame))) {} versions)
+                                                       (get samples id) config frame
+                                                       (min max-stride (get max-strides id max-stride))))) {} versions)
         measured (smooth (:frame-ms prior) elapsed-ms smoothing)
         budget (* period-ms (- 1.0 headroom))
         missed (smooth (:late-rate prior) (if (> elapsed-ms period-ms) 1.0 0.0) smoothing)
@@ -111,7 +125,7 @@
                (recovery-candidate entries (- budget measured)))
         changed (or slow fast)
         effects (cond-> entries
-                  slow (update-in [slow :stride] #(min max-stride (* 2 %)))
+                  slow (update-in [slow :stride] #(min (get-in entries [slow :max-stride]) (* 2 %)))
                   fast (update-in [fast :stride] #(max 1 (quot % 2)))
                   changed (assoc-in [changed :changed-at] frame))]
     {:epoch epoch :frame frame :effects effects :frame-ms measured :late-rate missed
@@ -127,6 +141,6 @@
   (->> (:effects state)
        (keep (fn [[id entry]]
                (when (:cost-ms entry)
-                 (assoc (select-keys entry [:cost-ms :predictive? :stride :evaluations :sampled-frames]) :instance-id id))))
+                 (assoc (select-keys entry [:cost-ms :predictive? :stride :max-stride :evaluations :sampled-frames]) :instance-id id))))
        (sort-by (juxt (comp - :cost-ms) (comp pr-str :instance-id)))
        vec))

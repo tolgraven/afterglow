@@ -4,6 +4,7 @@
             [afterglow.runtime.engine :as engine]
             [afterglow.runtime.keyframes :as kf]
             [afterglow.runtime.keyframes.storage :as storage]
+            [afterglow.runtime.keyframes.values :as values]
             [afterglow.runtime.executor :as executor]
             [afterglow.runtime :as runtime]
             [afterglow.render.frame :as render]))
@@ -200,6 +201,75 @@
         (is (:forecast-failed? sample))
         (is (== 1.0 (get-in sample [:result 0 1])))))))
 
+(deftest packed-aim-and-direction-check-every-head-in-its-own-coordinate-space
+  (let [fixtures [{:id :left :position [0 2 0]} {:id :right :position [5 0 0]}]
+        make-column (fn [a b] {:type :vec3 :components 3 :values (double-array (concat a b))})
+        fields (fn [aim direction]
+                 [{:kind :batch :batch {:target-ids [:left :right]
+                    :outputs {:aim (make-column [1 2 0] aim)
+                              :direction (make-column [0 1 0] direction)}}}])
+        start (fields [6 0 0] [1 0 0])
+        finish (fields [6 1 0] [1 1 0])
+        checked (values/endpoints start finish fixtures :linear)]
+    (is (identical? start (first checked)))
+    (is (identical? finish (second checked)))
+    (doseq [end [(fields [4 0 0] [1 1 0]) (fields [6 1 0] [-1 0 0])
+                 (fields [5 0 0] [1 1 0]) (fields [6 1 0] [0 0 0])]]
+      (is (thrown? clojure.lang.ExceptionInfo (values/endpoints start end fixtures :linear))))
+    (let [collinear (fields [7 0 0] [1 0 0])]
+      (is (= [start collinear] (values/endpoints start collinear fixtures :linear)))
+      (is (thrown? clojure.lang.ExceptionInfo (values/endpoints start collinear fixtures :spring))))))
+
+(deftest repeated-aim-windows-use-the-current-rig-position
+  (let [original [{:id :lamp :position [0 0 0]}]
+        moved [{:id :lamp :position [4.5 0 0]}]
+        scenes (atom []) index values/fixture-positions
+        first-model (show {:interval {:beats 1}})
+        model (:model (control/apply-command first-model
+                        {:op :effect/launch :effect-id :pulse :time-ms 0 :source :test :command-id "second"
+                         :show-id (:show-id first-model) :epoch (:epoch first-model)}))
+        step (kf/predictable
+              (fn [ctx]
+                (assoc ctx :assignments [{:target-id :lamp :attribute :aim
+                                          :value [(inc (get-in ctx [:frame :beat])) 0 0]}])))
+        advance-rig (fn [mapper previous beat rig]
+                      (engine/advance (assoc-in (or (:model previous) model) [:transport :beat] beat)
+                                      {:time-ms (* 500 beat) :fixtures rig :keyframes (:keyframes previous)}
+                                      (constantly step) mapper))]
+    (with-open [pool (executor/create {:workers 2 :timeout-ms 10000})]
+      (with-redefs [values/fixture-positions (fn [rig] (swap! scenes conj rig) (index rig))]
+        (let [tick (partial advance-rig (executor/mapper pool))
+              prior (reduce #(tick %1 %2 original) nil [0 1 2])
+              saved (storage/freeze (get-in prior [:keyframes "0:1"]))
+              later (tick prior 3 moved)
+              failure (with-redefs [values/fixture-positions (fn [_] (throw (ex-info "index failed" {})))]
+                        (tick later 4 original))
+              recovered (tick failure 5 original)
+              idle (tick (assoc-in recovered [:model :instances] {}) 6 original)]
+          (is (= 2 (count (:keyframes prior))))
+          (is (= [original moved original] @scenes))
+          (is (not-any? delay? (tree-seq coll? seq saved)))
+          (is (not (get-in prior [:keyframes "0:1" :forecast-failed?])))
+          (is (true? (get-in later [:keyframes "0:1" :forecast-failed?])))
+          (is (= [4 0 0] (get-in later [:assignments 0 :value])))
+          (is (every? :forecast-failed? (vals (:keyframes failure))))
+          (is (= [[5 0 0] [5 0 0]] (mapv :value (:assignments failure))))
+          (is (nil? (meta (:keyframes failure))))
+          (is (every? (complement :forecast-failed?) (vals (:keyframes recovered))))
+          (is (empty? (:keyframes idle)))
+          (is (nil? (meta (:keyframes idle)))))))))
+
+
+(deftest relative-direction-checks-need-no-rig-scan
+  (let [direction [1.0 0.0 0.0]
+        rows [{:kind :assignments :assignments [{:attribute :direction :target-id :lamp :value direction}]}]
+        packed [{:kind :batch :batch {:target-ids [:lamp] :outputs
+                                     {:direction {:type :vec3 :components 3 :values (double-array direction)}}}}]
+        rig [{:id :lamp :position direction}]]
+    (with-redefs [values/fixture-positions (fn [_] (throw (AssertionError. "Unexpected fixture scan")))]
+      (doseq [blocks [rows packed]]
+        (is (= [blocks blocks] (values/endpoints blocks blocks rig :linear)))))))
+
 (defn- traced-model []
   (let [opts {:interval {:beats 1} :progress {:mode :replace :param :progress}}]
     (-> (show opts)
@@ -328,3 +398,28 @@
     (is (= :interpolated (get-in (inspect-block result) [:keyframe :origin-kind])))
     (is (= 1 @inspected))
     (is (= 101 @sampled))))
+
+(deftest an-automatic-ceiling-alone-leaves-authored-sampling-at-frame-rate
+  (let [cap {:max-interval {:beats 1/8}}
+        calls (atom []) compile (compile-recorder calls)
+        tick (fn [model previous t beat bpm interval]
+               (engine/advance (update model :transport assoc :beat beat :bpm bpm)
+                               {:time-ms t :keyframes (:keyframes previous)
+                                :keyframe-intervals {"0:1" interval}} compile))
+        live (tick (show cap) nil 0 0 120 nil)
+        window (tick (:model live) live 25 1/20 120 {:ms 250})
+        faster (tick (:model window) window 50 1/10 240 {:ms 250})
+        full (tick (:model faster) faster 75 1/5 240 nil)
+        authored (tick (show (assoc cap :interval {:bars 1})) nil 0 0 120 {:ms 4000})]
+    (is (empty? (:keyframes live)))
+    (is (= :beats (get-in window [:keyframes "0:1" :unit])))
+    (is (== 1/8 (get-in window [:keyframes "0:1" :span])))
+    (is (== 81.25 (get-in faster [:keyframes "0:1" :target-clock :time-ms])))
+    (is (== (/ 0.1 8) (get-in faster [:assignments 0 :value])))
+    (is (== (/ 0.2 8) (get-in full [:assignments 0 :value])))
+    (is (empty? (:keyframes full)))
+    (is (== 4 (get-in authored [:keyframes "0:1" :span])))
+    (is (= cap (kf/validate! cap)))
+    (doseq [options [{} {:curve :linear} {:max-interval nil} {:max-interval {:beats 0}}
+                     {:interval {:ms 25} :max-interval {:bars -1}}]]
+      (is (thrown? clojure.lang.ExceptionInfo (kf/validate! options))))))

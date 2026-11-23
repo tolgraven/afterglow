@@ -128,3 +128,30 @@
             (finally (deliver release true))))
         (is (true? (session/close! owner 3000)))
         (is (:terminated? (session/status owner)))))))
+
+(deftest large-uniform-groups-reuse-the-tuple-and-own-each-expanded-result
+  (let [heads 20000
+        positions (double-array (* 3 heads))
+        group (session/group {:color {:op :param :key :color :type :vec3}
+                              :white {:op :sqrt :args [{:op :param :key :white}]}} positions)
+        inputs {:params {:color [0.25 0.5 0.75] :white 0.25}}]
+    (with-open [owner (session/open! {:max-programs 1})]
+      (let [first-batch (session/evaluate! owner group inputs)
+            colors ^doubles (get-in first-batch [:outputs :color :values])
+            latest #(session/evaluate! owner group %)]
+        (is (= (* 3 heads) (alength colors)))
+        (aset-double colors 0 -1)
+        (aset-double colors (dec (alength colors)) -2)
+        (let [restored ^doubles (get-in (latest inputs) [:outputs :color :values])]
+          (is (= [0.25 0.75] [(aget restored 0) (aget restored (dec (alength restored)))])))
+        (is (= 1 (:draws (session/status owner))))
+        (let [white ^doubles (get-in (latest (assoc-in inputs [:params :white] 0.0625)) [:outputs :white :values])]
+          (is (= 0.25 (aget white (dec heads)))))
+        (is (= 2 (:draws (session/status owner))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nonfinite"
+                              (latest (assoc-in inputs [:params :white] -1))))
+        (is (= 0.25 (aget ^doubles (get-in (latest (assoc-in inputs [:params :white] 0.0625))
+                                           [:outputs :white :values]) (dec heads))))
+        (is (session/evict! owner group))
+        (latest inputs)
+        (is (= 3 (:draws (session/status owner))))))))

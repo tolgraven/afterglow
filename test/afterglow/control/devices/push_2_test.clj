@@ -5,6 +5,7 @@
             [afterglow.control.devices.push-2 :as push]
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.model :as model]
+            [afterglow.control.views :as views]
             [afterglow.render.frame :as frame]
             [afterglow.render.frame-test :refer [assignment bytes-at]]))
 
@@ -39,6 +40,19 @@
 (defn finish! [h]
   (is (= [] (:errors (session/snapshot (:session h)))))
   (session/close! (:session h)))
+
+(deftest push-feedback-indexes-running-cues-once-for-the-display-and-pads
+  (let [h (harness) calls (atom 0) active views/active-instances]
+    (try
+      (let [id (launch! h 37)
+            cue (get-in @(:show h) [:instances id :cue-id])
+            page (:page-id (local h))]
+        (swap! (:show h) assoc-in [:pages page :cells]
+               (into {} (for [x (range 8) y (range 8)] [[x y] cue])))
+        (with-redefs [views/active-instances (fn [model] (swap! calls inc) (active model))]
+          (session/refresh! (:session h))
+          (is (= 1 @calls))))
+      (finally (finish! h)))))
 
 (deftest every-type-edits-through-real-midi-session-and-command-reducer
   (let [h (harness)]

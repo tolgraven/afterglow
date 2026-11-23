@@ -23,6 +23,13 @@
   (is (nil? (views/cue-view show :missing)))
   (is (= [[1 1] [0 0]] (mapv (juxt :x :y) (:cells (views/page-view show :main))))))
 
+(deftest grouped-instances-preserve-cue-and-pad-projections
+  (let [index (group-by :cue-id (views/active-instances show))]
+    (doseq [view [views/cue-view views/pad-view] id [:red :blue :missing]]
+      (let [expected (view show id)]
+        (with-redefs [views/active-instances (fn [_] (throw (ex-info "Unexpected sort" {})))]
+          (is (= expected (view show id index))))))))
+
 (deftest public-snapshot-excludes-private-model-and-definition-fields
   (let [snapshot (views/snapshot show)]
     (is (= 5 (:revision snapshot)))
