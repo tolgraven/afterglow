@@ -58,6 +58,14 @@ poses, while retaining each volume's own shape, range and receiver checks.
 Position-only volumes leave the optical input unread. Create a fresh sampler
 for the next output or a different patch.
 
+A renderer using compact fixture output can attach it with
+`(field/compact-observations settings target-index compact)`. Build
+`target-index` with `afterglow.render.frame/compact-index` from the compact
+frame's `:target-order`. Several volumes then share the previous frame's light
+level. Fixed, ungated heads read the three emitted color components directly.
+Moving, shuttered and dynamically directed heads use the same resolved values
+as rich output. The fixture ID selects the row even if patch order changes.
+
 ```clojure
 {:shape :ball :position [2 1 -1] :radius 0.3 :restitution 0.9
  :geometry {:shape :difference

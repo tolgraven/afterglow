@@ -1,6 +1,7 @@
 (ns afterglow.spatial.field
   "Pure, weighted venue masks for native light and cue contributions."
-  (:require [afterglow.spatial.geometry :as geometry]
+  (:require [afterglow.render.frame :as frame]
+            [afterglow.spatial.geometry :as geometry]
             [afterglow.spatial.beam :as beam]
             [afterglow.spatial.shape :as shape]
             [afterglow.time :as time]
@@ -108,6 +109,14 @@
   [options]
   (assoc options ::optics (beam/prepare-options (assoc options :selection #{}))))
 
+(defn compact-observations
+  "Attach a completed compact frame and its matching target index to optical
+  settings. A sampler shares the emission read across volumes in this frame."
+  [options index compact]
+  (let [attributes [:emitted-color :pan :tilt :zoom :direction :shutter :strobe]
+        read-row (frame/compact-reader index compact attributes)]
+    (assoc options :values (with-meta read-row {::observe (beam/compact-observer compact (:indices index) read-row)}))))
+
 (defn prepare-rig
   "Build spatial indices now and prepare optical fixtures on first beam use."
   [fixtures]
@@ -151,5 +160,6 @@
   [fixtures {:keys [values] :as observations}]
   (let [rig (prepare-rig fixtures)
         read-row (or values {})
-        emissions (delay (mapv #(beam/observe % (read-row (:id %))) @(::emitters rig)))]
+        observe (or (::observe (meta read-row)) #(beam/observe % (read-row (:id %))))
+        emissions (delay (mapv observe @(::emitters rig)))]
     (fn [volume] (sample-volume volume rig observations emissions))))
