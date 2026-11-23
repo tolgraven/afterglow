@@ -117,3 +117,18 @@
     (is (= {:a {:ms 50}} (:keyframe-intervals limited)))
     (is (= 3 (get-in warm [:effects :b :max-stride])))
     (is (thrown? clojure.lang.ExceptionInfo (cadence/advance warm (assoc frame :max-strides {:a 0}) config)))))
+
+(deftest slow-producers-admit-only-windows-reusable-at-the-observed-rate
+  (let [frame {:epoch 0 :versions {:open 1 :capped 1} :samples {:open (cost 8 true) :capped (cost 6 true)}
+               :period-ms 25 :elapsed-ms 130 :max-strides {:capped 4}}
+        config (cadence/settings {:pressure-frames 2})
+        tick (fn [state slot] (cadence/advance state (assoc frame :output-slot slot) config))
+        stalled (reduce tick nil [1 7 13 19 25 31])
+        recovering (reduce tick stalled [34 37 40 43 46 49])]
+    (is (= 12 (:minimum-useful-stride stalled)))
+    (is (empty? (:keyframe-intervals stalled)) "Both declared limits are shorter than two actual render opportunities")
+    (is (= {:open {:ms 200}} (:keyframe-intervals recovering)))
+    (is (= 6 (:minimum-useful-stride recovering)))
+    (is (= 1 (get-in recovering [:effects :capped :stride])))
+    (is (= 2 (:minimum-useful-stride (tick recovering nil))) "Unscheduled REPL renders do not inherit physical gaps")
+    (is (= 2 (:minimum-useful-stride (tick recovering 1))) "A restarted clock discards the old slot gap")))
