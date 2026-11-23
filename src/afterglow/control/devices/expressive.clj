@@ -122,7 +122,7 @@
       (some semantic-axes (map keyword (str/split (str/lower-case (str (:name schema ""))) #"[^a-z]+")))))
 
 (defn- scalar-bounds [schema]
-  (if (= :color (:type schema)) [0 1] (:bounds schema)))
+  (if (= :color (:type schema)) (params/color-bounds schema) (:bounds schema)))
 
 (defn- supported? [{:keys [type size] :as schema} {:keys [component range]}]
   (and (params/valid-schema? schema)

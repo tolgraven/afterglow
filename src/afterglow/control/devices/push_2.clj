@@ -161,7 +161,7 @@
     (let [schema (get-in model [:instances instance-id :definition :params param])
           [x y] (codec/pad-coordinates note)
           value (case (:type schema)
-                  :color (parameter-edit/color-grid-value x y)
+                  :color (parameter-edit/color-grid-value schema x y)
                   :enum (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
                   ::missing)]
       (when (#{:color :enum} (:type schema))
@@ -378,7 +378,7 @@
                                           :group [80 180 130] :volume [230 150 65] :fixture [55 130 195] :default [100 100 100] [0 0 0])
                                         [0 0 0])
                                       (case (:type schema)
-                                      :color (mapv #(int (Math/round (* 255.0 %))) (parameter-edit/color-grid-value x y))
+                                      :color (mapv #(int (Math/round (* 255.0 %))) (parameter-edit/color-grid-value schema x y))
                                       :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
                                                   selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
                                               (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
