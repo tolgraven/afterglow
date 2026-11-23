@@ -9,13 +9,14 @@
             [afterglow.control.display :as display]
             [afterglow.control.devices.target-picker :as targets]
             [afterglow.control.params :as params]
+            [afterglow.control.parameter-edit :as edit]
             [afterglow.control.views :as views]))
 
 (def capabilities
   (assoc codec/capabilities :adapter :composable-session
          :controls #{:pad-cues :held-release :parameter-encoders :master-encoder
                      :parameter-pressure :parameter-touch-strip :page-scroll
-                     :manual-handoff :reconnect}
+                     :manual-handoff :reconnect :shift-fine}
          :feedback :data-view-only))
 
 (defn- valid! [condition message data]
@@ -23,7 +24,7 @@
 
 (defn- reset-interactions [state]
   (assoc (targets/clear-selection state) :pads {} :holds {} :buttons #{} :touches #{}
-         :selected-instance nil :selected-cue nil :selection-token nil))
+         :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil))
 
 (defn- cue-at [state model [x y]]
   (let [[left bottom] (:origin state)
@@ -86,18 +87,25 @@
       (when (not= value next-value)
         {:op :param/set :instance-id instance-id :param parameter :value next-value}))))
 
+(defn- shift-held? [options state]
+  (some #(= :shift (get-in options [:button-bindings %])) (:buttons state)))
+
 (defn- encoder [options state event model]
   (let [{:keys [target param step]} (get-in options [:encoder-bindings (:control-id event)])
-        delta (:delta event)
-        command (when-not (zero? delta)
-                  (if (= target :master)
-                    (let [value (bindings/clamp (+ (:master model) (* delta (or step 0.01))) [0 1])]
-                      (when (not= value (:master model)) {:op :master/set :value value}))
-                    (when param
-                      (parameter-command model (:selected-instance state) param
-                        (fn [value [low high] schema]
-                          (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0))))))))))]
-    {:state state :commands (if command [command] [])}))
+        delta (:delta event) fine? (boolean (shift-held? options state))]
+    (cond
+      (zero? delta) {:state state}
+      (= target :master)
+      (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
+        {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
+      :else
+      (if-let [{:keys [instance schema value]} (numeric-parameter model (:selected-instance state) param)]
+        (let [[cache bits] (when fine? (edit/patch-step (:shift-patch state) model instance param))
+              schema (cond-> schema step (assoc :step step))
+              next-value (edit/edit schema value delta {:fine? fine? :dmx-bits bits})]
+          {:state (cond-> state cache (assoc :shift-patch cache))
+           :commands (if (= value next-value) [] [{:op :param/set :instance-id (:id instance) :param param :value next-value}])})
+        {:state state}))))
 
 (defn- expression [options state event model]
   (let [poly? (= :poly-pressure (:type event))
@@ -116,7 +124,8 @@
 (defn- button [options state event model]
   (let [id (:control-id event) down? (:pressed? event)
         previously-down? (contains? (:buttons state) id)
-        state (update state :buttons (if down? conj disj) id)
+        state (cond-> (update state :buttons (if down? conj disj) id)
+                (and (not down?) (= :shift (get-in options [:button-bindings id]))) (dissoc :shift-patch))
         [x y] (:origin state)]
     (if (and down? (not previously-down?))
       (let [action (get-in options [:button-bindings id])]
@@ -199,7 +208,7 @@
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
-                       (#{:blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)))
+                       (#{:shift :blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
