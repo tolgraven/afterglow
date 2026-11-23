@@ -71,7 +71,10 @@
   (when-not (and (= (:state context) (:state result)) (= [] (:intents result))
                  (false? (:done? result)) (vector? (:assignments result)))
     (invalid! "A predictive sampler must only produce continuous native outputs"))
-  (validate-blocks! (:contributions (runtime/append-contributions result [])) (get-in context [:frame :hdr?])))
+  (let [fields (validate-blocks! (:contributions (runtime/append-contributions result [])) (get-in context [:frame :hdr?]))
+        reader (::runtime/observe (meta result))]
+    (with-meta fields (cond-> {::sample-clock (time/frame-clock (:frame context))}
+                        reader (assoc ::runtime/observe reader)))))
 
 (defn- scalar [a b t lo hi]
   (let [v (+ (double a) (* (double t) (- (double b) (double a))))]
@@ -176,7 +179,8 @@
           end (align start (rows target))]
       (when-not (every? true? (map #(= (dissoc %1 :value) (dissoc %2 :value)) start end))
         (invalid! "Predictive effect changed its assignment properties"))
-      [[{:kind :assignments :assignments start}] [{:kind :assignments :assignments end}]])))
+      [(with-meta [{:kind :assignments :assignments start}] (meta origin))
+       (with-meta [{:kind :assignments :assignments end}] (meta target))])))
 
 (defn- geometry-block? [{:keys [kind assignments batch]}]
   (case kind

@@ -37,3 +37,5 @@ Run `lein test` from the project root. CI runs on Java 17, 21 and 25.
 
 Run `lein run` to start Afterglow. Packaging with `npm ci` and `lein uberjar`
 builds the embedded Antora guide, API docs and Git version resources.
+
+[Numeric effect materials](effect-blocks.md) covers shader-backed prefab stages, musical generators, geometry coordinates and inspecting intermediate values.

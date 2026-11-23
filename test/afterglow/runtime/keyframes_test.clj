@@ -199,3 +199,85 @@
             sample (kf/inspect (get-in half [:keyframes "0:1"]) :lamp attr)]
         (is (:forecast-failed? sample))
         (is (== 1.0 (get-in sample [:result 0 1])))))))
+
+(defn- traced-model []
+  (let [opts {:interval {:beats 1} :progress {:mode :replace :param :progress}}]
+    (-> (show opts)
+        (assoc-in [:instances "0:1" :definition :blocks]
+                  {[:variables :weather :amount] {:stages []}
+                   [:outputs :dimmer] {:stages [{:block :signed}]}})
+        (assoc-in [:instances "0:1" :params :progress] 0.5))))
+
+(defn- observed-step [sampled inspected]
+  (kf/predictable
+   (fn [{:keys [frame instance] :as ctx}]
+     (let [beat (double (:beat frame))
+           base (+ 0.3 (* 0.1 (Math/sin beat)))
+           offset (get-in frame [:variables :weather :amount] -0.15)
+           final (+ base offset)]
+       (swap! sampled inc)
+       (when (or (:keyframes frame) (::runtime/observe (meta instance)))
+         (throw (ex-info "A new endpoint retained an earlier observation" {})))
+       (-> ctx
+           (assoc :assignments [{:target-id :lamp :attribute :dimmer :value final}])
+           (vary-meta assoc ::runtime/observe
+                      (fn [[path target]]
+                        (swap! inspected inc)
+                        (when (and (= [:outputs :dimmer] path) (= :lamp target))
+                          {:base base :stages [{:block :signed :offset offset :value final}] :result final}))))))))
+
+(defn- inspect-block [result]
+  (runtime/observe (get-in result [:model :instances "0:1"]) [[:outputs :dimmer] :lamp]))
+
+(deftest keyframed-observation-keeps-real-traces-and-only-the-displayed-native-write
+  (let [sampled (atom 0) reads (atom 0) compile (constantly (observed-step sampled reads))
+        initial (advance (traced-model) nil compile 0)
+        half (advance (:model initial) initial compile 1/2)
+        window (get-in half [:keyframes "0:1"])
+        _ (is (zero? @reads))
+        {:keys [keyframe result stages time-ms]} (inspect-block half)
+        at-boundary (advance (:model half) half compile 1)
+        next (inspect-block at-boundary)]
+    (is (= 3 @sampled))
+    (is (= 250.0 (double time-ms)))
+    (is (= :target (:trace-source keyframe)))
+    (is (= [0.5 1.0] (mapv double [(:progress keyframe) (get-in keyframe [:sample-clock :beat])])))
+    (is (= -0.15 (:offset (first stages))))
+    (is (= [result] (get-in keyframe [:native :target])))
+    (is (= (get-in half [:assignments 0 :value]) (get-in keyframe [:native :result 0])))
+    (is (not= result (get-in keyframe [:native :result 0])))
+    (is (= 0.3 (get-in keyframe [:origin-trace :base])))
+    (is (= :interpolated (get-in next [:keyframe :origin-kind])))
+    (is (nil? (get-in next [:keyframe :origin-trace])))
+    (is (= (get-in half [:assignments 0 :value]) (get-in next [:keyframe :native :origin 0])))
+    (let [saved (storage/freeze window) restored (storage/restore saved (:rig window) (:epoch window))
+          resumed (advance (:model half) {:keyframes {"0:1" restored}} compile 3/4)]
+      (is (nil? (meta (:origin saved))))
+      (is (nil? (inspect-block resumed)))
+      (is (= 3 @sampled)))))
+
+(deftest variable-bindings-invalidate-forecasts-on-resolved-leaf-changes
+  (let [sampled (atom 0) reads (atom 0) compile (constantly (observed-step sampled reads))
+        tick (fn [prev beat amount other]
+               (engine/advance (assoc-in (or (:model prev) (traced-model)) [:transport :beat] beat)
+                               {:time-ms (* 500 beat) :keyframes (:keyframes prev)
+                                :resolved-variables {:weather {:amount amount :other other}}} compile))
+        first (tick nil 0 0.1 1)
+        stable (tick first 1/4 0.1 2)
+        _ (is (= 2 @sampled))
+        changed (tick stable 1/2 -0.1 3)
+        trace (inspect-block changed)]
+    (is (= 4 @sampled))
+    (is (= -0.1 (get-in trace [:stages 0 :offset])))
+    (is (= -0.1 (get-in trace [:keyframe :origin-trace :stages 0 :offset])))
+    (is (== 1.5 (get-in trace [:keyframe :target-clock :beat])))))
+
+(deftest first-inspection-after-many-partial-retargets-runs-one-endpoint-reader
+  (let [sampled (atom 0) inspected (atom 0)
+        compile (constantly (observed-step sampled inspected))
+        result (reduce (fn [previous beat] (advance (or (:model previous) (traced-model)) previous compile beat))
+                       nil (range 100))]
+    (is (zero? @inspected))
+    (is (= :interpolated (get-in (inspect-block result) [:keyframe :origin-kind])))
+    (is (= 1 @inspected))
+    (is (= 101 @sampled))))

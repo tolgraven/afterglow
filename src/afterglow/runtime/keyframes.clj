@@ -1,7 +1,9 @@
 (ns afterglow.runtime.keyframes
   "Predict continuous native effect outputs on their private musical clock."
   (:require [afterglow.render.easing :as easing]
+            [afterglow.runtime :as runtime]
             [afterglow.runtime.faults :as faults]
+            [afterglow.runtime.keyframes.observations :as observations]
             [afterglow.runtime.keyframes.values :as values]
             [afterglow.time :as time]))
 
@@ -82,10 +84,27 @@
     (measure (:effect-id ctx) eligible? f)
     (f)))
 
+(defn- input-generation [instance frame]
+  (let [paths (filter #(= :variables (first %)) (keys (get-in instance [:definition :blocks])))
+        generation (:keyframe-generation frame)]
+    (if (seq paths)
+      {::generation generation ::variables (into {} (map (fn [path] [path (get-in frame path)])) paths)}
+      generation)))
+
+(defn- declared-variables [signature]
+  (get (nth signature 8) ::variables))
+
+(defn- sample-input [ctx]
+  ;; An arbitrary certified reader can capture its input. Keep previous
+  ;; observers, worker timers and window history outside that private scope.
+  (-> ctx
+      (update :frame dissoc :keyframes :measure-effect :keyframe-intervals)
+      (update :instance vary-meta dissoc ::runtime/observe)))
+
 (defn- signature [instance frame options clock]
   [(:effect-version instance) (dissoc (:params instance) (get-in options [:progress :param]))
    (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
-   (:targets instance) (:started-at-beat instance) (:keyframe-generation frame)])
+   (:targets instance) (:started-at-beat instance) (input-generation instance frame)])
 
 (defn- fresh-window [window prior same-inputs? sample ctx]
   (let [{:keys [options origin-clock target-clock]} window
@@ -101,6 +120,7 @@
                  (and prior (= (:epoch prior) (:epoch window)) (identical? (:rig prior) (:rig window))
                       (= (first (:inputs prior)) (first (:inputs window)))
                       (= (nth (:inputs prior) 5) (nth (:inputs window) 5))
+                      (= (declared-variables (:inputs prior)) (declared-variables (:inputs window)))
                       (<= (get-in prior [:origin-clock :time-ms]) (:time-ms origin-clock))
                       (<= (get-in prior [:origin-clock :beat]) (:beat origin-clock)))
                  (:result prior)
@@ -127,7 +147,7 @@
             (throw (ex-info "Invalid predictive cadence" {:interval value})))
         now (time/coordinate clock unit)
         inputs (signature instance frame options clock)
-        sample #(call ctx true (fn [] (values/blocks % (step %))))
+        sample (fn [at] (call ctx true #(let [input (sample-input at)] (values/blocks input (step input)))))
         same-inputs? (and prior (= (:epoch frame) (:epoch prior)) (identical? (:rig prior) (:fixtures frame))
                           (= inputs (:inputs prior)) (= options (:options prior))
                           (<= (:start prior) (time/coordinate clock (:unit prior))))
@@ -156,8 +176,11 @@
                        (not= false (:playing? frame)) (time/finite-number? (:beat frame))
                        (time/finite-number? (:bpm frame)) (pos? (:bpm frame)))]
     (if (and eligible? (or options adaptive))
-      (let [window (run-window sampler ctx options (get-in frame [:keyframes (:id instance)]) adaptive)]
-        (assoc ctx :contributions (:result window) ::window window))
+      (let [window (run-window sampler ctx options (get-in frame [:keyframes (:id instance)]) adaptive)
+            result (assoc ctx :contributions (:result window) ::window window)]
+        (if-let [reader (observations/reader window frame)]
+          (vary-meta result assoc ::runtime/observe reader)
+          result))
       (call ctx (boolean eligible?) #(step ctx)))))
 
 (defn inspect

@@ -97,9 +97,24 @@
                 {:type ::invalid-result :effect-id id}))
     ;; Identity comes from the instance, never from the effect's return value.
     (cond-> {:id id :state (:state result) :assignments (:assignments result)
-     :contributions (:contributions (append-contributions result []))
-     :intents (:intents result) :done? (:done? result)}
+             :contributions (:contributions (append-contributions result []))
+             :intents (:intents result) :done? (:done? result)}
+      (::observe (meta result)) (vary-meta assoc ::observe (::observe (meta result)))
       (:afterglow.runtime.keyframes/window result) (assoc :keyframe (:afterglow.runtime.keyframes/window result)))))
+
+(defn observable-instance
+  "Keep a completed step's optional, pure query function outside portable show data."
+  [{:keys [instance state] :as evaluation}]
+  (let [next (assoc instance :state state)]
+    (cond (::observe (meta evaluation)) (vary-meta next assoc ::observe (::observe (meta evaluation)))
+          (::observe (meta next)) (vary-meta next dissoc ::observe)
+          :else next)))
+
+(defn observe
+  "Inspect a committed step on demand. Absent and faulted instances have no observation."
+  [instance query]
+  (when-let [read-query (::observe (meta instance))]
+    (read-query query)))
 
 (defn- index-results
   [instances results]

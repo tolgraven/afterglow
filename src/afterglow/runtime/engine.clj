@@ -384,7 +384,7 @@
   (let [evaluated (runtime/merge-results {:frame snapshot :effects descriptors} evaluations)
         instances (into {} (keep (fn [result]
                                   (when-not (:done? result)
-                                    [(:id result) (assoc (:instance result) :state (:state result))]))) evaluations)
+                                    [(:id result) (runtime/observable-instance result)]))) evaluations)
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
     {:model (faults/record-events (assoc model :instances instances) events)
      :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
@@ -470,7 +470,7 @@
                          {:show-id (:show-id model) :epoch (:epoch model)
                           :revision (:revision model) :number frame-number
                           :time-ms time-ms :delta-ms delta-ms
-                          :variables (:variables model) :master (:master model)
+                          :variables (get frame :resolved-variables (:variables model)) :master (:master model)
                           :blackout? (:blackout? model) :transport (:transport model)})
          clock (musical-time/frame-clock snapshot)
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
