@@ -91,6 +91,8 @@
     (fail! [:mode] "Expected :replace, :add or :multiply")))
 
 (defn- stage [catalog prepare before {:keys [block mode inputs coordinates amount] :as spec}]
+  (when-not (and (map? spec) (every? #{:block :mode :amount :coordinates :inputs} (keys spec)))
+    (fail! [:stages] "Unknown stage field. Expected :block, :mode, :amount, :coordinates or :inputs"))
   (let [template (get catalog block)]
     (when-not template (fail! [:block] (str "Unknown effect block " block)))
     (when-not (and (or (nil? inputs) (map? inputs)) (every? (set (keys (:inputs template))) (keys inputs)))
