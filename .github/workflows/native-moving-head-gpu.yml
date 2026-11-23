@@ -5,16 +5,38 @@ on:
   push:
     branches: [master]
     paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml']
+permissions:
+  contents: read
+  statuses: read
 jobs:
-  solve:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15]
-    runs-on: ${{ matrix.os }}
+  choose-mac:
+    if: >-
+      vars.LOCAL_MAC_NATIVE_GPU == 'enabled' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 47
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the Mac result for this PR merge commit
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/choose-mac-runner
+      - name: Report a failing Mac native suite
+        if: steps.select.outputs.runner == 'local-failure'
+        run: exit 1
+  linux:
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
@@ -26,10 +48,30 @@ jobs:
           key: afterglow-lein-${{ runner.os }}-${{ hashFiles('project.clj') }}
           restore-keys: afterglow-lein-${{ runner.os }}-
       - name: Exercise Mesa on an isolated Linux display
-        if: runner.os == 'Linux'
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: xvfb-run -a lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test afterglow.render.gpu-session-test afterglow.render.native-compute-test afterglow.render.native-chain-test
+  hosted-mac:
+    needs: choose-mac
+    if: >-
+      !cancelled() &&
+      needs.choose-mac.outputs.runner != 'local' &&
+      needs.choose-mac.outputs.runner != 'local-failure'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: .github/scripts/install-lein
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: afterglow-lein-${{ runner.os }}-${{ hashFiles('project.clj') }}
+          restore-keys: afterglow-lein-${{ runner.os }}-
       - name: Exercise macOS offscreen OpenGL
-        if: runner.os == 'macOS'
         run: lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test afterglow.render.gpu-session-test afterglow.render.native-compute-test afterglow.render.native-chain-test
