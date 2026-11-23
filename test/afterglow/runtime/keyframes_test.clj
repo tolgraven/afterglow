@@ -272,6 +272,53 @@
     (is (= -0.1 (get-in trace [:keyframe :origin-trace :stages 0 :offset])))
     (is (== 1.5 (get-in trace [:keyframe :target-clock :beat])))))
 
+(defn- variable-source-step [sampled reads path]
+  (let [step (vary-meta (observed-step sampled reads) assoc ::kf/variable-paths [path])
+        add-source (fn [{:keys [frame] :as ctx}]
+                     (update-in ctx [:frame :variables :weather :amount] + (get-in frame path 0.0)))]
+    (kf/with-inputs step add-source)))
+
+(deftest compiled-variable-paths-and-direct-bindings-share-a-forecast
+  (let [sampled (atom 0) reads (atom 0)
+        compile (constantly (variable-source-step sampled reads [:variables :rack "booth" 0]))
+        tick (fn [prev beat direct source other]
+               (engine/advance (assoc-in (or (:model prev) (traced-model)) [:transport :beat] beat)
+                               {:time-ms (* 500 beat) :keyframes (:keyframes prev)
+                                :resolved-variables {:weather {:amount direct} :rack {"booth" [source other]}}}
+                               compile))
+        initial (tick nil 0 0.1 0.1 1)
+        stable (tick initial 1/4 0.1 0.1 2)
+        target #(get-in % [:keyframes "0:1" :target])]
+    (is (= 2 @sampled))
+    (is (identical? (target initial) (target stable)))
+    (is (zero? @reads))
+    (is (= 0.2 (get-in (inspect-block stable) [:stages 0 :offset])))
+    (let [window (get-in stable [:keyframes "0:1"])
+          restored (storage/restore (storage/freeze window) (:rig window) (:epoch window))
+          resumed (tick (assoc-in stable [:keyframes "0:1"] restored) 3/8 0.1 0.1 3)
+          _ (is (= 2 @sampled))
+          changed (tick resumed 1/2 0.1 -0.1 2)
+          trace (inspect-block changed)]
+      (is (= 4 @sampled))
+      (is (not (identical? (target stable) (target changed))))
+      (is (zero? (get-in trace [:keyframe :origin-trace :stages 0 :offset])))
+      (is (zero? (get-in trace [:stages 0 :offset])))
+      (is (== 1.5 (get-in trace [:keyframe :target-clock :beat])))
+      (let [direct-changed (tick changed 3/4 -0.1 -0.1 2)]
+        (is (= 6 @sampled))
+        (is (= -0.2 (get-in (inspect-block direct-changed) [:keyframe :origin-trace :stages 0 :offset])))))))
+
+(deftest compiled-variable-values-distinguish-absent-from-present-nil
+  (let [path [:variables :optional]
+        step (fn [{:keys [frame] :as ctx}]
+               (let [value (if (nil? (get-in frame path :absent)) 0.2 0.6)]
+                 (assoc ctx :assignments [{:target-id :lamp :attribute :dimmer :value value}])))
+        compile (constantly (vary-meta (kf/predictable step) assoc ::kf/variable-paths #{path}))
+        initial (advance (show {:interval {:beats 1}}) nil compile 0)
+        present (advance (assoc-in (:model initial) path nil) initial compile 1/4)
+        removed (advance (update (:model present) :variables dissoc :optional) present compile 1/2)]
+    (is (= [0.6 0.2 0.6] (mapv #(get-in % [:assignments 0 :value]) [initial present removed])))))
+
 (deftest first-inspection-after-many-partial-retargets-runs-one-endpoint-reader
   (let [sampled (atom 0) inspected (atom 0)
         compile (constantly (observed-step sampled inspected))
