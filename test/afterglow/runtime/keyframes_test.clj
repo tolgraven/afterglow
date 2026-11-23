@@ -398,3 +398,28 @@
     (is (= :interpolated (get-in (inspect-block result) [:keyframe :origin-kind])))
     (is (= 1 @inspected))
     (is (= 101 @sampled))))
+
+(deftest an-automatic-ceiling-alone-leaves-authored-sampling-at-frame-rate
+  (let [cap {:max-interval {:beats 1/8}}
+        calls (atom []) compile (compile-recorder calls)
+        tick (fn [model previous t beat bpm interval]
+               (engine/advance (update model :transport assoc :beat beat :bpm bpm)
+                               {:time-ms t :keyframes (:keyframes previous)
+                                :keyframe-intervals {"0:1" interval}} compile))
+        live (tick (show cap) nil 0 0 120 nil)
+        window (tick (:model live) live 25 1/20 120 {:ms 250})
+        faster (tick (:model window) window 50 1/10 240 {:ms 250})
+        full (tick (:model faster) faster 75 1/5 240 nil)
+        authored (tick (show (assoc cap :interval {:bars 1})) nil 0 0 120 {:ms 4000})]
+    (is (empty? (:keyframes live)))
+    (is (= :beats (get-in window [:keyframes "0:1" :unit])))
+    (is (== 1/8 (get-in window [:keyframes "0:1" :span])))
+    (is (== 81.25 (get-in faster [:keyframes "0:1" :target-clock :time-ms])))
+    (is (== (/ 0.1 8) (get-in faster [:assignments 0 :value])))
+    (is (== (/ 0.2 8) (get-in full [:assignments 0 :value])))
+    (is (empty? (:keyframes full)))
+    (is (== 4 (get-in authored [:keyframes "0:1" :span])))
+    (is (= cap (kf/validate! cap)))
+    (doseq [options [{} {:curve :linear} {:max-interval nil} {:max-interval {:beats 0}}
+                     {:interval {:ms 25} :max-interval {:bars -1}}]]
+      (is (thrown? clojure.lang.ExceptionInfo (kf/validate! options))))))

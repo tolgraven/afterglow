@@ -36,3 +36,27 @@ reducing the keyframe rate of mounted presentation surfaces. Measurements and
 recovery continue through this interval. Once the visual sampler reaches its
 lowest rate, the host clears the flag and normal cost-ranked effect throttling
 resumes if pressure persists.
+
+## Giving a particular effect less time between samples
+
+Put `:keyframes {:max-interval {:beats 1/8}}` on a continuous moving or color
+effect to limit how far ahead overload protection can sample it. With only a
+maximum configured, ordinary playback still evaluates the effect every frame.
+At 40 Hz, one eighth of a beat permits two frames at 120 BPM and one frame at
+240 BPM. The other effects in a compound cue have independent limits.
+
+A positive duration may use beats, bars, phrases or milliseconds. Bars and phrases
+use the current meter. An explicit `:interval` remains the authored cadence.
+For example, `{:interval {:beats 1} :max-interval {:beats 1/2}}` retains the
+one-beat tween and gives the governor no additional slowdown on that effect.
+On a tempo or meter edit, automatic windows take a fresh sample at the live
+clock. An authored tween keeps its last presented value for continuity.
+
+Hosts can use `cadence/maximum-stride` with the effect's keyframe declaration,
+transport, output period and global maximum. Send the resulting per-instance
+limits in `:max-strides` to `cadence/advance`. Apply a changed ceiling to the
+current frame's requested intervals before passing them to workers, including on
+the frame that accepts a tempo or meter command. The governor skips an effect
+already at its ceiling when choosing the next expensive effect, and spends the
+same pressure decision on an eligible sibling. The diagnostic ranking reports
+both `:stride` and its effective `:max-stride`.
