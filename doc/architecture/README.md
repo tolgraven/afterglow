@@ -19,11 +19,11 @@ fixture channels. Tolglow supplies show configuration and authored effects.
 * [Functional runtime](../../../tolglow/docs/architecture/functional-runtime.md)
 * [Rendering and acceleration](../../../tolglow/docs/architecture/rendering.md)
 * [Shared controls and web](../../../tolglow/docs/architecture/control-and-web.md)
-* [Work ledger](../../../tolglow/docs/work-items.edn)
+* [Implementation status and work on both projects](https://github.com/tolgraven/tolglow/issues)
 
-These relative links assume both repositories are siblings. If viewing this
-repository alone, clone `https://github.com/tolgraven/tolglow` beside it and use
-the architecture change there; the documentation may not yet be on its default branch.
+The companion documentation links assume a sibling Tolglow checkout. In the
+shared issue tracker, use the project labels to find work affecting Afterglow
+alone or both repositories.
 
 This change adds characterization tests and an experimental pure runtime; it
 does not replace the live engine or device drivers. The old `IEffect` API, show

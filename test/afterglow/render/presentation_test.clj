@@ -41,6 +41,23 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"frozen" (presentation/complete (presentation/new-state plan) output)))
     (is (thrown? clojure.lang.ExceptionInfo (presentation/freeze-frame {:epoch 0 :frame-id 1 :time-ms 20 :completed-at-ms 10} output)))))
 
+(deftest signed-unsigned-and-edited-packets-are-validated
+  (let [stamp {:epoch 0 :frame-id 1 :time-ms 0 :completed-at-ms 0}
+        state (presentation/new-state (presentation/compile-plan
+                                       [{:id :glow :universe 0 :address 1 :channels {:red 1}}]))
+        dark (vec (repeat 512 0))
+        supplied (into [(byte -128) (short -1) (int 0) (bigint 128) (biginteger 255)] (drop 5 dark))
+        frozen (presentation/freeze-frame stamp {:universes {0 supplied}})
+        packet (:packet (presentation/present (:state (presentation/complete state frozen)) 0))]
+    (is (= [128 255 0 128 255] (subvec (get-in packet [:universes 0]) 0 5)))
+    (is (= [-128 -1 0 -128 -1] (take 5 (get-in (presentation/materialize packet) [:universes 0]))))
+    (doseq [bad [-129 256 0.5 0.0 nil (inc (bigint Long/MAX_VALUE))]]
+      (let [edited (assoc-in frozen [:universes 0 511] bad)]
+        (is (thrown? clojure.lang.ExceptionInfo (presentation/complete state edited)) (pr-str bad))
+        (is (thrown? clojure.lang.ExceptionInfo (presentation/materialize edited)) (pr-str bad))))
+    (doseq [bad [(subvec dark 1) (byte-array 513) (int-array 512)]]
+      (is (thrown? clojure.lang.ExceptionInfo (presentation/materialize {:universes {0 bad}}))))))
+
 (deftest direct-default-holds-unmodified-completed-data
   (let [p (packet 1 0 25 assignments)
         state (admitted (presentation/new-state plan) p)]
@@ -63,7 +80,7 @@
     (is (= [0 0 0 0] (bytes-at dark 0 1 2 3 4)))
     (is (= [255 128 64 128 0] (bytes-at dark 0 10 11 12 13 14)))
     (is (= [255] (bytes-at dark 1 512)))
-    (is (= [0] (bytes-at dark 2 1)))
+    (is (= [255] (bytes-at dark 2 1)))
     (is (= 0 (:time-ms half)))
     (is (= 75 (get-in half [:presentation :presented-at-ms])))
     (is (= 0.5 (get-in half [:presentation :gain])))))
@@ -71,12 +88,12 @@
 (deftest fine-inverted-dimmer-and-reversed-physical-offsets-use-whole-values
   (let [state (admitted (presentation/new-state plan {:mode :hold-fade :fade-ms 100}) (packet 1 0))
         half (frame-at state 75)]
-    ;; Renderer fractional-255 convention: inverted half is 127 + 128/255.
+    ;; An inverted half level packs to 0x8000.
     ;; Fade in semantic space to approximately quarter, then invert back.
-    (is (= [191] (bytes-at half 1 512)))
-    (is (= [64] (bytes-at half 2 1)))
-    (is (= [0 102] (bytes-at half 2 2 3)))
-    (is (= [127 128] (bytes-at (frame-at state 0) 0 15 16)))))
+    (is (= [192] (bytes-at half 1 512)))
+    (is (= [0] (bytes-at half 2 1)))
+    (is (= [102 102] (bytes-at half 2 2 3)))
+    (is (= [128 0] (bytes-at (frame-at state 0) 0 15 16)))))
 
 (deftest one-buffer-interpolation-holds-discrete-controls-until-next-sample
   (let [old (packet 1 0 0 [(a :head :pan 0) (a :head :strobe 0.2) (a :head :gobo 0.3)])
@@ -85,17 +102,17 @@
         half (frame-at state 37.5)]
     (is (nil? (frame-at state 24)))
     (is (= (:universes old) (:universes (frame-at state 25))))
-    (is (= [127 128 51 77] (bytes-at half 0 15 16 19 20)))
-    (is (= [255 0 204 230] (bytes-at (frame-at state 50) 0 15 16 19 20)))
+    (is (= [128 0 51 77] (bytes-at half 0 15 16 19 20)))
+    (is (= [255 255 204 230] (bytes-at (frame-at state 50) 0 15 16 19 20)))
     (is (= [0 25] (get-in half [:presentation :source-times])))
     (is (= 0.5 (get-in half [:presentation :weight])))
     (is (= 12.5 (get-in half [:presentation :target-time-ms])))))
 
 (deftest interpolation-is-whole-word-not-independent-byte-interpolation
-  (let [left (packet 1 0 0 [(a :head :pan (/ 127.99 255))])
-        right (packet 2 25 25 [(a :head :pan (/ 128.01 255))])
+  (let [left (packet 1 0 0 [(a :head :pan (/ 32765.0 65535))])
+        right (packet 2 25 25 [(a :head :pan (/ 32771.0 65535))])
         state (-> (presentation/new-state plan {:mode :buffered-interpolation}) (admitted left) (admitted right))]
-    (is (= [127 252] (bytes-at left 0 15 16)))
+    (is (= [127 253] (bytes-at left 0 15 16)))
     (is (= [128 3] (bytes-at right 0 15 16)))
     (is (= [128 0] (bytes-at (frame-at state 37.5) 0 15 16)))))
 

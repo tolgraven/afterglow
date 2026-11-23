@@ -15,9 +15,9 @@ and readback. Effect steps return data to the renderer.
   photopic weights and linear RGB preview tints. Master, blackout and late
   presentation apply to named emitter channels. A UV channel has no visible
   RGB contribution. RGBW-only patches retain a specialized packing path.
-- Coarse/fine packing preserves the existing fractional-255 convention, not an
-  assumed 0..65535 linear convention. Inversion and cross-universe fine offsets
-  have dedicated tests. Change these semantics only with explicit migration.
+- Continuous coarse/fine channels span all 65,536 physical codes. Use the DMX
+  helpers for encoding and feedback. Profiled function ranges and fog retain
+  coarse-byte boundaries. Test inversion, the byte carry and cross-universe pairs.
 - Inputs and compiled plans remain immutable. Private scratch arrays/transients
   and fresh returned byte arrays have one owner. Do not retain or mutate output
   arrays after publishing them to consumers. Keep clocks, queues and mutable

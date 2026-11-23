@@ -69,6 +69,18 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (layers/validate-transforms! [{:attribute :focus :value {:op :imaginary}}])))))
 
+(deftest target-weight-checks-preserve-number-types-and-fault-sources
+  (let [render (fn [opacity weights]
+                 (let [member (assoc-in (layer 0 opacity [] (block (row :focus 1)))
+                                        [:native-layer :target-weights] weights)]
+                   (frame/resolve-contributions patch [member])))]
+    (doseq [weight [0 1 (float 0.5) 1/3 0.25M]]
+      (is (== weight (get-in (render 1 (sorted-map :head weight)) [:values :head :channels :focus]))))
+    (doseq [invalid [nil Double/NaN Double/POSITIVE_INFINITY -1/7 1.000000000000000000001M]]
+      (let [fault (try (render 0 (array-map :head 1 :unpatched invalid)) nil
+                       (catch clojure.lang.ExceptionInfo ex (ex-data ex)))]
+        (is (= {:instance-id 0} (:effect-source fault)))))))
+
 (deftest launch-source-retains-a-stable-slot-order-through-parallel-evaluation
   (let [model (control/new-show {:registry {:effects {:base {:id :base :version 1 :params {}}
                                                      :mod {:id :mod :version 1 :params {}}}

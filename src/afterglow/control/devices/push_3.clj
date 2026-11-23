@@ -1,29 +1,31 @@
 (ns afterglow.control.devices.push-3
   "Push 3 User Mode controls over the shared semantic model. Addresses are
-  captured explicitly; no Push 2 protocol, native display or LED output is used."
+  captured explicitly. An optional tethered display consumes the shared Push view."
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.codecs.push-3 :as codec]
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
+            [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.display :as display]
             [afterglow.control.devices.target-picker :as targets]
             [afterglow.control.params :as params]
+            [afterglow.control.parameter-edit :as edit]
             [afterglow.control.views :as views]))
 
 (def capabilities
   (assoc codec/capabilities :adapter :composable-session
          :controls #{:pad-cues :held-release :parameter-encoders :master-encoder
                      :parameter-pressure :parameter-touch-strip :page-scroll
-                     :manual-handoff :reconnect}
-         :feedback :data-view-only))
+                     :manual-handoff :reconnect :shift-fine}
+         :feedback :semantic-view :display-protocol :tethered-descriptor-replay))
 
 (defn- valid! [condition message data]
   (when-not condition (throw (ex-info message (assoc data :type ::invalid-options)))))
 
 (defn- reset-interactions [state]
   (assoc (targets/clear-selection state) :pads {} :holds {} :buttons #{} :touches #{}
-         :selected-instance nil :selected-cue nil :selection-token nil))
+         :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
 
 (defn- cue-at [state model [x y]]
   (let [[left bottom] (:origin state)
@@ -86,18 +88,30 @@
       (when (not= value next-value)
         {:op :param/set :instance-id instance-id :param parameter :value next-value}))))
 
+(defn- shift-held? [options state]
+  (some #(= :shift (get-in options [:button-bindings %])) (:buttons state)))
+
 (defn- encoder [options state event model]
   (let [{:keys [target param step]} (get-in options [:encoder-bindings (:control-id event)])
-        delta (:delta event)
-        command (when-not (zero? delta)
-                  (if (= target :master)
-                    (let [value (bindings/clamp (+ (:master model) (* delta (or step 0.01))) [0 1])]
-                      (when (not= value (:master model)) {:op :master/set :value value}))
-                    (when param
-                      (parameter-command model (:selected-instance state) param
-                        (fn [value [low high] schema]
-                          (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0))))))))))]
-    {:state state :commands (if command [command] [])}))
+        delta (:delta event) fine? (boolean (shift-held? options state))]
+    (cond
+      (zero? delta) {:state state}
+      (= target :master)
+      (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
+        {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
+      (not fine?)
+      (let [command (parameter-command model (:selected-instance state) param
+                      (fn [value [low high] schema]
+                        (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0)))))))]
+        {:state state :commands (if command [command] [])})
+      :else
+      (if-let [{:keys [instance schema value]} (numeric-parameter model (:selected-instance state) param)]
+        (let [[cache bits] (when fine? (edit/patch-step (:shift-patch state) model instance param))
+              schema (cond-> schema step (assoc :step step))
+              next-value (edit/edit schema value delta {:fine? fine? :dmx-bits bits})]
+          {:state (cond-> state cache (assoc :shift-patch cache))
+           :commands (if (= value next-value) [] [{:op :param/set :instance-id (:id instance) :param param :value next-value}])})
+        {:state state}))))
 
 (defn- expression [options state event model]
   (let [poly? (= :poly-pressure (:type event))
@@ -116,7 +130,8 @@
 (defn- button [options state event model]
   (let [id (:control-id event) down? (:pressed? event)
         previously-down? (contains? (:buttons state) id)
-        state (update state :buttons (if down? conj disj) id)
+        state (cond-> (update state :buttons (if down? conj disj) id)
+                (and (not down?) (= :shift (get-in options [:button-bindings id]))) (dissoc :shift-patch))
         [x y] (:origin state)]
     (if (and down? (not previously-down?))
       (let [action (get-in options [:button-bindings id])]
@@ -148,13 +163,16 @@
     :button (button options state event model)
     {:state state}))
 
+(defn- surface-state [state]
+  (if-let [controls (:controls state)]
+    (cond-> controls (get-in state [:mpe :selected-instance])
+      (assoc :selected-instance (get-in state [:mpe :selected-instance])))
+    state))
+
 (defn control-view
-  "Pure labels/values for an external UI. This does not drive Push 3's display."
+  "Pure grid and keyed parameter values for an external UI."
   [state model]
-  (let [state (if (:controls state)
-                (cond-> (:controls state)
-                  (get-in state [:mpe :selected-instance])
-                  (assoc :selected-instance (get-in state [:mpe :selected-instance]))) state)]
+  (let [state (surface-state state)]
    (merge (display/view-options state model)
           {:page (:page-id state) :origin (:origin state)
    :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
@@ -199,7 +217,7 @@
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
-                       (#{:blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)))
+                       (#{:shift :blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
@@ -270,17 +288,40 @@
              (combine ((:stop controls) (:controls state) model envelope disconnected?)
                       ((:stop notes) (:mpe state) model envelope disconnected?)))}))
 
+(defn- display-feedback [options state model _]
+  (let [controls (surface-state state)
+        index (push-view/cue-index model)
+        instance (or (get-in model [:instances (:selected-instance controls)]) (last (:active index)))
+        touch (some (fn [id]
+                      (when-let [k (get-in options [:encoder-bindings id :param])]
+                        (when (get-in instance [:definition :params k])
+                          {:instance-id (:id instance) :param k :component 0})))
+                    (sort-by str (:touches controls)))
+        selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
+        view (push-view/view selected model index {:status :ready :touched-parameter touch})
+        selected (assoc selected :selected-instance (:id instance) :last-display view)
+        next-state (if (:controls state)
+                     (-> state (assoc :controls selected) (assoc-in [:mpe :selected-instance] (:id instance)))
+                     selected)]
+    (cond-> {:state next-state}
+      (not= view (:last-display controls)) (assoc :display view))))
+
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
   MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates."
   [options]
-  (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options)))
+  (cond-> (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options))
+    (:display options) (assoc :feedback (partial display-feedback options))))
 
 (defn connect!
   "Explicitly open an injected MIDI transport. Manual session/suspend! and
   session/resume! provide handoff; User itself cannot be mapped in User Mode.
-  Native Push 3 display transport is unsupported and rejected."
+  A display must be an explicitly tagged Push 3 semantic transport."
   [options]
-  (valid! (nil? (:display options)) "Push 3 native display protocol is not implemented" {})
-  (session/open! (session/create (assoc options :profile (profile options)))))
+  (when-let [display (:display options)]
+    (valid! (and (= :push-3 (:device display)) (= :view (:input display))
+                 (every? #(fn? (get display %)) [:open! :render! :close!]))
+            "Choose a tagged Push 3 display transport" {}))
+  (session/open! (session/create (cond-> (assoc options :profile (profile options))
+                                    (and (:transport options) (not (:midi options))) (assoc :midi (:transport options))))))

@@ -171,8 +171,12 @@
                                         (:source block)))))
     (partition-by (juxt #(get-in % [:native-layer :member]) :source) ordered)))
 
+(defn- every-weight? [pred weights]
+  ;; Visit the map directly. A moving mask can contain thousands of head IDs.
+  (reduce-kv (fn [_ _ weight] (if (pred weight) true (reduced false))) true weights))
+
 (defn- validate-weights! [weights source]
-  (when (and (some? weights) (not (and (map? weights) (every? unit? (vals weights)))))
+  (when (and (some? weights) (not (and (map? weights) (every-weight? unit? weights))))
     (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {}) source))))
 
 (defn- group-blocks [high? backdrop blocks rows blend-value validate!]
@@ -269,7 +273,7 @@
 
         (or (zero? opacity) (empty? target-weights)) []
 
-        (and (packed-factor? opacity) (every? packed-factor? (vals target-weights))
+        (and (packed-factor? opacity) (every-weight? packed-factor? target-weights)
              (or (= 1 (count ordered)) (independent-columns? ordered)))
         (let [masked (mapv (fn [block]
                              ((if (= :batch (:kind block)) masked-batch masked-assignments)

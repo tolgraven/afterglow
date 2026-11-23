@@ -95,3 +95,25 @@
     (is (= 1 (get-in held [:effects "head" :stride])))
     (is (= 2 (get-in released [:effects "head" :stride])))
     (is (= 7 (get-in released [:effects "head" :evaluations])))))
+
+(deftest musical-maxima-follow-the-current-tempo-and-meter
+  (let [clock {:bpm 120 :meter {:beats-per-bar 3 :bars-per-phrase 2}}
+        limit #(cadence/maximum-stride %1 %2 25 64)]
+    (is (= 2 (limit {:max-interval {:beats 1/8}} clock)))
+    (is (= 1 (limit {:max-interval {:beats 1/8}} (assoc clock :bpm 240))))
+    (is (= 15 (limit {:max-interval {:bars 1/4}} clock)))
+    (is (= 30 (limit {:max-interval {:phrases 1/4}} clock)))
+    (is (= 3 (limit {:max-interval {:ms 99}} clock)))
+    (is (= 1 (limit {:interval {:ms 80} :max-interval {:ms 99}} clock)))
+    (is (= 64 (limit {:max-interval {:bars 4}} clock)))))
+
+(deftest capped-expensive-effects-leave-pressure-budget-to-other-effects
+  (let [config (assoc opts :pressure-frames 1)
+        frame {:epoch 1 :versions version :samples costs :period-ms 25 :elapsed-ms 35
+               :max-strides {:a 1 :b 3}}
+        warm (nth (iterate #(cadence/advance % frame config) nil) 10)
+        limited (cadence/advance warm (assoc frame :max-strides {:a 2 :b 1}) config)]
+    (is (= {:b {:ms 75}} (:keyframe-intervals warm)))
+    (is (= {:a {:ms 50}} (:keyframe-intervals limited)))
+    (is (= 3 (get-in warm [:effects :b :max-stride])))
+    (is (thrown? clojure.lang.ExceptionInfo (cadence/advance warm (assoc frame :max-strides {:a 0}) config)))))

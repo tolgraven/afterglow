@@ -16,6 +16,7 @@
                  [org.deepsymmetry/beat-link "8.0.0" :exclusions [org.slf4j/slf4j-api]]
                  [org.deepsymmetry/lib-carabiner "1.2.0"]
                  [org.deepsymmetry/wayang "0.1.8"]
+                 [net.java.dev.jna/jna "5.19.1"]
                  [org.jogamp.java3d/vecmath "1.7.2"]
                  [org.jogamp.java3d/java3d-core "1.7.2"]
                  [org.jogamp.java3d/java3d-utils "1.7.2"]

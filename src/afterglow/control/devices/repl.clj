@@ -81,7 +81,8 @@
   Requires the captured layout/expression settings documented by its profile."
   [options]
   (push-3/connect! (cond-> options
-                    (not (:transport options)) (assoc :transport (transports/midi-transport options)))))
+                    (:display options) with-feedback
+                    (not (or (:midi options) (:transport options))) (assoc :transport (transports/midi-transport options)))))
 
 (defn open-seaboard!
   "Open a Seaboard M with its configured MPE zone and cue/axis mappings."

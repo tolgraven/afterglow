@@ -15,6 +15,17 @@
     (let [length (geometry/length3 v)]
       (when (and (pos? length) (Double/isFinite length)) (scale v (/ 1.0 length))))))
 
+(defn- axis-plane [{:keys [normal point]}]
+  (let [axes (keep-indexed (fn [i n] (when-not (zero? (double n)) i)) normal)]
+    (when (= 1 (count axes))
+      (let [i (first axes)] [i (double (nth point i))]))))
+
+(defn- room-grid [surfaces check]
+  (when check
+    (let [planes (mapv axis-plane surfaces)]
+      (when (every? some? planes)
+        {:planes planes :check check}))))
+
 (defn prepare-options
   "Validate optical limits and prepare receiver geometry for repeated fixture
   queries. :extinction-per-m is the current attenuation coefficient after
@@ -29,12 +40,28 @@
     (throw (ex-info "Invalid optical selection or range, fog, or intensity limit"
                     {:selection selection :range-m range-m :extinction-per-m extinction-per-m
                      :min-transmission min-transmission :intensity-threshold intensity-threshold})))
-  {::prepared true :selection selection :extinction-per-m extinction-per-m
-   :range-m (if (and (pos? extinction-per-m) (pos? min-transmission))
-              (min (double range-m) (/ (- (Math/log (double min-transmission))) extinction-per-m))
-              (double range-m))
-   :intensity-threshold intensity-threshold
-   :occluded? (when (seq surfaces) (optics/segment-occluder surfaces))})
+  (let [check (when (seq surfaces) (optics/segment-occluder surfaces))]
+    {::prepared true :selection selection :extinction-per-m extinction-per-m
+     :range-m (if (and (pos? extinction-per-m) (pos? min-transmission))
+                (min (double range-m) (/ (- (Math/log (double min-transmission))) extinction-per-m))
+                (double range-m))
+     :intensity-threshold intensity-threshold
+     :occluded? check ::room-grid (room-grid surfaces check)}))
+
+(defn volume-options
+  "Select optical modes for one field. Axis-aligned receiver planes divide a
+  room into convex cells. A segment wholly inside one cell misses every plane."
+  [options selection {:keys [center radial]}]
+  (let [{:keys [planes check]} (::room-grid options)
+        bound (fn [bounds [axis plane]]
+                (if (< plane (double (nth center axis)))
+                  (update bounds axis max plane)
+                  (update bounds (+ 3 axis) min plane)))]
+    (cond-> (assoc options :selection selection)
+      (and center radial planes (:beam selection) (zero? (:extinction-per-m options))
+           (identical? check (:occluded? options)))
+      (assoc ::clear-cell {:check check
+                           :bounds (double-array (reduce bound [##-Inf ##-Inf ##-Inf ##Inf ##Inf ##Inf] planes))}))))
 
 (defn- open-gate? [{:keys [channels] :as fixture} output]
   (and (not= false (:shutter-open? output))
@@ -329,6 +356,14 @@
       (cond-> {:weight (max (:weight beam-hit 0.0) (:weight aim-hit 0.0))}
         aim-hit (assoc :aim (:point aim-hit))))))
 
+(defn- inside-slab? [^double lo ^double value ^double hi]
+  (and (< lo value) (< value hi)))
+
+(defn- inside-cell? [^doubles cell ^double x ^double y ^double z]
+  (and (inside-slab? (aget cell 0) x (aget cell 3))
+       (inside-slab? (aget cell 1) y (aget cell 4))
+       (inside-slab? (aget cell 2) z (aget cell 5))))
+
 (defn- radial-beam
   "In clear air a radial field is strongest at the nearest point of the beam.
   If a receiver hides that point or the range clips it, use the general probes."
@@ -354,17 +389,25 @@
       (let [axial (double (cond in? z face? 0.0 :else side-z))
             radial (double (cond in? r face? front-r :else side-r))
             factor (if (pos? r) (/ radial r) 0.0)
-            hit (if in? center [(+ px (* axial vx) (* factor rx))
-                                (+ py (* axial vy) (* factor ry))
-                                (+ pz (* axial vz) (* factor rz))])
             aperture (* factor (/ lens (+ lens (* k axial) 1.0e-300)))
-            origin (if (zero? aperture) position [(+ px (* aperture rx)) (+ py (* aperture ry)) (+ pz (* aperture rz))])
             distance (Math/hypot axial (- radial (* aperture r)))
-            value (by-distance (min gap (double support)))]
-        (cond (not (pos? value)) nil
-              (or (> distance (double (:range-m opts)))
-                  (when-let [blocked? (:occluded? opts)] (blocked? origin hit distance))) ::probe
-              :else {:weight (* level value)})))))
+            value (by-distance (min gap (double support)))
+            ox (if (zero? aperture) px (+ px (* aperture rx)))
+            oy (if (zero? aperture) py (+ py (* aperture ry)))
+            oz (if (zero? aperture) pz (+ pz (* aperture rz)))
+            hx (if in? (double cx) (+ px (* axial vx) (* factor rx)))
+            hy (if in? (double cy) (+ py (* axial vy) (* factor ry)))
+            hz (if in? (double cz) (+ pz (* axial vz) (* factor rz)))
+            blocked? (:occluded? opts)
+            cell (::clear-cell opts)
+            bounds (when (and cell (identical? blocked? (:check cell))) (:bounds cell))]
+        (cond
+          (not (pos? value)) nil
+          (> distance (double (:range-m opts))) ::probe
+          (and blocked?
+               (not (and bounds (inside-cell? bounds ox oy oz) (inside-cell? bounds hx hy hz)))
+               (blocked? (if (zero? aperture) position [ox oy oz]) (if in? center [hx hy hz]) distance)) ::probe
+          :else {:weight (* level value)})))))
 
 (defrecord Emission [id fixture level pose])
 
@@ -372,6 +415,48 @@
   "Capture a fixture's emission and defer pose validation until a field can use it."
   [fixture output]
   (->Emission (:id fixture) fixture (light-level fixture output) (beam-pose fixture output)))
+
+(defn- rgb-peak ^double [^double/1 rgb ^long row]
+  (let [base (* 3 row)
+        r (aget rgb base)
+        g (aget rgb (inc base))
+        b (aget rgb (+ base 2))]
+    (if (and (Double/isFinite r) (Double/isFinite g) (Double/isFinite b))
+      (Math/max 0.0 (Math/min 1.0 (Math/max r (Math/max g b))))
+      0.0)))
+
+(defn- compact-masks? [n masks]
+  (every? #(and (instance? boolean/1 %) (= n (alength ^boolean/1 %))) masks))
+
+(defn- fixed-light-reader [{:keys [fields count]}]
+  (let [color (:emitted-color fields)
+        ^double/1 rgb (:values color)
+        ^boolean/1 valid (:valid color)
+        ^boolean/1 direction (get-in fields [:direction :valid])
+        ^boolean/1 zoom (get-in fields [:zoom :valid])
+        ^boolean/1 pan (get-in fields [:pan :valid])
+        ^boolean/1 tilt (get-in fields [:tilt :valid])]
+    (when (and (= :vec3 (:type color)) (= 3 (:components color))
+               (instance? double/1 rgb) (= (* 3 count) (alength rgb))
+               (compact-masks? count [valid direction zoom pan tilt]))
+      (fn [row]
+        (let [i (int row)]
+          (when-not (or (aget direction i) (aget zoom i) (aget pan i) (aget tilt i))
+            (if (aget valid i) (rgb-peak rgb i) 0.0)))))))
+
+(defn compact-observer
+  "Observe fixed, ungated emitters directly from a completed compact frame.
+  Mechanical channels, a per-frame pose or an unsupported column use the row reader."
+  [compact indices read-row]
+  (let [read-fixture #(observe % (read-row (:id %)))]
+    (if-let [read-level (fixed-light-reader compact)]
+      (fn [{:keys [id channels] :as fixture}]
+        (let [mounted (::mounted fixture)
+              row (get indices id)
+              level (when (and row mounted (not (:shutter channels)) (not (:strobe channels)))
+                      (read-level row))]
+          (if (some? level) (->Emission id fixture level mounted) (read-fixture fixture))))
+      read-fixture)))
 
 (defn- select-emission [fixture level pose volume {:keys [bounds] :as sampling} options]
   (let [{:keys [selection range-m intensity-threshold] :as opts}
