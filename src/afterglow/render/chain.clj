@@ -28,6 +28,8 @@
          (map? env) (map? outputs) (seq outputs) (every? eligible-attributes (keys outputs))
          (or (nil? scales) (and (map? scales) (every? outputs (keys scales)) (every? unit? (vals scales))))
          (#{:replace :max :add} (:blend batch :replace))
+         (or (= :replace (:blend batch :replace))
+             (not-any? #{:aim :direction} (keys outputs)))
          (unit? (:opacity batch 1)) (pos? (:opacity batch 1)))))
 
 (defn- same-coordinates? [a b]
@@ -43,7 +45,7 @@
 (defn- shape [block]
   (let [{:keys [batch]} block]
     [(group block) (:blend batch :replace) (== 1 (:opacity batch 1))
-     (set (keys (:scales (request block))))]))
+     (set (keys (:scales (request block)))) (:target-ids batch)]))
 
 (defn- param [key] {:op :param :key key})
 (defn- op [operation & args] {:op operation :args (vec args)})
@@ -175,8 +177,12 @@
           {} (map vector stages blocks)))
 
 (defn- prepare [prepare-group shapes]
-  (let [groups (mapv first shapes) first-group (first groups)]
-    (when (every? #(same-layout? first-group %) (rest groups))
+  (let [groups (mapv first shapes) first-group (first groups)
+        targets (peek (first shapes))]
+    ;; A repeated row has already seen writes from other rows of its effect.
+    ;; Check once on plan creation, before compiling a row-independent shader.
+    (when (and (= (count targets) (count (set targets)))
+               (every? #(same-layout? first-group %) (rest groups)))
       (let [stages (mapv stage (range) shapes)
             outputs (reduce (fn [acc stage] (or (fold-stage acc stage) (reduced nil))) {} stages)]
         (when outputs

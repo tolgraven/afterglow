@@ -106,3 +106,17 @@
     (is (= 1 (count fused)))
     (is (= 24 (count (re-seq #"mix\(" (:source (ir/emit-glsl-batch (shader fused)))))))
     (is (= (:universes (oracle stages)) (:universes (oracle fused))))))
+
+(deftest repeated-fixture-rows-and-illegal-geometry-blends-retain-stage-order
+  (let [cache (chain/create-cache)
+        base (block {:focus (lit 0.2)} :replace 1 default-env)
+        addition (block {:focus (lit 0.1)} :add 1 default-env)
+        stages [base addition]
+        repeated (mapv #(assoc-in % [:batch :target-ids] [:left :left]) stages)]
+    (is (= 1 (count (chain/fuse cache prepare stages))))
+    (is (identical? repeated (chain/fuse cache prepare repeated)))
+    (is (< (abs (- 0.4 (get-in (oracle repeated) [:values :left :channels :focus]))) 1e-12))
+    (doseq [attribute [:aim :direction] blend [:max :add]]
+      (let [field {attribute (lit [1 1 1])}
+            invalid [(block field :replace 1 default-env) (block field blend 1 default-env)]]
+        (is (identical? invalid (chain/fuse cache prepare invalid)))))))
