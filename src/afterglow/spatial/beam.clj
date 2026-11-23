@@ -373,7 +373,7 @@
   [fixture output]
   (->Emission (:id fixture) fixture (light-level fixture output) (beam-pose fixture output)))
 
-(defn- select-emission [fixture level pose volume {:keys [bounds] :as sampling} options]
+(defn- select-emission [fixture level pose volume {:keys [bounds] :as sampling} options incumbent]
   (let [{:keys [selection range-m intensity-threshold] :as opts}
         (if (::prepared options) options (prepare-options options))
         illuminated? (and (:beam selection) (pos? level) (>= level intensity-threshold))
@@ -383,15 +383,25 @@
                (or (nil? bounds)
                    (within-range-of-box? origin bounds (+ range-m (double (:lens-radius-m fixture 0.119))))))
       (when-let [beam @pose]
-        (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
-          ;; The exact radial test already rejects points outside the cone.
-          (let [result (radial-beam beam (:radial sampling) opts level)]
-            (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
-          (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
-            (when (or beam? aimable?) (select-points fixture beam volume sampling opts beam? aimable? level))))))))
+        ;; Validate a relevant pose even when its cone cannot improve the result.
+        ;; Leave a rounding margin for the feather polynomial and its weight products.
+        (when (or aimable? (nil? incumbent)
+                  (<= (double incumbent) (+ (* (double level) (double (:max-weight sampling))) 1.0e-14)))
+          (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
+            ;; The exact radial test already rejects points outside the cone.
+            (let [result (radial-beam beam (:radial sampling) opts level)]
+              (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
+            (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
+              (when (or beam? aimable?) (select-points fixture beam volume sampling opts beam? aimable? level)))))))))
 
-(defn observed-contribution [^Emission emission volume sampling options]
-  (select-emission (:fixture emission) (:level emission) (:pose emission) volume sampling options))
+(defn observed-contribution
+  "Return a beam/aim contribution for a committed emitter. When a prior
+  position weight already exceeds the brightest possible beam result, that
+  cone need not be sampled. Aim suggestions still use the full optical path."
+  ([emission volume sampling options]
+   (observed-contribution emission volume sampling options nil))
+  ([^Emission emission volume sampling options incumbent]
+   (select-emission (:fixture emission) (:level emission) (:pose emission) volume sampling options incumbent)))
 
 (defn contribution
   "Return nil or {:weight w, optional :aim [x y z]} for one fixture and volume.
@@ -400,4 +410,4 @@
   occlusion. :aimable can suggest a reachable point for a dark moving head.
   Pass prepared options when querying many fixtures."
   [fixture output volume sampling options]
-  (select-emission fixture (light-level fixture output) (beam-pose fixture output) volume sampling options))
+  (select-emission fixture (light-level fixture output) (beam-pose fixture output) volume sampling options nil))

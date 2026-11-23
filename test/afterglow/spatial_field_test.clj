@@ -2,6 +2,7 @@
   (:require [afterglow.render.frame :as frame]
             [clojure.test :refer [deftest is]]
             [afterglow.spatial :as spatial]
+            [afterglow.spatial.beam :as beam]
             [afterglow.spatial.field :as field]
             [afterglow.spatial.shape :as shape]))
 
@@ -109,6 +110,37 @@
     (is (empty? (:weights (dark volume))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle"
                           (lit (assoc volume :position [0 0 1]))))))
+
+(deftest dominant-position-weights-prune-only-proved-beam-contacts
+  (let [fixture {:id :interior :position [0 0 0] :direction [0 0 1]
+                 :beam-angle 12 :channels {:red 1}}
+        fringe (assoc fixture :id :edge :position [0 0 -2])
+        mover (assoc fixture :id :mover :channels {:pan 1 :tilt 2 :red 3})
+        fixtures [fixture fringe mover]
+        volume {:shape :sphere :position [0 0 2] :radius 3 :strength 0.8
+                :selection #{:position :beam} :falloff {:outer-m 0.5 :curve :smoothstep}}
+        frame {:values (zipmap (map :id fixtures) (repeat {:emitted-color [0.6 0 0]}))}
+        calls (atom [])
+        intersect @#'beam/radial-beam
+        observed (fn [pose & args]
+                   (swap! calls conj (:position pose))
+                   (apply intersect pose args))
+        expected (field/sample volume fixtures frame)
+        sample (field/sampler fixtures frame)]
+    (is (= expected (with-redefs-fn {#'beam/radial-beam observed} #(sample volume))))
+    (is (= [(:position fringe)] @calls))
+    (is (= {:interior 0.8 :mover 0.8 :edge 0.48} (:weights expected)))
+    (let [aims (assoc volume :selection #{:position :beam :aimable})]
+      (is (= (field/sample aims fixtures frame) (sample aims)))
+      (is (contains? (:aims (sample aims)) :mover)))
+    (let [fog (assoc frame :extinction-per-m 0.12)
+          csg (assoc (select-keys volume [:strength :selection :falloff])
+                     :shape :union :parts [(select-keys volume [:shape :radius :position])])]
+      (doseq [shape [volume csg]]
+        (is (= (field/sample shape fixtures fog) ((field/sampler fixtures fog) shape)))))
+    (let [invalid (assoc fixture :beam-angle 180)]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle"
+                            ((field/sampler [invalid] frame) volume))))))
 
 (deftest clipped-and-occluded-radial-maxima-match-field-membership
   (let [lamp {:id :lamp :position [0 0 0] :direction [0 0 1] :beam-angle 30 :lens-radius-m 0.05 :channels {:red 1}}

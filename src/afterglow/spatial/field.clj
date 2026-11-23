@@ -77,15 +77,16 @@
             opts (assoc prepared :selection optical)
             read-row (or values {})
             receive (if emissions
-                      #(beam/observed-contribution % volume sampling opts)
-                      #(beam/contribution % (read-row (:id %)) volume sampling opts))
+                      #(beam/observed-contribution %1 volume sampling opts %2)
+                      (fn [source _] (beam/contribution source (read-row (:id source)) volume sampling opts)))
             aims (volatile! (transient {}))
             add-beam (fn [weights source]
-                       (if-let [{:keys [weight aim]} (receive source)]
-                         (let [id (:id source)]
-                           (when aim (vswap! aims assoc! id aim))
-                           (assoc! weights id (max weight (get weights id 0.0))))
-                         weights))]
+                       (let [id (:id source)
+                             incumbent (get weights id)]
+                         (if-let [{:keys [weight aim]} (receive source incumbent)]
+                           (do (when aim (vswap! aims assoc! id aim))
+                               (assoc! weights id (if incumbent (max weight incumbent) weight)))
+                           weights)))]
         {:weights (persistent! (reduce add-beam (transient initial) @(or emissions (::emitters rig))))
          :aims (persistent! @aims)}))))
 
