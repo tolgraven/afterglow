@@ -226,33 +226,45 @@
   ((compile-expression expression) env))
 
 (definterface ScalarExpression
-  (^double evalDouble [env]))
+  (^double evalDouble [^doubles inputs]))
 
 (defn- finite-result ^double [^double value path]
   (when-not (Double/isFinite value)
     (invalid! path "Expression produced a non-finite value"))
   value)
 
+(defn- uniform-inputs
+  "Frame inputs shared by every position, with source paths for diagnostics."
+  [expression path]
+  (case (:op expression)
+    (:const :position) []
+    (:param :time :beat :bar :phrase)
+    (let [{:keys [evaluate type]} (analyze expression path 0)]
+      (for [component (range (width type))]
+        [[expression component]
+         (fn [env]
+           (let [v (evaluate env)]
+             (double (if (vector? v) (nth v component) v))))]))
+    (mapcat (fn [index child] (uniform-inputs child (conj path :args index)))
+            (range) (:args expression))))
+
 (defn- scalar-component
   "Compile one float64 component without per-node value vectors or apply."
-  [expression component path]
+  [expression component path slots]
   (let [op (:op expression)
         value-at (fn [value] (double (if (vector? value) (nth value component) value)))]
     (case op
       :const (let [value (value-at (:value expression))]
                (reify ScalarExpression (evalDouble [_ _] value)))
-      :param (let [key (:key expression)]
-               (reify ScalarExpression (evalDouble [_ env] (value-at (get (:params env) key)))))
-      :time (let [key (if (= :absolute (:clock expression :elapsed)) :time-ms :elapsed-ms)]
-              (reify ScalarExpression (evalDouble [_ env] (double (get env key)))))
-      (:beat :bar :phrase)
-      (reify ScalarExpression (evalDouble [_ env] (double (musical-value expression env path))))
-      :position (let [axis ({:x 0 :y 1 :z 2} (:axis expression))]
-                  (reify ScalarExpression (evalDouble [_ env] (double (nth (:position env) axis)))))
-      (:vec2 :vec3 :vec4) (scalar-component (nth (:args expression) component) 0 (conj path :args component))
+      (:param :time :beat :bar :phrase)
+      (let [slot (int (get slots [expression component]))]
+        (reify ScalarExpression (evalDouble [_ inputs] (aget inputs slot))))
+      :position (let [axis (int ({:x 0 :y 1 :z 2} (:axis expression)))]
+                  (reify ScalarExpression (evalDouble [_ inputs] (aget inputs axis))))
+      (:vec2 :vec3 :vec4) (scalar-component (nth (:args expression) component) 0 (conj path :args component) slots)
       (let [children (mapv (fn [index child]
                              (scalar-component child (if (= :number (expression-type child)) 0 component)
-                                               (conj path :args index)))
+                                               (conj path :args index) slots))
                            (range) (:args expression))
             ^ScalarExpression a (nth children 0)
             ^ScalarExpression b (get children 1)
@@ -267,41 +279,41 @@
                               :min (fn ^double [^double x ^double y] (min x y))
                               :max (fn ^double [^double x ^double y] (max x y)))]
                 (reify ScalarExpression
-                  (evalDouble [_ env]
-                    (loop [index 1, value (.evalDouble a env)]
+                  (evalDouble [_ inputs]
+                    (loop [index 1, value (.evalDouble a inputs)]
                       (if (= index n) value
                           (recur (inc index) (.invokePrim ^clojure.lang.IFn$DDD combine value
-                                                          (.evalDouble ^ScalarExpression (nth children index) env))))))))
+                                                          (.evalDouble ^ScalarExpression (nth children index) inputs))))))))
               :subtract (if (= n 1)
-                          (reify ScalarExpression (evalDouble [_ env] (- (.evalDouble a env))))
-                          (reify ScalarExpression (evalDouble [_ env] (- (.evalDouble a env) (.evalDouble b env)))))
+                          (reify ScalarExpression (evalDouble [_ inputs] (- (.evalDouble a inputs))))
+                          (reify ScalarExpression (evalDouble [_ inputs] (- (.evalDouble a inputs) (.evalDouble b inputs)))))
               :divide (reify ScalarExpression
-                        (evalDouble [_ env]
-                          (let [x (.evalDouble a env), y (.evalDouble b env)]
+                        (evalDouble [_ inputs]
+                          (let [x (.evalDouble a inputs), y (.evalDouble b inputs)]
                             (when (zero? y) (invalid! path "Division by zero")) (/ x y))))
-              :sin (reify ScalarExpression (evalDouble [_ env] (Math/sin (.evalDouble a env))))
-              :cos (reify ScalarExpression (evalDouble [_ env] (Math/cos (.evalDouble a env))))
-              :abs (reify ScalarExpression (evalDouble [_ env] (Math/abs (.evalDouble a env))))
-              :floor (reify ScalarExpression (evalDouble [_ env] (Math/floor (.evalDouble a env))))
-              :fract (reify ScalarExpression (evalDouble [_ env] (let [x (.evalDouble a env)] (- x (Math/floor x)))))
-              :sqrt (reify ScalarExpression (evalDouble [_ env] (Math/sqrt (.evalDouble a env))))
+              :sin (reify ScalarExpression (evalDouble [_ inputs] (Math/sin (.evalDouble a inputs))))
+              :cos (reify ScalarExpression (evalDouble [_ inputs] (Math/cos (.evalDouble a inputs))))
+              :abs (reify ScalarExpression (evalDouble [_ inputs] (Math/abs (.evalDouble a inputs))))
+              :floor (reify ScalarExpression (evalDouble [_ inputs] (Math/floor (.evalDouble a inputs))))
+              :fract (reify ScalarExpression (evalDouble [_ inputs] (let [x (.evalDouble a inputs)] (- x (Math/floor x)))))
+              :sqrt (reify ScalarExpression (evalDouble [_ inputs] (Math/sqrt (.evalDouble a inputs))))
               :pow (reify ScalarExpression
-                     (evalDouble [_ env]
-                       (let [x (.evalDouble a env), y (.evalDouble b env)]
+                     (evalDouble [_ inputs]
+                       (let [x (.evalDouble a inputs), y (.evalDouble b inputs)]
                          (when (or (neg? x) (and (zero? x) (not (pos? y))))
                            (invalid! path "Pow requires a nonnegative base and a positive exponent at zero"))
                          (Math/pow x y))))
               :clamp (reify ScalarExpression
-                       (evalDouble [_ env]
-                         (let [x (.evalDouble a env), lo (.evalDouble b env), hi (.evalDouble c env)]
+                       (evalDouble [_ inputs]
+                         (let [x (.evalDouble a inputs), lo (.evalDouble b inputs), hi (.evalDouble c inputs)]
                            (when (> lo hi) (invalid! path "Clamp lower bound exceeds upper bound"))
                            (min hi (max lo x)))))
               :mix (reify ScalarExpression
-                     (evalDouble [_ env]
-                       (let [x (.evalDouble a env), y (.evalDouble b env), amount (.evalDouble c env)]
+                     (evalDouble [_ inputs]
+                       (let [x (.evalDouble a inputs), y (.evalDouble b inputs), amount (.evalDouble c inputs)]
                          (+ (* (- 1.0 amount) x) (* amount y))))))]
         (reify ScalarExpression
-          (evalDouble [_ env] (finite-result (.evalDouble ^ScalarExpression operation env) path)))))))
+          (evalDouble [_ inputs] (finite-result (.evalDouble ^ScalarExpression operation inputs) path)))))))
 
 (defn- validate-outputs! [outputs]
   (when-not (and (map? outputs) (seq outputs) (<= (count outputs) 64)
@@ -327,6 +339,13 @@
               (distinct))
         (tree-seq #(and (map? %) (vector? (:args %))) :args expression)))
 
+(defn- compile-field [slots {:keys [expression components] :as field}]
+  (let [spatial? (some #(= :position (:op %)) (tree-seq #(vector? (:args %)) :args expression))]
+    (-> field
+        (dissoc :node :expression)
+        (assoc :spatial? (boolean spatial?)
+               :scalars (mapv #(scalar-component expression % [] slots) (range components))))))
+
 (defn compile-batch
   "Compile named expressions to a reusable float64 CPU batch plan.
 
@@ -340,20 +359,44 @@
   (let [nodes (mapv (fn [[attribute expression]]
                       (let [node (compile-node expression)]
                         {:attribute attribute :type (:type node) :components (width (:type node))
-                         :node node :expression expression
-                         :spatial? (boolean (some #(= :position (:op %))
-                                                 (tree-seq #(and (map? %) (vector? (:args %))) :args expression)))
-                         :scalars (mapv #(scalar-component expression % []) (range (width (:type node))))}))
-                    (sort-by (comp str key) outputs))]
+                         :node node :expression expression}))
+                    (sort-by (comp str key) outputs))
+        uniforms (vec (into {} (mapcat #(uniform-inputs (:expression %) []) nodes)))
+        ;; Every invocation owns one double array. Slots 0–2 hold the current
+        ;; xyz position; the remaining inputs stay fixed for the entire frame.
+        slots (zipmap (map key uniforms) (iterate inc 3))]
     {:type ::batch
+     :uniforms (mapv val uniforms)
      :params (collected (map :node nodes))
      :clocks (set (for [[_ expression] outputs
                         node (tree-seq #(and (map? %) (vector? (:args %))) :args expression)
                         :when (= :time (:op node))]
                     (if (= :absolute (:clock node :elapsed)) :time-ms :elapsed-ms)))
-     :outputs (mapv #(dissoc % :node :expression) nodes)}))
+     :outputs (mapv #(compile-field slots %) nodes)}))
 
 (def ^:private doubles-class (class (double-array 0)))
+
+(defn- invalid-position! [index]
+  (invalid! [:positions index] "Position must contain three finite coordinates"))
+
+(defn- load-position!
+  "Copy a finite world-space xyz triple into this evaluation's private storage."
+  [positions flat? index ^doubles xyz]
+  (if flat?
+    (let [base (* (long index) 3)]
+      (dotimes [axis 3]
+        (let [value (aget ^doubles positions (+ base axis))]
+          (when-not (Double/isFinite value)
+            (invalid-position! index))
+          (aset xyz axis value))))
+    (let [point (nth positions index)]
+      (when-not (and (vector? point) (= 3 (count point)))
+        (invalid-position! index))
+      (dotimes [axis 3]
+        (let [value (nth point axis)]
+          (when-not (finite? value)
+            (invalid-position! index))
+          (aset xyz axis (double value)))))))
 
 (defn evaluate-batch
   "Evaluate a compiled batch for ordered positions and return owned float64 fields.
@@ -382,34 +425,30 @@
     (doseq [clock (:clocks batch)] (checked (get env clock) :number [clock]))
     (let [fields (mapv (fn [output] (assoc output :values (double-array (* count (:components output))))) (:outputs batch))
           spatial-fields (filterv :spatial? fields)
-          spatial-count (clojure.core/count spatial-fields)]
+          spatial-count (clojure.core/count spatial-fields)
+          uniforms (:uniforms batch)
+          inputs (double-array (+ 3 (clojure.core/count uniforms)))]
       ;; Whole-output expressions that depend only on time/params are shared by
       ;; every head. Compute them once instead of re-reading the same inputs N times.
       (when (pos? count)
+        (dotimes [slot (clojure.core/count uniforms)]
+          (aset inputs (+ slot 3) (double ((nth uniforms slot) env))))
         (doseq [{:keys [scalars components] :as field} (remove :spatial? fields)]
           (let [^doubles target (:values field), components (int components)]
             (dotimes [component components]
-              (let [value (.evalDouble ^ScalarExpression (nth scalars component) env)]
+              (let [value (.evalDouble ^ScalarExpression (nth scalars component) inputs)]
                 (if (= components 1)
                   (java.util.Arrays/fill target value)
                   (dotimes [index count]
-                    (aset-double target (+ (* index components) component) value))))))))
+                    (aset target (+ (* index components) component) value))))))))
       (dotimes [index count]
-        (let [position (if flat?
-                         (let [base (* index 3)]
-                           [(aget ^doubles positions base) (aget ^doubles positions (inc base))
-                            (aget ^doubles positions (+ base 2))])
-                         (nth positions index))
-              _ (when-not (and (vector? position) (= 3 (clojure.core/count position))
-                               (finite? (nth position 0)) (finite? (nth position 1)) (finite? (nth position 2)))
-                  (invalid! [:positions index] "Position must contain three finite coordinates"))
-              context (when (pos? spatial-count) (assoc env :position position))]
-          (dotimes [field-index spatial-count]
-            (let [field (nth spatial-fields field-index), scalars (:scalars field)
-                  components (int (:components field)), base (* index components), ^doubles target (:values field)]
-              (dotimes [component components]
-                (aset-double target (+ base component)
-                             (.evalDouble ^ScalarExpression (nth scalars component) context)))))))
+        (load-position! positions flat? index inputs)
+        (dotimes [field-index spatial-count]
+          (let [field (nth spatial-fields field-index), scalars (:scalars field)
+                components (int (:components field)), base (* index components), ^doubles target (:values field)]
+            (dotimes [component components]
+              (aset target (+ base component)
+                    (.evalDouble ^ScalarExpression (nth scalars component) inputs))))))
       {:count count
        :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))})))
 
