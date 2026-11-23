@@ -84,7 +84,7 @@
         (let [out (emission/scale-emission p maximum {:lamp gain})
               delivered (:dimmer (emission/levels f out))]
           (is (<= 0.0 delivered (* full gain)))
-          (is (< (- (* full gain) delivered) (/ 1.01 (if fine 65025.0 255.0)))))))))
+          (is (< (- (* full gain) delivered) (/ 1.01 (if fine 65535.0 255.0)))))))))
 
 (deftest packed-gain-columns-and-followers-share-the-rich-emission-contract
   (let [gains (double-array [0.16 0.4 1.0 0.77])
@@ -140,3 +140,12 @@
         falling (emission/falling-heads patch red blue)]
     (is (= #{:strip} (set (map first (filter second (map vector (:target-order patch) falling))))))
     (is (not-any? true? (seq (emission/falling-heads patch blue blue))))))
+
+
+(deftest feedback-reads-the-entire-delivered-fine-dimmer-word
+  (let [patch (frame/compile-patch [{:id :head :address 512 :universe 1 :channels {:dimmer [1 2]}}])
+        head (first (:fixtures patch))]
+    (doseq [code [0 254 255 256 32767 32768 65534 65535]]
+      (let [expected (/ code 65535.0)
+            result (frame/resolve-frame patch [{:target-id :head :attribute :dimmer :value expected}])]
+        (is (< (abs (- expected (:dimmer (emission/emitted-levels head result)))) 1e-12))))))

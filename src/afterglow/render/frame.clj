@@ -7,6 +7,7 @@
   an implementation of all legacy fixture function ranges/optics."
   (:require [afterglow.render.atmosphere :as atmosphere]
             [afterglow.render.coverage :as coverage]
+            [afterglow.render.dmx :as dmx]
             [afterglow.render.emission.dense :as emission]
             [afterglow.render.layers :as layers]
             [afterglow.render.hdr :as hdr]
@@ -428,13 +429,6 @@
     (write-off-bytes! buffers (:fog-off-bytes patch))
     buffers))
 
-(defn- fine-code ^long [^double value coarse-range?]
-  (if coarse-range?
-    ;; Profile function boundaries are specified in physical coarse-byte units.
-    (let [coarse (long value)]
-      (bit-or (bit-shift-left coarse 8) (Math/round (* 255.0 (- value coarse)))))
-    (Math/round (* 257.0 value))))
-
 (defn- pack-scatter! [^objects buffers ^ChannelScatter channel ^double level]
   (let [value (* 255.0 level)
         pivot (.-pivot channel)
@@ -444,7 +438,7 @@
     (if (neg? (.-fineUniverse channel))
       (aset coarse index (unchecked-byte (Math/round value)))
       (let [^bytes fine (aget buffers (int (.-fineUniverse channel)))
-            code (fine-code value (.-coarseRange channel))]
+            code (dmx/fine-word value (.-coarseRange channel))]
         (aset coarse index (unchecked-byte (unsigned-bit-shift-right code 8)))
         (aset fine (int (.-fineIndex channel)) (unchecked-byte code))))))
 
@@ -616,7 +610,7 @@
         value (if (and (some? inverted-from) (>= value inverted-from))
                 (- 255.0 (- value inverted-from)) value)]
     (if fine
-      (let [code (fine-code value (::coarse-range? channel))]
+      (let [code (dmx/fine-word value (::coarse-range? channel))]
         (put-byte! universes coarse (unsigned-bit-shift-right code 8))
         (put-byte! universes fine (bit-and code 255)))
       (put-byte! universes coarse (Math/round value)))))
