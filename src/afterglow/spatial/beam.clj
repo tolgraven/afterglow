@@ -68,16 +68,16 @@
     fixture
     (assoc fixture ::mounted (delay (current-beam fixture {})))))
 
+(defn- mounted-output? [{:keys [pose direction channels] :as output}]
+  (let [pan (get output :pan (:pan channels))
+        tilt (get output :tilt (:tilt channels))
+        zoom (get output :zoom (:zoom channels 0))]
+    (and (nil? pose) (nil? direction) (not (and pan tilt))
+         (number? zoom) (zero? zoom))))
+
 (defn- beam-for-output [fixture output]
   (let [mounted (::mounted fixture)]
-    (if (and mounted
-             (not (:pose output)) (not (:direction output))
-             (let [channels (:channels output)
-                   zoom (get output :zoom (:zoom channels 0))]
-               (and (not (and (get output :pan (:pan channels)) (get output :tilt (:tilt channels))))
-                    (number? zoom) (zero? zoom))))
-      @mounted
-      (current-beam fixture output))))
+    (if (and mounted (mounted-output? output)) @mounted (current-beam fixture output))))
 
 (defn- light-origin
   "Trace through the finite lens from the cone's virtual apex. This also works

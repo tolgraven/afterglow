@@ -88,11 +88,14 @@
 
 (defn- segment-blocker [surface]
   (let [{[px py pz] :point [nx ny nz] :normal [ux uy uz] :u [vx vy vz] :v size :size} (plane surface)
-        plane-offset (+ (* nx px) (* ny py) (* nz pz))
+        nx (double nx) ny (double ny) nz (double nz)
+        plane-offset (+ (* nx (double px)) (* ny (double py)) (* nz (double pz)))
         half-width (when size (* 0.5 (first size)))
         half-height (when size (* 0.5 (second size)))]
     (fn [[ax ay az] [bx by bz] length]
-      (let [a (- (+ (* nx ax) (* ny ay) (* nz az)) plane-offset)
+      (let [ax (double ax) ay (double ay) az (double az)
+            bx (double bx) by (double by) bz (double bz)
+            a (- (+ (* nx ax) (* ny ay) (* nz az)) plane-offset)
             b (- (+ (* nx bx) (* ny by) (* nz bz)) plane-offset)]
         ;; A room wall cannot occlude two points strictly on the same side.
         ;; Only a crossing needs a rectangle hit or a division.
