@@ -22,6 +22,19 @@
        :instances (mapv :id instances)
        :params values})))
 
+(defn swatch-rgb
+  "Convert a six-digit authored swatch to normalized RGB for hardware."
+  [swatch]
+  (when (and (string? swatch) (re-matches #"#[0-9a-fA-F]{6}" swatch))
+    (mapv #(/ (Integer/parseInt (subs swatch % (+ % 2)) 16) 255.0) [1 3 5])))
+
+(defn pad-view [model cue-id]
+  (when-let [view (cue-view model cue-id)]
+    (let [cue (get-in model [:registry :cues cue-id])
+          rgb (or (get-in model [::pad-colors cue-id]) (get-in view [:params :color])
+                  (:color cue) (swatch-rgb (:swatch cue)) (:color view))]
+      (assoc view :color rgb))))
+
 (defn page-view [model page-id]
   (when-let [page (get-in model [:pages page-id])]
     {:id page-id :name (or (:name page) (str page-id))

@@ -114,3 +114,16 @@ Display actions are local to each controller session. Push 2 Session opens an ei
 Layout opens the simulator. Shift + Layout opens rig configuration. In either scene, Mix changes the camera between fit, panorama and audience. In rig configuration, Page Left/Right select fixtures. Press the same display button again to return. Device opens parameters, and Shift + Device cycles the visual format. In the history view Shift + Page Left/Right zoom the beat window from half a beat to sixteen beats. Clip selects captured audio. Shift + Clip selects the material stage trace.
 
 Push 3 User Mode can bind captured buttons to the same semantic actions, including `:display/pages`, `[:display/select-page 0]`, `:display/rig`, and `:display/zoom-in`. `push-3/control-view` supplies the selected view to a display consumer. The captured button tests use virtual MIDI transports.
+
+## Cue pad visualization
+
+An optional session feedback source acquires a handle with `:open!` and calls
+`:project! [handle local-state committed-model]` on refresh. The private
+projection may supply `:afterglow.control.views/pad-colors`, keyed by cue ID with
+normalized RGB vectors. Push 2 samples the active page through this projection
+and keeps its authored selection swatch on the display. Missing previews fall
+back to parameter color, authored cue color or hex swatch. Normal, active and
+releasing pads retain their relative brightness. The session calls `:close!`
+on suspension, disconnection and projection failure. Cue launches and other
+input commands always use the committed model. The paired Tolglow host owns
+page interest, musical sampling and interpolation.

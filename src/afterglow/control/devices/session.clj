@@ -11,6 +11,9 @@
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
+  A :feedback-source may supply :open! [], :project! [handle local model] and
+  :close! [handle]. Only feedback sees its projection; input always receives
+  the committed model. Its handle belongs to the active session.
   Call open! explicitly; without schedule! the host owns the refresh cadence."
   [{:keys [session-id profile model! dispatch! now-ms!] :as options}]
   (when-not (and (or (keyword? session-id) (and (string? session-id) (seq session-id)))
@@ -139,6 +142,7 @@
             (record-error! session error)
             (update-state! session assoc :status :failed :generation (inc generation))
             (close-resource! session :schedule)
+            (close-resource! session :feedback-source)
             (close-resource! session :display)
             (close-resource! session :midi)
             (throw error)))))
@@ -172,6 +176,20 @@
              nil))))
      (snapshot session))))
 
+(defn- feedback-model [session local model]
+  (if-let [surface (get-in session [:options :feedback-source])]
+    (try
+      (let [handle (or (:feedback-source @(:resources session))
+                       (let [opened ((:open! surface))]
+                         (swap! (:resources session) assoc :feedback-source opened)
+                         opened))]
+        ((:project! surface) handle local model))
+      (catch Exception error
+        (record-error! session error)
+        (close-resource! session :feedback-source)
+        model))
+    model))
+
 (defn refresh!
   "Render latest model with bounded profile feedback. No background scheduler
   is allocated; callers can invoke this from a shared UI scheduler."
@@ -183,7 +201,8 @@
               model (model!)]
           (adopt-epoch! session model)
           (when-let [feedback (:feedback profile)]
-            (enact! session (feedback (:local @(:state session)) model (envelope! session)))))
+            (let [local (:local @(:state session))]
+              (enact! session (feedback local (feedback-model session local model) (envelope! session))))))
         (catch Exception error
           (record-error! session error)
           (when (:device/transport-failed (ex-data error))
@@ -206,7 +225,9 @@
           (when-let [stop (:stop profile)]
             (enact! session (stop (:local @(:state session)) (model!) (envelope! session) false)))
           (catch Exception error (record-error! session error))
-          (finally (close-resource! session :display)))))
+          (finally
+            (close-resource! session :feedback-source)
+            (close-resource! session :display)))))
     (snapshot session)))
 
 (defn resume! [session]
@@ -224,6 +245,7 @@
           (start-schedule! session)
           (catch Throwable error
             (record-error! session error)
+            (close-resource! session :feedback-source)
             (close-resource! session :display)
             (update-state! session assoc :status :suspended)))))
     (snapshot session)))
@@ -246,7 +268,8 @@
              (enact! session ((:stop profile) (:local @(:state session)) (model!) (envelope! session) disconnected?)))
            (catch Exception error (record-error! session error))
            (finally
-             (close-resource! session :display)
+             (close-resource! session :feedback-source)
+            (close-resource! session :display)
              (close-resource! session :midi)
              (update-state! session assoc :status :closed :local (:initial-state profile {}))))))
      (snapshot session))))

@@ -84,3 +84,14 @@
         frame {:epoch 1 :versions version :samples {} :elapsed-ms 35 :period-ms 25}]
     (is (seq (:keyframe-intervals state)))
     (is (empty? (:keyframe-intervals (cadence/advance state frame (assoc opts :min-cost-ms 10)))))))
+
+(deftest visual-feedback-can-take-first-turn-at-reducing-work
+  (let [timing {:epoch 0 :versions {"head" 1} :period-ms 25.0 :elapsed-ms 32.0
+                :samples {"head" {:predictive? true :calls 1 :total-ms 8.0}}}
+        config (cadence/settings {:pressure-frames 1})
+        held (reduce (fn [s _] (cadence/advance s (assoc timing :defer-live-slowdown? true) config))
+                     nil (range 6))
+        released (cadence/advance held timing config)]
+    (is (= 1 (get-in held [:effects "head" :stride])))
+    (is (= 2 (get-in released [:effects "head" :stride])))
+    (is (= 7 (get-in released [:effects "head" :evaluations])))))
