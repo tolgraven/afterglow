@@ -128,19 +128,26 @@
 
 (defn with-rig-positions
   "Give all predicting workers one lazy lookup on this frozen rig. Successful
-  frames retain the realized lookup in the keyframe map's private metadata."
+  frames retain its immutable result in the keyframe map's private metadata."
   [{:keys [fixtures keyframes] :as frame}]
   (let [prior (meta keyframes)
         saved (when (identical? fixtures (::rig prior)) (::positions prior))]
     (vary-meta frame assoc ::positions (or saved (delay (values/fixture-positions fixtures))))))
 
+(defn- completed-positions [lookup]
+  (cond
+    (map? lookup) lookup
+    (and lookup (realized? lookup))
+    ;; A worker may have rejected a speculative endpoint. Never publish a
+    ;; failed lookup or let reading its exception abort healthy effects.
+    (try @lookup
+         (catch Throwable error
+           (when-not (faults/recoverable? error) (throw error))))))
+
 (defn committed-windows [frame evaluations]
   (let [windows (into {} (keep (fn [{:keys [id keyframe done?]}]
-                                 (when (and keyframe (not done?)) [id keyframe]))) evaluations)
-        positions (::positions (meta frame))]
-    (if (and (seq windows) positions (realized? positions))
-      ;; A lookup may also have failed inside a speculative sample. Keep forcing
-      ;; it inside the worker fault boundary, never while committing healthy cues.
+                                 (when (and keyframe (not done?)) [id keyframe]))) evaluations)]
+    (if-let [positions (when (seq windows) (completed-positions (::positions (meta frame))))]
       (with-meta windows {::rig (:fixtures frame) ::positions positions})
       windows)))
 

@@ -244,15 +244,18 @@
               later (tick prior 3 moved)
               failure (with-redefs [values/fixture-positions (fn [_] (throw (ex-info "index failed" {})))]
                         (tick later 4 original))
-              idle (tick (assoc-in failure [:model :instances] {}) 5 original)]
+              recovered (tick failure 5 original)
+              idle (tick (assoc-in recovered [:model :instances] {}) 6 original)]
           (is (= 2 (count (:keyframes prior))))
-          (is (= [original moved] @scenes))
+          (is (= [original moved original] @scenes))
           (is (not-any? delay? (tree-seq coll? seq saved)))
           (is (not (get-in prior [:keyframes "0:1" :forecast-failed?])))
           (is (true? (get-in later [:keyframes "0:1" :forecast-failed?])))
           (is (= [4 0 0] (get-in later [:assignments 0 :value])))
           (is (every? :forecast-failed? (vals (:keyframes failure))))
           (is (= [[5 0 0] [5 0 0]] (mapv :value (:assignments failure))))
+          (is (nil? (meta (:keyframes failure))))
+          (is (every? (complement :forecast-failed?) (vals (:keyframes recovered))))
           (is (empty? (:keyframes idle)))
           (is (nil? (meta (:keyframes idle)))))))))
 
