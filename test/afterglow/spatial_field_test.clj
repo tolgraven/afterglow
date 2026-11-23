@@ -131,6 +131,38 @@
     (is (empty? (:weights ((field/sampler rig (assoc opts :values {}))
                            (assoc volume :selection #{:beam})))))))
 
+(deftest rig-range-certificate-uses-compact-emission-at-the-inclusive-boundary
+  (let [lamp {:id :lamp :universe 1 :address 1 :channels {:red 1}
+              :position [0.0 0.0 0.0] :direction [0 0 1] :lens-radius-m 0.0}
+        compact (:compact (frame/resolve-frame [lamp] [{:target-id :lamp :attribute :red :value 0.75}]
+                                               {:compact-values? true}))
+        index (frame/compact-index (:target-order compact))
+        options (field/compact-observations {:range-m 4.0} index compact)
+        sample (field/sampler [lamp] options)
+        volume {:shape :sphere :position [0.0 0.0 5.0] :radius 1.0 :selection #{:beam}}
+        range-check (ns-resolve 'afterglow.spatial.beam 'within-range-of-box?)
+        calls (atom 0)
+        ordinary (var-get range-check)]
+    (with-redefs-fn {range-check (fn [origin bounds range-m]
+                                   (swap! calls inc)
+                                   (ordinary origin bounds range-m))}
+      #(do (is (= {:lamp 0.75} (:weights (sample volume))))
+           (is (zero? @calls))
+           (is (empty? (:weights (sample (assoc volume :position [0.0 0.0 5.000000001])))))
+           (is (= 1 @calls))))))
+
+(deftest rig-range-certificate-leaves-unsupported-apertures-to-ordinary-selection
+  (let [lamp {:id :lamp :channels {:red 1} :position [0 0 0] :direction [0 0 1]}
+        volume {:shape :sphere :position [0 0 5] :radius 1 :selection #{:beam}}
+        options {:range-m 4.0 :values {:lamp {:emitted-color [0.75 0 0]}}}
+        sample (field/sampler [(assoc lamp :lens-radius-m -0.5)] options)
+        bogus [(assoc lamp :lens-radius-m "invalid")]]
+    (is (empty? (:weights (sample volume))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle or lens radius"
+                          (sample (assoc volume :position [0 0 2]))))
+    (is (empty? (:weights ((field/sampler bogus (dissoc options :values)) volume))))
+    (is (thrown? ClassCastException ((field/sampler bogus options) volume)))))
+
 (deftest compact-emission-falls-back-to-per-frame-direction-and-deferred-validation
   (let [fixture {:id :lamp :universe 1 :address 1 :channels {:red 1}
                  :position [0 0 0] :direction [0 0 1] :beam-angle 20}

@@ -48,20 +48,43 @@
      :intensity-threshold intensity-threshold
      :occluded? check ::room-grid (room-grid surfaces check)}))
 
+(defn- axis-gap ^double [^double v ^double lo ^double hi]
+  (max 0.0 (max (- lo v) (- v hi))))
+
+(defn- within-squared-range? [^double dx ^double dy ^double dz ^double r]
+  (<= (+ (* dx dx) (* dy dy) (* dz dz)) (* r r)))
+
+(defn- maximum-axis-gap ^double [^double a ^double b ^double lo ^double hi]
+  (max (axis-gap a lo hi) (axis-gap b lo hi)))
+
+(defn- range-covers-origins? [{a :min b :max} {lo :min hi :max} radius]
+  (when (and a (geometry/vec3? lo) (geometry/vec3? hi))
+    ;; Each gap is greatest at one end of the origin interval. Use the
+    ;; fixture test's arithmetic with zero aperture allowance for the bound.
+    (within-squared-range? (maximum-axis-gap (nth a 0) (nth b 0) (nth lo 0) (nth hi 0))
+                           (maximum-axis-gap (nth a 1) (nth b 1) (nth lo 1) (nth hi 1))
+                           (maximum-axis-gap (nth a 2) (nth b 2) (nth lo 2) (nth hi 2))
+                           (double radius))))
+
 (defn volume-options
-  "Select optical modes for one field. Axis-aligned receiver planes divide a
-  room into convex cells. A segment wholly inside one cell misses every plane."
-  [options selection {:keys [center radial]}]
-  (let [{:keys [planes check]} (::room-grid options)
-        bound (fn [bounds [axis plane]]
-                (if (< plane (double (nth center axis)))
-                  (update bounds axis max plane)
-                  (update bounds (+ 3 axis) min plane)))]
-    (cond-> (assoc options :selection selection)
-      (and center radial planes (:beam selection) (zero? (:extinction-per-m options))
-           (identical? check (:occluded? options)))
-      (assoc ::clear-cell {:check check
-                           :bounds (double-array (reduce bound [##-Inf ##-Inf ##-Inf ##Inf ##Inf ##Inf] planes))}))))
+  "Select optical modes for one field. A segment inside one room cell misses
+  every receiver plane. Optional rig origin bounds cover emitters whose
+  aperture range allowance is nonnegative."
+  ([options selection sampling] (volume-options options selection sampling nil))
+  ([options selection {:keys [center radial bounds]} rig-origins]
+   (let [{:keys [planes check]} (::room-grid options)
+         bound (fn [bounds [axis plane]]
+                 (if (< plane (double (nth center axis)))
+                   (update bounds axis max plane)
+                   (update bounds (+ 3 axis) min plane)))]
+     (cond-> (assoc (dissoc options ::origins-in-range?) :selection selection)
+       (range-covers-origins? rig-origins bounds (:range-m options))
+       (assoc ::origins-in-range? true)
+
+       (and center radial planes (:beam selection) (zero? (:extinction-per-m options))
+            (identical? check (:occluded? options)))
+       (assoc ::clear-cell {:check check
+                            :bounds (double-array (reduce bound [##-Inf ##-Inf ##-Inf ##Inf ##Inf ##Inf] planes))})))))
 
 (defn- open-gate? [{:keys [channels] :as fixture} output]
   (and (not= false (:shutter-open? output))
@@ -133,15 +156,11 @@
 (defn- nearest-in-box [{low :min high :max} point]
   (mapv (fn [a b v] (max a (min b v))) low high point))
 
-(defn- axis-gap ^double [^double v ^double lo ^double hi]
-  (max 0.0 (max (- lo v) (- v hi))))
-
 (defn- within-range-of-box? [point {low :min high :max} radius]
-  (let [dx (axis-gap (nth point 0) (nth low 0) (nth high 0))
-        dy (axis-gap (nth point 1) (nth low 1) (nth high 1))
-        dz (axis-gap (nth point 2) (nth low 2) (nth high 2))
-        r (double radius)]
-    (<= (+ (* dx dx) (* dy dy) (* dz dz)) (* r r))))
+  (within-squared-range? (axis-gap (nth point 0) (nth low 0) (nth high 0))
+                         (axis-gap (nth point 1) (nth low 1) (nth high 1))
+                         (axis-gap (nth point 2) (nth low 2) (nth high 2))
+                         (double radius)))
 
 (defn- ray-interval
   "Clip an axis segment to the half-spaces of a convex polyhedron."
@@ -462,11 +481,11 @@
   (let [{:keys [selection range-m intensity-threshold] :as opts}
         (if (::prepared options) options (prepare-options options))
         illuminated? (and (:beam selection) (pos? level) (>= level intensity-threshold))
-        aimable? (and (:aimable selection) (every? #(contains? (:channels fixture) %) [:pan :tilt]))
-        origin (:position fixture [0 0 0])]
+        aimable? (and (:aimable selection) (every? #(contains? (:channels fixture) %) [:pan :tilt]))]
     (when (and (or illuminated? aimable?)
-               (or (nil? bounds)
-                   (within-range-of-box? origin bounds (+ range-m (double (:lens-radius-m fixture 0.119))))))
+               (or (nil? bounds) (::origins-in-range? opts)
+                   (within-range-of-box? (:position fixture [0 0 0]) bounds
+                                         (+ range-m (double (:lens-radius-m fixture 0.119))))))
       (when-let [beam @pose]
         (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
           ;; The exact radial test already rejects points outside the cone.
