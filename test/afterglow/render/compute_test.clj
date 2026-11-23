@@ -28,6 +28,20 @@
            (frame/portable-frame (render patch [request] {}))))
     (compute/close! owner)))
 
+(deftest prepared-chart-survives-mutation-and-cpu-fallback
+  (let [output {:focus {:op :surface-uv :axis :u}}
+        uvs (double-array [0.25 0.75])
+        group (compute/prepare-group output [[0.7 0.6 1.0]] (ir/compile-batch output) uvs)
+        request {:kind :batch :batch {:target-ids [:spot] :field-request {:group group :env {}}}}
+        owner (compute/open!)]
+    (try
+      (aset-double uvs 0 0.9)
+      (let [render (compute/frame-renderer owner (System/nanoTime))
+            actual (render patch [request] {})
+            expected (frame/resolve-frame patch [{:target-id :spot :attribute :focus :value 0.25}])]
+        (is (= (frame/portable-frame expected) (frame/portable-frame actual))))
+      (finally (compute/close! owner)))))
+
 (deftest movement-owner-reports-intent-and-honors-the-frame-deadline
   (let [owner (compute/open! {:movement-backend :native-gpu :budget-ms 75})
         render (compute/frame-renderer owner (- (System/nanoTime) 200000000))

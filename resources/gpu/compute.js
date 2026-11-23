@@ -26,10 +26,11 @@ const numericType = (type) => typeof type === "string" ? type.replace(/^:/, "") 
 const supportedType = (type) => typeof type === "string" && Object.prototype.hasOwnProperty.call(TYPE_WIDTH, type);
 const finiteFloat = (value) => typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= FLOAT_MAX;
 
-const vertexSource = `#version 300 es
+const vertexSource = mapped => `#version 300 es
 precision highp float;
 precision highp int;
 layout(location = 0) in vec3 a_position;
+${mapped ? "layout(location = 1) in vec2 a_uv; uniform bool u_has_uv; out vec2 v_uv;" : ""}
 uniform ivec2 u_dimensions;
 out vec3 v_position;
 void main() {
@@ -39,7 +40,29 @@ void main() {
   gl_Position = vec4(center / vec2(u_dimensions) * 2.0 - 1.0, 0.0, 1.0);
   gl_PointSize = 1.0;
   v_position = a_position;
+  ${mapped ? "v_uv = u_has_uv ? a_uv : a_position.xy;" : ""}
 }`;
+
+function chartCoordinates(uvs, positions) {
+  if (uvs == null) return null;
+  const n = positions.length / 3;
+  if (uvs instanceof Float32Array && uvs.length === 2 * n && uvs.every(Number.isFinite)) return uvs;
+  if (Array.isArray(uvs) && uvs.length === n) {
+    const packed = new Float32Array(2 * n);
+    for (let i = 0; i < n; i++) {
+      const pair = uvs[i];
+      if (pair == null) {
+        packed[2 * i] = positions[3 * i]; packed[2 * i + 1] = positions[3 * i + 1];
+      } else if (Array.isArray(pair) && pair.length === 2 && pair.every(finiteFloat)) {
+        packed.set(pair, 2 * i);
+      } else {
+        throw new ComputeError("invalid-input", "A charted fixture needs two finite surface coordinates", {index: i});
+      }
+    }
+    return packed;
+  }
+  throw new ComputeError("invalid-input", "Supply one surface UV pair per position");
+}
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -91,7 +114,7 @@ export function createComputeRunner(canvas, options = {}) {
   });
 
   let disposed = false, lost = false, busy = false;
-  let program = null, metadata = null, locations = null, activeFence = null;
+  let program = null, metadata = null, locations = null, activeFence = null, uvBuffer = null;
   let texture = null, targetWidth = 0, targetHeight = 0, packBytes = 0;
   const framebuffer = gl.createFramebuffer();
   const vao = gl.createVertexArray();
@@ -144,8 +167,10 @@ export function createComputeRunner(canvas, options = {}) {
     const inputs = nextMetadata.inputs || {};
     const timeName = inputs["time-ms"] || "u_time_ms";
     const elapsedName = inputs["elapsed-ms"] || "u_elapsed_ms";
+    const mapped = inputs.position === "v_uv" || inputs["surface-uv"] === "v_uv";
     if (!identifier(timeName) || !identifier(elapsedName) ||
-        (inputs.position && inputs.position !== "v_position")) {
+        (inputs.position && !["v_position", "v_uv"].includes(inputs.position)) ||
+        (inputs["surface-uv"] && inputs["surface-uv"] !== "v_uv")) {
       throw new ComputeError("invalid-shader", "The point runner expects v_position and valid clock uniform names");
     }
     const musicalBindings = ["beat", "elapsed-beats", "beats-per-bar", "bars-per-phrase"]
@@ -156,7 +181,7 @@ export function createComputeRunner(canvas, options = {}) {
       });
     let vertex = null, fragment = null, nextProgram = null;
     try {
-      vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
+      vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource(mapped));
       fragment = compileShader(gl, gl.FRAGMENT_SHADER, nextMetadata.source);
       nextProgram = gl.createProgram();
       if (!nextProgram) throw new ComputeError("allocation", "Could not allocate a shader program");
@@ -168,6 +193,7 @@ export function createComputeRunner(canvas, options = {}) {
       }
       const nextLocations = {
         dimensions: gl.getUniformLocation(nextProgram, "u_dimensions"),
+        hasUV: mapped ? gl.getUniformLocation(nextProgram, "u_has_uv") : null,
         time: gl.getUniformLocation(nextProgram, timeName),
         elapsed: gl.getUniformLocation(nextProgram, elapsedName),
         musical: musicalBindings.map((binding) => ({ ...binding, location: gl.getUniformLocation(nextProgram, binding.name) })),
@@ -178,7 +204,14 @@ export function createComputeRunner(canvas, options = {}) {
       nextProgram = null;
       locations = nextLocations;
       // Copy interface fields so later caller mutation cannot change a linked program's bindings.
-      metadata = Object.freeze({ type: numericType(nextMetadata.type) });
+      metadata = Object.freeze({ type: numericType(nextMetadata.type), mapped });
+      if (!mapped && uvBuffer) {
+        gl.bindVertexArray(vao);
+        gl.disableVertexAttribArray(1);
+        gl.bindVertexArray(null);
+        gl.deleteBuffer(uvBuffer);
+        uvBuffer = null;
+      }
       return { type: metadata.type, parameters: bindings, diagnostics };
     } finally {
       if (vertex) gl.deleteShader(vertex);
@@ -234,7 +267,7 @@ export function createComputeRunner(canvas, options = {}) {
     });
   }
 
-  async function run({ positions, params = {}, timeMs = 0, elapsedMs = 0, beat, elapsedBeats, meter = {}, frameId = null, epoch = null, signal } = {}) {
+  async function run({ positions, surfaceUVs, params = {}, timeMs = 0, elapsedMs = 0, beat, elapsedBeats, meter = {}, frameId = null, epoch = null, signal } = {}) {
     assertReady();
     if (!program) throw new ComputeError("not-compiled", "Compile an emitted shader before running it");
     if (busy) throw new ComputeError("busy", "Only one frame may be in flight per runner");
@@ -253,6 +286,7 @@ export function createComputeRunner(canvas, options = {}) {
       }
       return value;
     });
+    const uvs = metadata.mapped ? chartCoordinates(surfaceUVs, positions) : null;
     const count = positions.length / 3;
     const width = Math.min(maxTextureSize, Math.ceil(Math.sqrt(count)));
     const height = Math.ceil(count / width);
@@ -276,6 +310,19 @@ export function createComputeRunner(canvas, options = {}) {
       gl.bindVertexArray(vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, positionsBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STREAM_DRAW);
+      if (metadata.mapped) {
+        gl.uniform1i(locations.hasUV, uvs ? 1 : 0);
+        if (uvs) {
+          uvBuffer ||= gl.createBuffer();
+          if (!uvBuffer) throw new ComputeError("allocation", "Could not allocate surface UV buffer");
+          gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+          gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STREAM_DRAW);
+          gl.enableVertexAttribArray(1);
+          gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
+        } else {
+          gl.disableVertexAttribArray(1);
+        }
+      }
       gl.uniform2i(locations.dimensions, width, height);
       if (locations.time !== null) gl.uniform1f(locations.time, timeMs);
       if (locations.elapsed !== null) gl.uniform1f(locations.elapsed, elapsedMs);
@@ -340,6 +387,7 @@ export function createComputeRunner(canvas, options = {}) {
     if (texture) gl.deleteTexture(texture);
     gl.deleteBuffer(packBuffer);
     gl.deleteBuffer(positionsBuffer);
+    if (uvBuffer) gl.deleteBuffer(uvBuffer);
     gl.deleteVertexArray(vao);
     gl.deleteFramebuffer(framebuffer);
   }
