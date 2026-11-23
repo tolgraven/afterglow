@@ -6,21 +6,26 @@
 (defn active-instances [model]
   (->> (:instances model) vals (sort-by (juxt :priority :order :id)) vec))
 
-(defn cue-view [model cue-id]
-  (when-let [cue (get-in model [:registry :cues cue-id])]
-    (let [instances (filterv #(= cue-id (:cue-id %)) (active-instances model))
-          active (last instances)
-          values (or (:params active) (merge (:params cue) (:saved-params cue)) {})]
-      {:id cue-id :name (or (:name cue) (str cue-id)) :version (:version cue)
-       :effect-id (:effect-id cue)
-       :categories (categories/definition-categories (or (:definition active) (get-in model [:registry :effects (:effect-id cue)])))
-       :priority (get cue :priority 0)
-       :color (or (:color values) (:color cue) [0.35 0.35 0.35])
-       :saved? (contains? cue :saved-params)
-       :active? (boolean (seq instances))
-       :releasing? (boolean (and (seq instances) (every? #(= :releasing (:phase %)) instances)))
-       :instances (mapv :id instances)
-       :params values})))
+(defn cue-view
+  "A grid can supply active instances grouped by cue in presentation order."
+  ([model cue-id] (cue-view model cue-id nil))
+  ([model cue-id instances-by-cue]
+   (when-let [cue (get-in model [:registry :cues cue-id])]
+     (let [instances (if instances-by-cue
+                       (get instances-by-cue cue-id)
+                       (filterv #(= cue-id (:cue-id %)) (active-instances model)))
+           active (last instances)
+           values (or (:params active) (merge (:params cue) (:saved-params cue)) {})]
+       {:id cue-id :name (or (:name cue) (str cue-id)) :version (:version cue)
+        :effect-id (:effect-id cue)
+        :categories (categories/definition-categories (or (:definition active) (get-in model [:registry :effects (:effect-id cue)])))
+        :priority (get cue :priority 0)
+        :color (or (:color values) (:color cue) [0.35 0.35 0.35])
+        :saved? (contains? cue :saved-params)
+        :active? (boolean (seq instances))
+        :releasing? (boolean (and (seq instances) (every? #(= :releasing (:phase %)) instances)))
+        :instances (mapv :id instances)
+        :params values}))))
 
 (defn swatch-rgb
   "Convert a six-digit authored swatch to normalized RGB for hardware."
@@ -28,12 +33,14 @@
   (when (and (string? swatch) (re-matches #"#[0-9a-fA-F]{6}" swatch))
     (mapv #(/ (Integer/parseInt (subs swatch % (+ % 2)) 16) 255.0) [1 3 5])))
 
-(defn pad-view [model cue-id]
-  (when-let [view (cue-view model cue-id)]
-    (let [cue (get-in model [:registry :cues cue-id])
-          rgb (or (get-in model [::pad-colors cue-id]) (get-in view [:params :color])
-                  (:color cue) (swatch-rgb (:swatch cue)) (:color view))]
-      (assoc view :color rgb))))
+(defn pad-view
+  ([model cue-id] (pad-view model cue-id nil))
+  ([model cue-id instances-by-cue]
+   (when-let [view (cue-view model cue-id instances-by-cue)]
+     (let [cue (get-in model [:registry :cues cue-id])
+           rgb (or (get-in model [::pad-colors cue-id]) (get-in view [:params :color])
+                   (:color cue) (swatch-rgb (:swatch cue)) (:color view))]
+       (assoc view :color rgb)))))
 
 (defn page-view [model page-id]
   (when-let [page (get-in model [:pages page-id])]

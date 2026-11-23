@@ -127,3 +127,18 @@ releasing pads retain their relative brightness. The session calls `:close!`
 on suspension, disconnection and projection failure. Cue launches and other
 input commands always use the committed model. The paired Tolglow host owns
 page interest, musical sampling and interpolation.
+
+### Control projection cost
+
+Each Push 2 feedback pass sorts the active instances by priority, order and
+instance ID and groups them by cue. The display and all pad LEDs share that
+local index. The next feedback pass builds a fresh index from its committed
+model, including launches, releases, parameter changes and removals.
+
+A loopback capture with 32 running cues on a 64-cue page replayed 80 identical
+show frames before and after indexing. The four comparison runs produced all
+8,910 MIDI messages and 80 display views identically. Active-instance sorts
+fell from 47,440 to 720 across device and cue-preview consumers. Mean session
+CPU fell from 14.51–17.61 ms to 5.87–6.30 ms per committed frame. The
+emulated surface returned 560 acknowledgements. These timings measure CPU
+work in the session and exclude physical USB latency.
