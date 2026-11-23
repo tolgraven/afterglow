@@ -16,7 +16,7 @@ HEARTBEAT_LIFETIME = timedelta(seconds=150)
 MAX_WAIT = 45 * 60
 
 
-def reported_result(repository, sha, token):
+def reported_result(repository, sha, token, context):
     request = Request(
         f"https://api.github.com/repos/{repository}/commits/{sha}/status?per_page=100",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
@@ -24,7 +24,7 @@ def reported_result(repository, sha, token):
     with urlopen(request, timeout=10) as response:
         statuses = json.load(response)["statuses"]
     for status in statuses:
-        if status["context"] != CONTEXT or status["creator"]["id"] != OWNER_ID:
+        if status["context"] != context or status["creator"]["id"] != OWNER_ID:
             continue
         state = status["state"]
         if state in ("success", "failure"):
@@ -37,15 +37,17 @@ def reported_result(repository, sha, token):
     return "unclaimed"
 
 
-def select_runner(repository, sha, token):
+def select_runner(repository, sha, token, context, *, offer):
     started = time.monotonic()
     while True:
-        result = reported_result(repository, sha, token)
+        result = reported_result(repository, sha, token, context)
         elapsed = time.monotonic() - started
         if result == "success":
             return "local"
         if result == "failure":
             return "local-failure"
+        if offer and result == "pending":
+            return "claimed"
         if result == "unavailable" or elapsed >= MAX_WAIT:
             return "hosted"
         if result == "unclaimed" and elapsed >= CLAIM_WAIT:
@@ -54,8 +56,10 @@ def select_runner(repository, sha, token):
 
 
 if __name__ == "__main__":
+    context = f"{CONTEXT}/{os.environ['GITHUB_RUN_ID']}.{os.environ['GITHUB_RUN_ATTEMPT']}"
     try:
-        runner = select_runner(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"], os.environ["GH_TOKEN"])
+        runner = select_runner(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"],
+                               os.environ["GH_TOKEN"], context, offer=sys.argv[1] == "offer")
     except (URLError, TimeoutError) as error:
         print(f"Mac status unavailable ({type(error).__name__}). Using hosted macOS.", file=sys.stderr)
         runner = "hosted"

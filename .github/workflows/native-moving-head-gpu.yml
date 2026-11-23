@@ -1,10 +1,10 @@
 name: Native JVM render shaders
 on:
   pull_request:
-    paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml']
+    paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml', '.github/scripts/choose-mac-runner']
   push:
     branches: [master]
-    paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml']
+    paths: ['src/afterglow/render/**', 'resources/gpu/mover-aim.vert', 'test-native/**', 'project.clj', '.github/workflows/native-moving-head-gpu.yml', '.github/scripts/choose-mac-runner']
 permissions:
   contents: read
   statuses: read
@@ -17,18 +17,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 47
     outputs:
-      runner: ${{ steps.select.outputs.runner }}
+      runner: ${{ steps.select.outputs.runner || steps.claim.outputs.runner }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - name: Check the Mac result for this PR merge commit
+      - name: Await Apple Silicon ${{ github.sha }}
+        id: claim
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/choose-mac-runner offer
+      - name: Accepted Apple Silicon ${{ github.sha }}
+        if: steps.claim.outputs.runner == 'claimed'
         id: select
         env:
           GH_TOKEN: ${{ github.token }}
-        run: .github/scripts/choose-mac-runner
+        run: .github/scripts/choose-mac-runner result
       - name: Report a failing Mac native suite
-        if: steps.select.outputs.runner == 'local-failure'
+        if: steps.select.outputs.runner == 'local-failure' || steps.claim.outputs.runner == 'local-failure'
         run: exit 1
   linux:
     runs-on: ubuntu-latest
