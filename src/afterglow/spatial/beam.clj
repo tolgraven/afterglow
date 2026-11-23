@@ -60,6 +60,25 @@
           (throw (ex-info "Invalid beam angle or lens radius" (select-keys beam [:beam-angle :lens-radius-m]))))
         (assoc beam :axis axis :spread (Math/tan (Math/toRadians (/ beam-angle 2.0))))))))
 
+(defn prepare-fixture
+  "Share a fixed emitter's mounted beam across volume samples. Keep its optical
+  validation lazy until it actually supplies light."
+  [{:keys [channels] :as fixture}]
+  (if (some #(contains? channels %) [:pan :tilt :zoom])
+    fixture
+    (assoc fixture ::mounted (delay (current-beam fixture {})))))
+
+(defn- beam-for-output [fixture output]
+  (let [mounted (::mounted fixture)]
+    (if (and mounted
+             (not (:pose output)) (not (:direction output))
+             (let [channels (:channels output)
+                   zoom (get output :zoom (:zoom channels 0))]
+               (and (not (and (get output :pan (:pan channels)) (get output :tilt (:tilt channels))))
+                    (number? zoom) (zero? zoom))))
+      @mounted
+      (current-beam fixture output))))
+
 (defn- light-origin
   "Trace through the finite lens from the cone's virtual apex. This also works
   at the lens face and keeps an off-axis receiver's occlusion ray on the beam."
@@ -362,10 +381,10 @@
     (when (and (or illuminated? aimable?)
                (or (nil? bounds)
                    (within-range-of-box? origin bounds (+ range-m (double (:lens-radius-m fixture 0.119))))))
-      (when-let [beam (current-beam fixture output)]
-        (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
-          (when (or beam? aimable?)
-            (if (and beam? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
-              (let [result (radial-beam beam (:radial sampling) opts level)]
-                (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
-              (select-points fixture beam volume sampling opts beam? aimable? level))))))))
+      (when-let [beam (beam-for-output fixture output)]
+        (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
+          ;; The exact radial test already rejects points outside the cone.
+          (let [result (radial-beam beam (:radial sampling) opts level)]
+            (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
+          (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
+            (when (or beam? aimable?) (select-points fixture beam volume sampling opts beam? aimable? level))))))))
