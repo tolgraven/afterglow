@@ -50,6 +50,14 @@ prepared rig, and the last committed optical observation. It returns two maps
 keyed by head ID. `:weights` contains positive native-layer strengths and
 `:aims` contains reachable world targets when requested.
 
+For several volumes evaluated against the same output, create
+`(afterglow.spatial.field/sampler rig observations)` and call the returned
+function with each volume. The first optical query reads the committed
+emission once per head. Subsequent queries share light levels and resolved
+poses, while retaining each volume's own shape, range and receiver checks.
+Position-only volumes leave the optical input unread. Create a fresh sampler
+for the next output or a different patch.
+
 ```clojure
 {:shape :ball :position [2 1 -1] :radius 0.3 :restitution 0.9
  :geometry {:shape :difference

@@ -6,7 +6,11 @@
             [afterglow.spatial.shape :as field-shape]
             [afterglow.time :as time]))
 
-(defn vec3? [v] (and (vector? v) (= 3 (count v)) (every? time/finite-number? v)))
+(defn vec3? [v]
+  (and (vector? v) (= 3 (count v))
+       (time/finite-number? (nth v 0))
+       (time/finite-number? (nth v 1))
+       (time/finite-number? (nth v 2))))
 (defn nonnegative? [x] (and (time/finite-number? x) (not (neg? x))))
 (defn valid-id? [x] (or (keyword? x) (string? x)))
 (defn invalid! [message value] (throw (ex-info message {:value value})))
