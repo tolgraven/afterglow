@@ -171,14 +171,15 @@
                                         (:source block)))))
     (partition-by (juxt #(get-in % [:native-layer :member]) :source) ordered)))
 
+(defn- validate-weights! [weights source]
+  (when (and (some? weights) (not (and (map? weights) (every? unit? (vals weights)))))
+    (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {}) source))))
+
 (defn- group-blocks [high? backdrop blocks rows blend-value validate!]
   (let [members (ordered-members blocks)
         group (:native-layer (first blocks))
         opacity (:opacity group 1)
         weights (:target-weights group)
-        _ (when (and (some? weights) (not (and (map? weights) (every? unit? (vals weights)))))
-            (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {})
-                                            (:source (first blocks)))))
         allowed (when weights (into #{} (keep (fn [[id weight]] (when (pos? weight) id))) weights))]
     (if (or (zero? opacity) (and allowed (empty? allowed)))
       []
@@ -199,13 +200,8 @@
 
 (defn- opaque? [x] (and (number? x) (== 1 x)))
 
-(defn- direct-block?
-  "An opaque physical replacement is already in the downstream renderer's
-  representation. Musical fields, native colors and blends use the typed fold."
-  [{:keys [native-layer kind assignments compiled]}]
-  (and (nil? (:target-weights native-layer))
-       (opaque? (:opacity native-layer 1))
-       (opaque? (:member-opacity native-layer 1))
+(defn- physical-replacement? [{:keys [native-layer kind assignments compiled]}]
+  (and (opaque? (:member-opacity native-layer 1))
        (empty? (:transforms native-layer))
        (case kind
          :batch (and (= :replace (:blend compiled))
@@ -215,23 +211,78 @@
                                    :or {blend :replace opacity 1}}]
                                 (and (= :replace blend) (opaque? opacity)
                                      (not= :beat-ratio attribute)
-                                     ;; A native Color coerces RGB to doubles. Keep
-                                     ;; exact RGB literals on that same conversion path.
                                      (or (not= :color attribute)
                                          (and (vector? value) (every? double? value)))))
                               assignments))))
 
-(defn- order-direct-blocks [blocks groups anchors]
+(defn- unique-indices? [^ints indices]
+  ;; A nil permutation is a unique prefix of patch order.
+  (or (nil? indices)
+      (let [seen (java.util.BitSet.)]
+        (loop [row 0]
+          (or (= row (alength indices))
+              (let [idx (aget indices row)]
+                (and (not (.get seen idx))
+                     (do (.set seen idx) (recur (inc row))))))))))
+
+(defn- masked-batch [block weights opacity]
+  (let [{:keys [target-ids target-indices]} (:compiled block)]
+    (when (unique-indices? target-indices)
+      (let [opacities (double-array (count target-ids))
+            opacity (double opacity)]
+        (dotimes [row (alength opacities)]
+          (aset opacities row (* opacity (double (get weights (nth target-ids row) 0)))))
+        (assoc-in (dissoc block :native-layer) [:compiled ::opacities] opacities)))))
+
+(defn- masked-assignments [block weights opacity]
+  (loop [remaining (seq (:assignments block)), seen (transient #{}), output (transient [])]
+    (if-let [{:keys [target-id attribute] :as row} (first remaining)]
+      (let [weight (get weights target-id 0)]
+        (if (zero? weight)
+          (recur (next remaining) seen output)
+          (let [k [target-id attribute]]
+            (when-not (contains? seen k)
+              (recur (next remaining) (conj! seen k)
+                     (conj! output (assoc row :opacity (* opacity weight))))))))
+      (assoc (dissoc block :native-layer) :assignments (persistent! output)))))
+
+(defn- independent-columns? [blocks]
+  ;; Intersecting writers must compose the entire scene before applying alpha.
+  (loop [remaining (seq blocks), seen #{}]
+    (if-let [{:keys [kind assignments compiled]} (first remaining)]
+      (let [columns (into #{} (map :attribute) (if (= :batch kind) (:columns compiled) assignments))]
+        (and (not-any? seen columns)
+             (recur (next remaining) (into seen columns))))
+      true)))
+
+(defn- packed-factor? [x]
+  (or (double? x) (float? x) (integer? x)))
+
+(defn- direct-group [blocks]
+  (let [members (ordered-members blocks)
+        ordered (vec (mapcat (fn [member] (check-member! member) member) members))
+        {:keys [target-weights opacity] :or {opacity 1}} (:native-layer (first ordered))]
+    (when (every? physical-replacement? ordered)
+      (cond
+        (nil? target-weights)
+        (when (opaque? opacity) (mapv #(dissoc % :native-layer) ordered))
+
+        (or (zero? opacity) (empty? target-weights)) []
+
+        (and (packed-factor? opacity) (every? packed-factor? (vals target-weights))
+             (or (= 1 (count ordered)) (independent-columns? ordered)))
+        (let [masked (mapv (fn [block]
+                             ((if (= :batch (:kind block)) masked-batch masked-assignments)
+                              block target-weights opacity))
+                           ordered)]
+          (when (every? some? masked) masked))))))
+
+(defn- order-direct-blocks [blocks planned anchors]
   (reduce-kv
    (fn [result index {:keys [native-layer] :as block}]
      (cond
        (nil? native-layer) (conj result block)
-       (= index (get anchors (:id native-layer)))
-       (into result
-             (mapcat (fn [member]
-                       (check-member! member)
-                       (map #(dissoc % :native-layer) member)))
-             (ordered-members (get groups (:id native-layer))))
+       (= index (get anchors (:id native-layer))) (into result (planned (:id native-layer)))
        :else result))
    [] blocks))
 
@@ -253,8 +304,11 @@
                                  (do (try (layer-spec! l)
                                           (catch Exception ex (throw (faults/attributed-error ex (:source b)))))
                                      (assoc m (:id l) i)) m)) {} blocks)]
-      (if (every? direct-block? tagged)
-        (order-direct-blocks blocks groups anchors)
+      (doseq [[_ group] groups]
+        (validate-weights! (get-in (first group) [:native-layer :target-weights]) (:source (first group))))
+      (let [planned (update-vals groups direct-group)]
+        (if (every? some? (vals planned))
+        (order-direct-blocks blocks planned anchors)
         (let [last-anchor (apply max (vals anchors))
               apply-row (partial set-assignment high? blend-value validate!)
               targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
@@ -273,4 +327,4 @@
                 (cond-> (update state :out into entries)
                   (< i last-anchor)
                   (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks))))))))
+            {:backdrop {} :out []} blocks)))))))))
