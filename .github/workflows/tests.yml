@@ -1,5 +1,9 @@
 name: Architecture regression tests
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches: [master]
+    tags: ['**']
 jobs:
   test:
     runs-on: ubuntu-latest
