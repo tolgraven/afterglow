@@ -75,9 +75,9 @@
     (and (nil? pose) (nil? direction) (not (and pan tilt))
          (number? zoom) (zero? zoom))))
 
-(defn- beam-for-output [fixture output]
+(defn- beam-pose [fixture output]
   (let [mounted (::mounted fixture)]
-    (if (and mounted (mounted-output? output)) @mounted (current-beam fixture output))))
+    (if (and mounted (mounted-output? output)) mounted (delay (current-beam fixture output)))))
 
 (defn- light-origin
   "Trace through the finite lens from the cone's virtual apex. This also works
@@ -334,7 +334,8 @@
   If a receiver hides that point or the range clips it, use the general probes."
   [{:keys [position axis spread lens-radius-m]} {:keys [center support by-distance]} opts level]
   (let [[px py pz] position [cx cy cz] center [vx vy vz] axis
-        dx (- (double cx) (double px)) dy (- (double cy) (double py)) dz (- (double cz) (double pz))
+        px (double px) py (double py) pz (double pz)
+        dx (- (double cx) px) dy (- (double cy) py) dz (- (double cz) pz)
         vx (double vx) vy (double vy) vz (double vz)
         z (+ (* dx vx) (* dy vy) (* dz vz))
         rx (- dx (* z vx)) ry (- dy (* z vy)) rz (- dz (* z vz))
@@ -345,13 +346,13 @@
         side-z (max 0.0 (/ (+ z (* k (- r lens))) (+ 1.0 (* k k))))
         side-r (+ lens (* side-z k))
         front-r (min r lens)
-        side-gap (Math/hypot (- side-z z) (- side-r r))
-        front-gap (Math/hypot z (- front-r r))
+        side-gap (if in? 0.0 (Math/hypot (- side-z z) (- side-r r)))
+        front-gap (if in? 0.0 (Math/hypot z (- front-r r)))
         face? (< front-gap side-gap)
-        gap (cond in? 0.0 face? front-gap :else side-gap)]
+        gap (if face? front-gap side-gap)]
     (when (<= gap (Math/nextUp (double support)))
-      (let [axial (cond in? z face? 0.0 :else side-z)
-            radial (cond in? r face? front-r :else side-r)
+      (let [axial (double (cond in? z face? 0.0 :else side-z))
+            radial (double (cond in? r face? front-r :else side-r))
             factor (if (pos? r) (/ radial r) 0.0)
             hit (if in? center [(+ px (* axial vx) (* factor rx))
                                 (+ py (* axial vy) (* factor ry))
@@ -361,9 +362,36 @@
             distance (Math/hypot axial (- radial (* aperture r)))
             value (by-distance (min gap (double support)))]
         (cond (not (pos? value)) nil
-              (or (> distance (:range-m opts))
+              (or (> distance (double (:range-m opts)))
                   (when-let [blocked? (:occluded? opts)] (blocked? origin hit distance))) ::probe
               :else {:weight (* level value)})))))
+
+(defrecord Emission [id fixture level pose])
+
+(defn observe
+  "Capture a fixture's emission and defer pose validation until a field can use it."
+  [fixture output]
+  (->Emission (:id fixture) fixture (light-level fixture output) (beam-pose fixture output)))
+
+(defn- select-emission [fixture level pose volume {:keys [bounds] :as sampling} options]
+  (let [{:keys [selection range-m intensity-threshold] :as opts}
+        (if (::prepared options) options (prepare-options options))
+        illuminated? (and (:beam selection) (pos? level) (>= level intensity-threshold))
+        aimable? (and (:aimable selection) (every? #(contains? (:channels fixture) %) [:pan :tilt]))
+        origin (:position fixture [0 0 0])]
+    (when (and (or illuminated? aimable?)
+               (or (nil? bounds)
+                   (within-range-of-box? origin bounds (+ range-m (double (:lens-radius-m fixture 0.119))))))
+      (when-let [beam @pose]
+        (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
+          ;; The exact radial test already rejects points outside the cone.
+          (let [result (radial-beam beam (:radial sampling) opts level)]
+            (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
+          (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
+            (when (or beam? aimable?) (select-points fixture beam volume sampling opts beam? aimable? level))))))))
+
+(defn observed-contribution [^Emission emission volume sampling options]
+  (select-emission (:fixture emission) (:level emission) (:pose emission) volume sampling options))
 
 (defn contribution
   "Return nil or {:weight w, optional :aim [x y z]} for one fixture and volume.
@@ -371,20 +399,5 @@
   :beam tests actual emitted RGB with calibrated pose, beam angle, lens and
   occlusion. :aimable can suggest a reachable point for a dark moving head.
   Pass prepared options when querying many fixtures."
-  [fixture output volume {:keys [bounds] :as sampling} options]
-  (let [{:keys [selection range-m intensity-threshold] :as opts}
-        (if (::prepared options) options (prepare-options options))
-        level (light-level fixture output)
-        illuminated? (and (:beam selection) (pos? level) (>= level intensity-threshold))
-        aimable? (and (:aimable selection) (every? #(contains? (:channels fixture) %) [:pan :tilt]))
-        origin (:position fixture [0 0 0])]
-    (when (and (or illuminated? aimable?)
-               (or (nil? bounds)
-                   (within-range-of-box? origin bounds (+ range-m (double (:lens-radius-m fixture 0.119))))))
-      (when-let [beam (beam-for-output fixture output)]
-        (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
-          ;; The exact radial test already rejects points outside the cone.
-          (let [result (radial-beam beam (:radial sampling) opts level)]
-            (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
-          (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
-            (when (or beam? aimable?) (select-points fixture beam volume sampling opts beam? aimable? level))))))))
+  [fixture output volume sampling options]
+  (select-emission fixture (light-level fixture output) (beam-pose fixture output) volume sampling options))
