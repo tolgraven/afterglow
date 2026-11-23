@@ -133,3 +133,17 @@
     (is (empty? (get-in half [:model :variables :runtime :events])))
     (is (some #(= "Bad at beat one" (:message %)) (get-in failed [:model :variables :runtime :events])))
     (is (empty? (:assignments failed)))))
+
+(deftest changing-adaptive-cadence-and-missing-a-beat-preserve-linear-time
+  (let [model (show nil) compile (compile-recorder (atom []))
+        tick (fn [previous beat interval]
+               (engine/advance (assoc-in (or (:model previous) model) [:transport :beat] beat)
+                               {:time-ms (* 500 beat) :keyframes (:keyframes previous)
+                                :keyframe-intervals {"0:1" interval}} compile))
+        fast (tick nil 0 {:ms 100}) middle (tick fast 1/20 {:ms 100})
+        slow (tick middle 1/10 {:ms 250}) progress (tick slow 3/20 {:ms 250})
+        late (tick progress 9/10 {:ms 250})]
+    (is (== (/ 0.1 8) (get-in slow [:assignments 0 :value])))
+    (is (< (abs (- (/ 0.15 8) (get-in progress [:assignments 0 :value]))) 1.0e-15))
+    (is (== (/ 0.9 8) (get-in late [:assignments 0 :value])))
+    (is (== 550 (get-in late [:keyframes "0:1" :end])))))

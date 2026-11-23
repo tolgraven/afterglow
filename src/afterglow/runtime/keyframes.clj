@@ -87,14 +87,16 @@
    (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
    (:targets instance) (:started-at-beat instance) (:keyframe-generation frame)])
 
-(defn- fresh-window [window prior reuse? sample ctx now]
+(defn- fresh-window [window prior same-inputs? sample ctx]
   (let [{:keys [options origin-clock target-clock]} window
         source (delay (sample ctx))
+        previous-time (when (and same-inputs? prior) (time/coordinate origin-clock (:unit prior)))
         origin (cond
-                 (and reuse? prior (not (:forecast-failed? prior)))
-                 (if (:progress options)
-                   (:result prior)
-                   (:target prior))
+                 (and same-inputs? prior)
+                 (cond (:progress options) (:result prior)
+                       (< previous-time (:end prior)) (:result (sample-window prior ctx options previous-time))
+                       (== previous-time (:end prior)) (:target prior)
+                       :else @source)
 
                  (and prior (= (:epoch prior) (:epoch window)) (identical? (:rig prior) (:rig window))
                       (= (first (:inputs prior)) (first (:inputs window)))
@@ -113,7 +115,7 @@
       (let [window (assoc window :target target :origin origin)]
         (if (and prior (not (realized? source)))
           (assoc window :progress 0.0 :result origin)
-          (sample-window window ctx options now)))
+          (sample-window window ctx options (:start window))))
       (assoc window :forecast-failed? true :result @source))))
 
 (defn- run-window [step ctx options prior adaptive]
@@ -125,9 +127,10 @@
         now (time/coordinate clock unit)
         inputs (signature instance frame options clock)
         sample #(call ctx true (fn [] (values/blocks % (step %))))
-        valid? (and prior (= (:epoch frame) (:epoch prior)) (identical? (:rig prior) (:fixtures frame))
-                    (= inputs (:inputs prior)) (= options (:options prior))
-                    (= unit (:unit prior)) (== value (:span prior)) (<= (:start prior) now))]
+        same-inputs? (and prior (= (:epoch frame) (:epoch prior)) (identical? (:rig prior) (:fixtures frame))
+                          (= inputs (:inputs prior)) (= options (:options prior))
+                          (<= (:start prior) (time/coordinate clock (:unit prior))))
+        valid? (and same-inputs? (= unit (:unit prior)) (== value (:span prior)))]
     (if (and valid? (< now (:end prior)))
       (if (:forecast-failed? prior)
         (assoc prior :result (sample ctx))
@@ -138,7 +141,7 @@
         (when (and options (not= options (:options prior))) (validate! options))
         ;; At the end of a failed forecast evaluate the *real* frame before
         ;; attempting another prediction. This runs the normal fault boundary.
-        (fresh-window window (when-not (:forecast-failed? prior) prior) valid? sample ctx now)))))
+        (fresh-window window (when-not (:forecast-failed? prior) prior) same-inputs? sample ctx)))))
 
 (defn evaluate
   "Run either a real step or a lightweight interpolation; all cached results
