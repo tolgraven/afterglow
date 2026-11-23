@@ -74,7 +74,7 @@
     (if (empty? optical)
       {:weights initial :aims {}}
       (let [prepared (or (::optics observations) (::optics (prepare-observations observations)))
-            opts (assoc prepared :selection optical)
+            opts (beam/volume-options prepared optical sampling)
             read-row (or values {})
             receive (if emissions
                       #(beam/observed-contribution % volume sampling opts)
