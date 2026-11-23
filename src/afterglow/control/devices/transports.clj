@@ -1,9 +1,13 @@
 (ns afterglow.control.devices.transports
   "Optional real transports, acquired only through returned open! functions.
   Java MIDI uses explicit ports; OSC and Wayang are loaded lazily on acquisition."
+  (:require [afterglow.control.params :as params]
+            [clojure.string :as str])
   (:import [javax.sound.midi MidiSystem MidiDevice MidiMessage Receiver ShortMessage SysexMessage]
-           [java.awt Color Font RenderingHints]
+           [java.awt Color Font FontMetrics RenderingHints]
            [java.awt.image BufferedImage]
+           [java.math BigDecimal]
+           [java.util Locale]
            [java.util.concurrent Callable ExecutionException Executors FutureTask ThreadFactory TimeUnit TimeoutException]))
 
 (defn scheduler
@@ -163,6 +167,28 @@
                 (doseq [{:keys [path args]} messages] (feedback! path args))))
      :close! (fn [{:keys [peer close!]}] (close! peer))}))
 
+(defn- parameter-value-label [^FontMetrics metrics value available-width]
+  (let [text (str value)
+        fits? #(<= (.stringWidth metrics ^String %) available-width)]
+    (if-not (params/finite-number? value)
+      (subs text 0 (min 12 (count text)))
+      (let [^BigDecimal number (bigdec (if (ratio? value) (double value) value))
+            significant-digits 6]
+        (if (and (fits? text) (or (integer? value) (ratio? value)
+                                 (<= (.precision number) significant-digits)))
+          text
+          (or (some (fn [digits]
+                      (let [label (String/format Locale/ROOT (str "%." digits "g") (object-array [number]))
+                            [mantissa exponent] (str/split label #"e" 2)
+                            mantissa (if (str/includes? mantissa ".")
+                                       (str/replace mantissa #"\.?0+$" "")
+                                       mantissa)
+                            compact (if exponent (str mantissa "e" exponent) mantissa)]
+                        (when (fits? compact) compact)))
+                    (range significant-digits 0 -1))
+              (when (fits? "…") "…")
+              ""))))))
+
 (defn render-view!
   "Render a shared Push display view into an owned BufferedImage. This AWT
   boundary is independently testable headlessly; it does not send a frame."
@@ -178,12 +204,15 @@
       (.setFont graphics (Font. "SansSerif" Font/PLAIN 14))
       (.drawString graphics (str "BPM " (:bpm view) "  Master " (:master view)
                                  (when (= {:target :tempo :editable? false} (:touched-control view)) "  Tempo locked to sync")
-                                 (when (:blackout? view) "  BLACKOUT")) 16 52)
-      (doseq [[index {:keys [name value]}] (map-indexed vector (take 8 (:parameters view)))]
-        (.setColor graphics (Color. 105 192 236))
-        (.drawString graphics (subs (str name) 0 (min 12 (count (str name)))) (+ 8 (* cell index)) 88)
-        (.setColor graphics Color/WHITE)
-        (.drawString graphics (subs (str value) 0 (min 12 (count (str value)))) (+ 8 (* cell index)) 112))
+                                 (when (:blackout? view) "  BLACKOUT")
+                                 (when (:fine? view) "  Fine")) 16 52)
+      (let [metrics (.getFontMetrics graphics)
+            available-width (max 0 (- cell 16))]
+        (doseq [[index {:keys [name value]}] (map-indexed vector (take 8 (:parameters view)))]
+          (.setColor graphics (Color. 105 192 236))
+          (.drawString graphics (subs (str name) 0 (min 12 (count (str name)))) (+ 8 (* cell index)) 88)
+          (.setColor graphics Color/WHITE)
+          (.drawString graphics ^String (parameter-value-label metrics value available-width) (+ 8 (* cell index)) 112)))
       (doseq [[index label] (map-indexed vector (take 8 (:labels view)))]
         (.setColor graphics (Color. 160 170 184))
         (.drawString graphics (subs (str label) 0 (min 12 (count (str label)))) (+ 8 (* cell index)) (- height 15)))
