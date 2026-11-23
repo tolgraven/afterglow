@@ -15,10 +15,15 @@
 (defn create
   "Inert owner; send! receives newly owned universe arrays and a packet ID.
   Optional prepare-output receives those arrays and ID, and returns the final
-  universe map before deadline admission. now-ms is the monotonic physical clock."
-  [{:keys [send! prepare-output now-ms receipt-capacity]}]
+  universe map before deadline admission. Optional prepare-safety-output receives
+  a private copy of the last sent arrays and their ID when a regular packet
+  expires. Return nil or those buffers with safety cutoffs applied. now-ms is
+  the monotonic physical clock."
+  [{:keys [send! prepare-output prepare-safety-output now-ms receipt-capacity]}]
   (let [origin (System/nanoTime)]
-    {:send! send! :prepare-output prepare-output :now-ms (or now-ms #(/ (- (System/nanoTime) origin) 1.0e6))
+    {:send! send! :prepare-output prepare-output :prepare-safety-output prepare-safety-output
+     :last-sent (when (and send! prepare-safety-output) (atom nil))
+     :now-ms (or now-ms #(/ (- (System/nanoTime) origin) 1.0e6))
      :gate (atom nil) :counter (atom 0)
      :receipts (when receipt-capacity (ArrayBlockingQueue. (int receipt-capacity)))
      :receipt-drops (AtomicLong. 0)
@@ -133,18 +138,37 @@
                    :dropped-before (.get drops)}]
       (if (.offer mailbox receipt) (.set drops 0) (.incrementAndGet drops)))))
 
+(defn- copy-buffers [universes]
+  (update-vals universes (fn [^bytes buffer] (aclone buffer))))
+
+(defn- wire-snapshot [packet output]
+  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms])
+         :universes (copy-buffers output)))
+
+(defn- handoff! [owner packet output snapshot started]
+  ((:send! owner) output (:frame-id packet))
+  (let [finished ((:now-ms owner))]
+    (when snapshot (reset! (:last-sent owner) snapshot))
+    (assoc packet :sent-at-ms started :sent-by-ms finished)))
+
+(defn- send-safety-output! [owner]
+  (when-let [prior (some-> (:last-sent owner) deref)]
+    (when-let [corrected ((:prepare-safety-output owner) (copy-buffers (:universes prior)) (:frame-id prior))]
+      (let [snapshot (wire-snapshot prior corrected)]
+        (assoc (handoff! owner (dissoc prior :universes) corrected snapshot ((:now-ms owner)))
+               :safety-output? true)))))
+
 (defn- send-packet! [owner gate packet expires-at]
-  (if-let [send! (:send! owner)]
+  (if (:send! owner)
     (let [{:keys [universes frame-id]} (policy/materialize packet)
           output (if-let [prepare (:prepare-output owner)] (prepare universes frame-id) universes)
-          now (:now-ms owner) started (now)]
+          snapshot (when (:last-sent owner) (wire-snapshot packet output))
+          started ((:now-ms owner))]
       (if (and expires-at (>= started expires-at) (not (:dark? gate)))
-        {:expired-before-send? true}
-        (do
-          (send! output frame-id)
-          (let [finished (now)]
-            (receipt! owner gate packet finished)
-            (assoc packet :sent-at-ms started :sent-by-ms finished)))))
+        (assoc (send-safety-output! owner) :expired-before-send? true)
+        (let [sent (handoff! owner packet output snapshot started)]
+          (receipt! owner gate packet (:sent-by-ms sent))
+          sent)))
     packet))
 
 (defn- current-policy [gate previous deadline-ms]
@@ -216,7 +240,8 @@
                expires-at (when deadline-ms (+ deadline-ms period))
                sent (send-packet! owner gate packet expires-at)]
            (if (:expired-before-send? sent)
-             (swap! (:status owner) update :expired-before-send (fnil inc 0))
+             (swap! (:status owner) #(cond-> (update % :expired-before-send (fnil inc 0))
+                                      (:safety-output? sent) (update :safety-publications (fnil inc 0))))
              (when (and (not @(:closed? owner)) (= (:generation gate) (:generation @(:gate owner))))
                (commit-publication! owner gate next-state entries packet)))
            sent))))))
@@ -241,21 +266,22 @@
              (when-not @(:closed? owner) (throw e)))))))
 
 (defn- send-slot! [owner grid slot previous started]
-  (try
-    (let [due (timeline/deadline grid slot)
-          packet (publish! owner due)
-          timing {:slot slot :deadline-ms due :started-at-ms started :finished-at-ms ((:now-ms owner))
-                  :source-time-ms (:time-ms packet) :frame-id (:frame-id packet)
-                  :sent-at-ms (:sent-at-ms packet) :sent-by-ms (:sent-by-ms packet)
-                  :expired-before-send? (boolean (:expired-before-send? packet))
-                  :source-input-age-ms (when (and (:sent-at-ms packet) (:inputs-at-ms packet))
-                                         (- (:sent-at-ms packet) (:inputs-at-ms packet)))}]
-      (swap! (:status owner) #(-> % (assoc :output-timing timing)
-                                  (update :skipped-output-slots (fnil + 0) (- slot previous 1))))
-      timing)
-    (catch Exception error
-      (swap! (:status owner) #(-> % (assoc :error (.getMessage error)) (update :failed-publications (fnil inc 0))))
-      nil)))
+  (let [due (timeline/deadline grid slot)
+        {:keys [packet error]} (try {:packet (publish! owner due)}
+                                    (catch Exception error {:error error}))
+        timing (cond-> {:slot slot :deadline-ms due :started-at-ms started :finished-at-ms ((:now-ms owner))
+                        :source-time-ms (:time-ms packet) :frame-id (:frame-id packet)
+                        :sent-at-ms (:sent-at-ms packet) :sent-by-ms (:sent-by-ms packet)
+                        :expired-before-send? (boolean (:expired-before-send? packet))
+                        :source-input-age-ms (when (and (:sent-at-ms packet) (:inputs-at-ms packet))
+                                               (- (:sent-at-ms packet) (:inputs-at-ms packet)))}
+                 (:safety-output? packet) (assoc :safety-output? true)
+                 error (assoc :failed? true))]
+    (swap! (:status owner) #(cond-> (-> % (assoc :output-timing timing)
+                                        (update :skipped-output-slots (fnil + 0) (- slot previous 1)))
+                             error (-> (assoc :error (.getMessage ^Exception error))
+                                       (update :failed-publications (fnil inc 0)))))
+    timing))
 
 (defn- start-publications! [owner executor grid]
   (let [now (:now-ms owner)]
@@ -270,8 +296,11 @@
                     (queue-slot wanted previous)
                     (let [timing (send-slot! owner grid slot previous started)
                           ;; A thread can be preempted between checking the clock and
-                          ;; entering the sink. Its return bounds the actual handoff.
-                          handed-off (or (:sent-by-ms timing) started)]
+                          ;; entering the sink. It can also send part of a frame
+                          ;; before throwing. Space from either completion.
+                          handed-off (or (:sent-by-ms timing)
+                                         (when (:failed? timing) (:finished-at-ms timing))
+                                         started)]
                       (queue-slot (timeline/next-output-slot grid slot handed-off (now)) slot))))))]
       (queue-slot 1 0))))
 
@@ -322,5 +351,6 @@
     (when-let [^ScheduledExecutorService scheduler @(:scheduler owner)] (.shutdownNow scheduler))
     (reset! (:queue owner) nil)
     (when-let [^ArrayBlockingQueue mailbox (:receipts owner)] (.clear mailbox))
+    (when-let [snapshot (:last-sent owner)] (reset! snapshot nil))
     (reset! (:state owner) nil))
   nil)

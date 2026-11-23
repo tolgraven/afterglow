@@ -91,6 +91,11 @@ The protocol layout follows the published Art-Net 4 specification, revision 1.4d
 A scheduled publication checks the clock again after it has packed the
 transport buffers. If the next nominal deadline has passed, it leaves the
 physical output on its previous sample and records `:expired-before-send`.
+Hosts can supply `:prepare-safety-output` to correct the last successfully
+sent channel values when a normal packet expires. It receives detached
+buffers and the last sent frame ID. Return `nil` when no cutoff is needed.
+The safety send leaves the expired frame pending for its usual admission
+rules and reports `:safety-output?` and `:safety-publications`.
 The next slot can still consume a newer completion that arrived during
 packing. Buffered upper endpoints remain available through their own
 delayed publication opportunity. An unseen expired endpoint cannot become
@@ -109,6 +114,7 @@ buffered interpolation endpoint.
 Hosts can supply `:prepare-output` to apply final channel corrections before
 the sender checks its deadline. This includes retired-fixture output and fog
 cutoffs. A sink call may itself span a scheduling interruption. The next
-publication leaves at least half a period after the preceding call returned.
+publication leaves at least half a period after the preceding call returned
+or threw.
 A capture sink can timestamp its own entry to measure the remaining gap
 between application admission and actual delivery.

@@ -406,3 +406,70 @@
         (is (= [[2 90]] @sent))
         (is (== 125 (first @next-call)) "A 100 ms callback could be only ten ms after the last entry"))
       (finally (scheduler/close! owner)))))
+
+(deftest failed-handoff-spaces-the-next-send-even-after-partial-delivery
+  (let [clock (atom 0.0) next-call (atom nil) sent (atom [])
+        owner (scheduler/create {:now-ms #(deref clock)
+                                 :send! (fn [_ _]
+                                          (if (empty? @sent)
+                                            (do (reset! clock 49.9)
+                                                (swap! sent conj @clock)
+                                                (throw (ex-info "Transport failed after sending one universe" {})))
+                                            (swap! sent conj @clock)))})]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due f] (reset! next-call [due f]))]
+        (scheduler/complete! owner (scheduler/begin-frame! owner 1 @patch {} false) (frame 180 0 0))
+        (scheduler/start! owner 25)
+        (reset! clock 25.0)
+        ((second @next-call))
+        (is (= 1 (:failed-publications (scheduler/status owner))))
+        (is (= {:failed? true :finished-at-ms 49.9}
+               (select-keys (:output-timing (scheduler/status owner)) [:failed? :finished-at-ms])))
+        (is (== 75 (first @next-call)))
+        (reset! clock (first @next-call))
+        ((second @next-call))
+        (is (= [49.9 75.0] @sent))
+        (is (= 1 (:skipped-output-slots (scheduler/status owner)))))
+      (finally (scheduler/close! owner)))))
+
+(deftest overdue-safety-correction-uses-the-last-physical-bytes
+  (let [clock (atom 0.0) next-call (atom nil) sent (atom [])
+        owner (scheduler/create
+               {:now-ms #(deref clock)
+                :prepare-output (fn [buffers id]
+                                  (when (> id 1) (swap! clock + 26))
+                                  buffers)
+                :prepare-safety-output (fn [buffers _]
+                                         (let [^bytes buffer (get buffers 0)]
+                                           (when-not (zero? (aget buffer 1))
+                                             (aset-byte buffer 1 (byte 0))
+                                             buffers)))
+                :send! (fn [buffers id]
+                         (let [^bytes buffer (get buffers 0)]
+                           (swap! sent conj [id (bit-and 255 (aget buffer 0)) (bit-and 255 (aget buffer 1))])
+                           ;; A transport owns these arrays and may reuse them.
+                           (aset-byte buffer 0 (byte 0))))})
+        offer! (fn [slot red]
+                 (let [token (scheduler/begin-frame! owner 1 @patch {} false
+                                                     {:slot slot :started-at-ms @clock :deadline-ms (* 25 slot)})]
+                   (scheduler/complete! owner token (frame red 200 0))))
+        run-next! (fn [] (reset! clock (first @next-call)) ((second @next-call)))]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due f] (reset! next-call [due f]))]
+        (offer! 1 10)
+        (scheduler/start! owner 25)
+        (run-next!)
+        (offer! 2 20)
+        (run-next!)
+        (is (= [[1 10 200] [1 10 0]] @sent))
+        (is (= {:frame-id 1 :expired-before-send? true :safety-output? true :sent-by-ms 76.0}
+               (select-keys (:output-timing (scheduler/status owner))
+                            [:frame-id :expired-before-send? :safety-output? :sent-by-ms])))
+        (is (== 100 (first @next-call)))
+        (offer! 4 30)
+        (run-next!)
+        (is (= [[1 10 200] [1 10 0]] @sent) "An already corrected held packet needs no extra send")
+        (is (= 1 (:published (scheduler/status owner))))
+        (is (= 1 (:safety-publications (scheduler/status owner))))
+        (is (= 2 (:expired-before-send (scheduler/status owner)))))
+      (finally (scheduler/close! owner)))))
