@@ -117,7 +117,8 @@
   ;; An arbitrary certified reader can capture its input. Keep previous
   ;; observers, worker timers and window history outside that private scope.
   (-> ctx
-      (update :frame dissoc :keyframes :measure-effect :keyframe-intervals)
+      (update :frame #(-> % (dissoc :keyframes :measure-effect :keyframe-intervals)
+                          (vary-meta dissoc ::positions)))
       (update :instance vary-meta dissoc ::runtime/observe)))
 
 (defn- signature [instance frame options clock paths]
@@ -125,8 +126,35 @@
    (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
    (:targets instance) (:started-at-beat instance) (input-generation paths frame)])
 
+(defn with-rig-positions
+  "Give all predicting workers one lazy lookup on this frozen rig. Successful
+  frames retain its immutable result in the keyframe map's private metadata."
+  [{:keys [fixtures keyframes] :as frame}]
+  (let [prior (meta keyframes)
+        saved (when (identical? fixtures (::rig prior)) (::positions prior))]
+    (vary-meta frame assoc ::positions (or saved (delay (values/fixture-positions fixtures))))))
+
+(defn- completed-positions [lookup]
+  (cond
+    (map? lookup) lookup
+    (and lookup (realized? lookup))
+    ;; A worker may have rejected a speculative endpoint. Never publish a
+    ;; failed lookup or let reading its exception abort healthy effects.
+    (try @lookup
+         (catch Throwable error
+           (when-not (faults/recoverable? error) (throw error))))))
+
+(defn committed-windows [frame evaluations]
+  (let [windows (into {} (keep (fn [{:keys [id keyframe done?]}]
+                                 (when (and keyframe (not done?)) [id keyframe]))) evaluations)]
+    (if-let [positions (when (seq windows) (completed-positions (::positions (meta frame))))]
+      (with-meta windows {::rig (:fixtures frame) ::positions positions})
+      windows)))
+
 (defn- fresh-window [window prior same-inputs? sample ctx]
   (let [{:keys [options origin-clock target-clock]} window
+        rig (:rig window)
+        positions (or (::positions (meta (:frame ctx))) (delay (values/fixture-positions rig)))
         source (delay (sample ctx))
         previous-time (when (and same-inputs? prior) (time/coordinate origin-clock (:unit prior)))
         origin (cond
@@ -146,7 +174,7 @@
 
                  :else @source)
         forecast (try
-                   (values/endpoints origin (sample (future-context ctx target-clock)) (:rig window) (:curve options))
+                   (values/indexed-endpoints origin (sample (future-context ctx target-clock)) positions (:curve options))
                    (catch Throwable error
                      (when-not (faults/recoverable? error) (throw error))
                      ;; A possible future error is not a current effect fault.

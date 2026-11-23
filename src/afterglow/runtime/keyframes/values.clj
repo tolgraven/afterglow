@@ -213,7 +213,7 @@
   (doseq [[a b] (map vector left right)
           :let [attr (:attribute a)]
           :when (geometry attr)]
-    (let [[x y z] (position-for positions attr (:target-id a))
+    (let [[x y z] (position-for (when (= :aim attr) (force positions)) attr (:target-id a))
           [ax ay az] (:value a) [bx by bz] (:value b)]
       (check-chord! overshoot? (- ax x) (- ay y) (- az z) (- bx x) (- by y) (- bz z)))))
 
@@ -222,7 +222,8 @@
           :let [^doubles from (get-in left [:outputs attr :values])]
           :when from]
     (let [^doubles to (get-in right [:outputs attr :values])
-          ids (:target-ids left)]
+          ids (:target-ids left)
+          positions (when (= :aim attr) (force positions))]
       (dotimes [i (count ids)]
         (let [[x y z] (position-for positions attr (nth ids i))
               x (double x) y (double y) z (double z)
@@ -231,16 +232,24 @@
                         (- (aget from ix) x) (- (aget from iy) y) (- (aget from iz) z)
                         (- (aget to ix) x) (- (aget to iy) y) (- (aget to iz) z)))))))
 
-(defn endpoints [origin target fixtures curve]
+(defn fixture-positions [fixtures]
+  (into {} (map (juxt :id #(or (:position %) [0 0 0]))) fixtures))
+
+(defn indexed-endpoints
+  "Check aligned geometry against the frozen rig. Direction chords are already
+  emitter-relative. Only absolute aim needs to realize the shared lookup."
+  [origin target positions curve]
   (let [[origin target :as aligned] (align-endpoints origin target)]
     (when (some geometry-block? origin)
-      (let [positions (into {} (map (juxt :id #(or (:position %) [0 0 0]))) fixtures)
-            overshoot? (can-overshoot? curve)]
+      (let [overshoot? (can-overshoot? curve)]
         (doseq [[left right] (map vector origin target)]
           (case (:kind left)
             :batch (check-batch! overshoot? positions (:batch left) (:batch right))
             :assignments (check-assignments! overshoot? positions (:assignments left) (:assignments right))))))
     aligned))
+
+(defn endpoints [origin target fixtures curve]
+  (indexed-endpoints origin target (delay (fixture-positions fixtures)) curve))
 
 (defn read-values [blocks target attribute]
   (let [relevant? (fn [row] (and (= target (:target-id row)) (= attribute (:attribute row))))

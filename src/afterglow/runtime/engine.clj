@@ -388,7 +388,7 @@
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
     {:model (faults/record-events (assoc model :instances instances) events)
      :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
-     :keyframes (into {} (keep (fn [{:keys [id keyframe done?]}] (when (and keyframe (not done?)) [id keyframe]))) evaluations)
+     :keyframes (keyframes/committed-windows snapshot evaluations)
      :fault-events events
      ;; Private evaluation records never enter the model or a saved show. A
      ;; renderer can reject one malformed output without running healthy code twice.
@@ -482,6 +482,9 @@
                                     (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
                                                                   (get-in % [:instance :fault :effect-version])))
                                             (mapcat #(cond-> [%] (:candidate? %) (conj (:fallback %))) prepared))))
+         snapshot (cond-> snapshot
+                    (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
+                    keyframes/with-rig-positions)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
          descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :state]) :step identity) prepared)
          evaluations (vec (map-work (partial evaluate-isolated snapshot compiled) prepared))
