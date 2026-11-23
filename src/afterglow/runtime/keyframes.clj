@@ -12,19 +12,35 @@
   effects, frame-count dependence or deferred native jobs are allowed. An optional
   separate sampler can use the numeric CPU backend on a predictive evaluation."
   ([step] (predictable step step))
-  ([step sampler] (with-meta step (assoc (meta step) ::sampler sampler))))
+  ([step sampler] (vary-meta step #(assoc (dissoc % ::time-invariant) ::sampler sampler))))
+
+(defn time-invariant
+  "Certify that a predictable step and its interpolant produce identical
+  native fields for every clock under one input signature. Automatic keyframes
+  can reuse one read-only sample at both endpoints. Authored windows retain
+  normal sampling. The step must not expose clock-specific observations."
+  [step]
+  (vary-meta (predictable step) assoc ::time-invariant {:sampler step}))
 
 (defn predictable? [step] (boolean (::sampler (meta step))))
 
 (defn with-inputs
-  "Preprocess current and projected contexts through the same input middleware."
-  [step transform]
-  (let [run (comp step transform)
-        info (meta step)
-        sample (::sampler info)]
-    (if info
-      (with-meta run (cond-> info sample (assoc ::sampler (comp sample transform))))
-      run)))
+  "Preprocess current and projected contexts through the same input middleware.
+  Preserve time-invariance only for a transform that leaves certified inputs
+  untouched at current and projected clocks. Check the current input on
+  every frame so a later override can restore the ordinary sampling path."
+  ([step transform] (with-inputs step transform {}))
+  ([step transform {:keys [preserve-time-invariance?]}]
+   (let [run (comp step transform)
+         info (meta step)
+         sample (::sampler info)
+         invariant (when preserve-time-invariance? (::time-invariant info))]
+     (if info
+       (with-meta run (cond-> (dissoc info ::time-invariant)
+                        sample (assoc ::sampler (comp sample transform))
+                        invariant (assoc ::time-invariant
+                                         (update invariant :prepare #(if % (comp % transform) transform)))))
+       run))))
 
 (defn- positive-duration? [duration]
   (and (empty? (time/validate-duration duration)) (pos? (val (first duration)))))
@@ -80,7 +96,10 @@
   (let [{:keys [start end origin target]} window
         curve-fn (or (::ease (meta window)) (easing/evaluator (:curve options :linear)))
         progress (amount ctx (:progress options) curve-fn (/ (- now start) (- end start)))]
-    (assoc (with-meta window {::ease curve-fn}) :progress progress :result (values/blend origin target progress (get-in ctx [:frame :hdr?])))))
+    (assoc (vary-meta window assoc ::ease curve-fn)
+           :progress progress
+           :result (if (identical? origin target) origin
+                       (values/blend origin target progress (get-in ctx [:frame :hdr?]))))))
 
 (defn- started [prior unit now span same?]
   (if (and same? (= unit (:unit prior)) (>= now (:end prior)))
@@ -127,6 +146,13 @@
       (update :frame #(-> % (dissoc :keyframes :measure-effect :keyframe-intervals)
                           (vary-meta dissoc ::positions)))
       (update :instance vary-meta dissoc ::runtime/observe)))
+
+(defn- invariant-sampler [step ctx options]
+  (when-not options
+    (let [{:keys [prepare sampler]} (::time-invariant (meta step))]
+      (if-not prepare sampler
+        (let [input (sample-input ctx)]
+          (when (identical? input (prepare input)) sampler))))))
 
 (defn- signature [instance frame options clock paths]
   [(:effect-version instance) (dissoc (:params instance) (get-in options [:progress :param]))
@@ -198,8 +224,14 @@
           (sample-window window ctx options (:start window))))
       (assoc window :forecast-failed? true :result @source))))
 
-(defn- run-window [step ctx options prior adaptive paths]
+(defn- constant-window [window prior sample ctx]
+  (let [endpoint (if prior (:origin prior) (sample ctx))]
+    (vary-meta (assoc window :origin endpoint :target endpoint :result endpoint :progress 0.0)
+               assoc ::constant-window true)))
+
+(defn- run-window [step ctx options prior adaptive paths constant?]
   (let [{:keys [frame instance]} ctx
+        prior (when (= constant? (boolean (::constant-window (meta prior)))) prior)
         clock (time/frame-clock frame)
         {:keys [unit value]} (duration options adaptive clock)
         _ (when-not (and (time/finite-number? value) (pos? value))
@@ -221,7 +253,9 @@
         (when (and options (not= options (:options prior))) (validate! options))
         ;; At the end of a failed forecast evaluate the *real* frame before
         ;; attempting another prediction. This runs the normal fault boundary.
-        (fresh-window window (when-not (:forecast-failed? prior) prior) same-inputs? sample ctx)))))
+        (if constant?
+          (constant-window window (when same-inputs? prior) sample ctx)
+          (fresh-window window (when-not (:forecast-failed? prior) prior) same-inputs? sample ctx))))))
 
 (defn evaluate
   "Run either a real step or a lightweight interpolation; all cached results
@@ -238,7 +272,8 @@
       (let [prior (get-in frame [:keyframes (:id instance)])
             dependencies (variable-dependencies (::variable-paths (meta step)) (get-in instance [:definition :blocks])
                                                 (::dependencies prior))
-            window (cond-> (run-window sampler ctx options prior adaptive (:paths dependencies))
+            invariant (invariant-sampler step ctx options)
+            window (cond-> (run-window (or invariant sampler) ctx options prior adaptive (:paths dependencies) (some? invariant))
                      (or dependencies (::dependencies prior)) (assoc ::dependencies dependencies))
             result (assoc ctx :contributions (:result window) ::window window)]
         (if-let [reader (observations/reader window frame)]
