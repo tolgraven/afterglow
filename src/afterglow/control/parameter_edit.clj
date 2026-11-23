@@ -38,6 +38,14 @@
               3 [0 x chroma] 4 [x 0 chroma] [chroma 0 x])]
     (mapv #(double (bindings/clamp (+ base %) [0 1])) rgb)))
 
+(defn- color-to-control [schema rgb]
+  (let [[low high] (params/color-bounds schema)]
+    (mapv #(if (== low high) 0.0 (/ (- % low) (- high low))) rgb)))
+
+(defn- control-to-color [schema rgb]
+  (let [[low high] (params/color-bounds schema)]
+    (mapv #(bindings/clamp (+ low (* % (- high low))) [low high]) rgb)))
+
 (defn- numeric-range [schema value]
   (or (:bounds schema) [(- (double value) 1.0) (+ (double value) 1.0)]))
 
@@ -83,12 +91,12 @@
                       index (if absolute? (min (dec (count values)) (long (* fraction (count values))))
                                 (+ (discrete-index values value) (long input)))]
                   (nth values (int (bindings/clamp index [0 (dec (count values))]))))
-          :color (let [hsv (rgb->hsv value)
+          :color (let [hsv (rgb->hsv (color-to-control schema value))
                        changed (if (and (zero? component) (not absolute?))
                                  (mod (+ (nth hsv component) (* input (if fine? 0.001 0.01))) 1.0)
                                  (if absolute? fraction
                                      (bindings/clamp (+ (nth hsv component) (* input (if fine? 0.001 0.01))) [0 1])))]
-                   (hsv->rgb (assoc hsv component changed)))
+                   (control-to-color schema (hsv->rgb (assoc hsv component changed))))
           (:vector :range)
           (let [bounds (numeric-range schema (nth value component))
                 bounds (if (= :range (:type schema))
@@ -100,9 +108,10 @@
 
 (defn color-grid-value
   "Eight grayscale choices on the first row, then hue/saturation choices."
-  [x y]
-  (if (zero? y) (vec (repeat 3 (/ x 7.0)))
-      (hsv->rgb [(/ x 8.0) (/ y 7.0) 1.0])))
+  ([x y] (color-grid-value {} x y))
+  ([schema x y]
+   (control-to-color schema (if (zero? y) (vec (repeat 3 (/ x 7.0)))
+                               (hsv->rgb [(/ x 8.0) (/ y 7.0) 1.0])))))
 
 (defn position
   "Project the selected typed component to the same normalized range used by
@@ -118,7 +127,7 @@
       :boolean (if value 1.0 0.0)
       :enum (let [values (or (:values schema) (:options schema))]
               (if (= 1 (count values)) 0.0 (/ (discrete-index values value) (double (dec (count values))))))
-      :color (nth (rgb->hsv value) component)
+      :color (nth (rgb->hsv (color-to-control schema value)) component)
       :vector (normalized (nth value component) (numeric-range schema (nth value component)))
       :range (let [[low high] (numeric-range schema (nth value component))]
                (normalized (nth value component)

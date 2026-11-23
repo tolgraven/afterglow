@@ -4,6 +4,10 @@
 (defn finite-number? [value]
   (and (number? value) (Double/isFinite (double value))))
 
+(defn color-bounds [schema]
+  (let [[low high] (:bounds schema [0 1])]
+    [(max 0 low) (min 1 high)]))
+
 (defn valid-value?
   "Does value satisfy a parameter schema? Bounds are inclusive; unknown types
   are rejected. Color is three linear RGB components in [0,1]."
