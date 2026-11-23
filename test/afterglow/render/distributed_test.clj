@@ -61,3 +61,12 @@
       (is (nil? (run)))
       (is (= 1 (:rejected (distributed/status pool))))
       (finally (distributed/close! pool)))))
+
+(deftest coordinates-outside-float32-retain-the-float64-cpu-plan
+  (let [points [[1.0e100 0.0 0.0]]
+        field (distributed/prepare-group expression points (ir/compile-batch expression))]
+    (is (nil? (:packet field)))
+    (is (= :unsupported-remote-group (get-in field [:preparation-error :type])))
+    (is (= [1.0e100]
+           (vec (get-in (ir/evaluate-batch (:cpu-plan field) {} (:positions field) nil)
+                        [:outputs :dimmer :values]))))))

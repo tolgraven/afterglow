@@ -34,6 +34,14 @@
           (doseq [x p] (.put dst (finite-float x))))))
     data))
 
+(defn- packet [expressions positions uvs n]
+  (let [xy (fn [i] (if (instance? double/1 positions)
+                     [(aget ^doubles positions (* i 3)) (aget ^doubles positions (inc (* i 3)))]
+                     (subvec (nth positions i) 0 2)))
+        plan (ir/emit-glsl-batch expressions {:surface-uv? (some? uvs)})]
+    (cond-> {:op :prepare :id (token) :plan plan :positions (pack-points positions 3 n nil)}
+      (and uvs (:surface-uv (:inputs plan))) (assoc :surface-uvs (pack-points uvs 2 n xy)))))
+
 (defn prepare-group
   ([expressions positions cpu-plan] (prepare-group expressions positions cpu-plan nil))
   ([expressions positions cpu-plan uvs]
@@ -42,13 +50,10 @@
          cpu {:expressions expressions :positions positions :surface-uvs uvs :cpu-plan cpu-plan}
          n (if (instance? double/1 positions) (quot (alength ^doubles positions) 3) (count positions))]
      (if-not (<= 1 n max-heads) cpu
-       (let [xy (fn [i] (if (instance? double/1 positions)
-                          [(aget ^doubles positions (* i 3)) (aget ^doubles positions (inc (* i 3)))]
-                          (subvec (nth positions i) 0 2)))
-             plan (ir/emit-glsl-batch expressions {:surface-uv? (some? uvs)})]
-         (assoc cpu :count n
-                :packet (cond-> {:op :prepare :id (token) :plan plan :positions (pack-points positions 3 n nil)}
-                          (and uvs (:surface-uv (:inputs plan))) (assoc :surface-uvs (pack-points uvs 2 n xy)))))))))
+       (try
+         (assoc cpu :count n :packet (packet expressions positions uvs n))
+         (catch Exception error
+           (assoc cpu :preparation-error {:type :unsupported-remote-group :message (.getMessage error)})))))))
 
 (defn create []
   {:peers (atom {}) :lock (Object.)
