@@ -257,6 +257,28 @@
     (mapcat (fn [index child] (uniform-inputs child (conj path :args index)))
             (range) (:args expression))))
 
+(defn- arithmetic-component [op children]
+  (let [^ScalarExpression a (first children)
+        ^ScalarExpression b (get children 1)
+        n (count children)]
+    (if (= n 2)
+      (case op
+        :add (reify ScalarExpression (evalDouble [_ in] (+ (.evalDouble a in) (.evalDouble b in))))
+        :multiply (reify ScalarExpression (evalDouble [_ in] (* (.evalDouble a in) (.evalDouble b in))))
+        :min (reify ScalarExpression (evalDouble [_ in] (min (.evalDouble a in) (.evalDouble b in))))
+        :max (reify ScalarExpression (evalDouble [_ in] (max (.evalDouble a in) (.evalDouble b in)))))
+      (let [combine (case op
+                      :add (fn ^double [^double x ^double y] (+ x y))
+                      :multiply (fn ^double [^double x ^double y] (* x y))
+                      :min (fn ^double [^double x ^double y] (min x y))
+                      :max (fn ^double [^double x ^double y] (max x y)))]
+        (reify ScalarExpression
+          (evalDouble [_ in]
+            (loop [index 1, value (.evalDouble a in)]
+              (if (= index n) value
+                  (recur (inc index) (.invokePrim ^clojure.lang.IFn$DDD combine value
+                                                  (.evalDouble ^ScalarExpression (nth children index) in)))))))))))
+
 (defn- scalar-component
   "Compile one float64 component without per-node value vectors or apply."
   [expression component path slots]
@@ -283,18 +305,7 @@
             n (count children)
             operation
             (case op
-              (:add :multiply :min :max)
-              (let [combine (case op
-                              :add (fn ^double [^double x ^double y] (+ x y))
-                              :multiply (fn ^double [^double x ^double y] (* x y))
-                              :min (fn ^double [^double x ^double y] (min x y))
-                              :max (fn ^double [^double x ^double y] (max x y)))]
-                (reify ScalarExpression
-                  (evalDouble [_ inputs]
-                    (loop [index 1, value (.evalDouble a inputs)]
-                      (if (= index n) value
-                          (recur (inc index) (.invokePrim ^clojure.lang.IFn$DDD combine value
-                                                          (.evalDouble ^ScalarExpression (nth children index) inputs))))))))
+              (:add :multiply :min :max) (arithmetic-component op children)
               :subtract (if (= n 1)
                           (reify ScalarExpression (evalDouble [_ inputs] (- (.evalDouble a inputs))))
                           (reify ScalarExpression (evalDouble [_ inputs] (- (.evalDouble a inputs) (.evalDouble b inputs)))))
@@ -395,7 +406,7 @@
 
 (defn- load-position!
   "Copy a finite world-space xyz triple into this evaluation's private storage."
-  [positions flat? index ^doubles xyz]
+  [positions flat? ^long index ^doubles xyz]
   (if flat?
     (let [base (* (long index) 3)]
       (dotimes [axis 3]
@@ -418,7 +429,7 @@
                 (and (instance? doubles-class uvs) (= (alength ^doubles uvs) (* 2 (long n)))))
     (invalid! [:surface-uvs] "Supply one optional [u v] per head or a flat double-array of UV pairs")))
 
-(defn- load-uv! [uvs flat? index ^doubles inputs]
+(defn- load-uv! [uvs flat? ^long index ^doubles inputs]
   (if flat?
     (let [base (* (long index) 2)]
       (dotimes [axis 2]
