@@ -110,6 +110,90 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (storage/restore (assoc-in saved [:target 0 :batch :outputs :dimmer :values] (byte-array 7)) fixtures 1)))))
 
+(deftest constant-automatic-windows-reuse-only-a-committed-sample
+  (let [model (show nil)
+        id "0:1"
+        calls (atom [])
+        step (kf/time-invariant
+              (fn [{:keys [frame] :as ctx}]
+                (let [generation (:keyframe-generation frame)]
+                  (swap! calls conj [(double (:time-ms frame)) generation])
+                  (when (= :invalid generation) (throw (ex-info "Invalid live input" {})))
+                  (runtime/append-contributions
+                   ctx [{:kind :batch :batch {:target-ids [:lamp]
+                                              :outputs {:white {:type :number :components 1
+                                                                :values (double-array [(if (:hdr? frame) 0.6 0.3)])}}}}]))))
+        retry (fn [model]
+                (:model (control/apply-command model {:op :instance/retry :instance-id id
+                                                      :time-ms (:time-ms model) :source :test :command-id :retry
+                                                      :show-id (:show-id model) :epoch (:epoch model)})))
+        fixtures [{:id :lamp :position [0 0 0]}]
+        window #(get-in % [:keyframes id])
+        endpoint #(get-in (window %) [:origin 0 :batch :outputs :white :values])]
+    (with-open [pool (executor/create {:workers 2 :timeout-ms 5000})]
+      (let [tick (fn [model prior time inputs]
+                   (engine/advance model (merge {:time-ms time :keyframes prior :fixtures fixtures
+                                                  :keyframe-intervals {id {:ms 100}}}
+                                                 inputs)
+                                   (constantly step) (executor/mapper pool)))
+            initial (tick model nil 0 {})
+            within (tick (:model initial) (:keyframes initial) 25 {})
+            overdue (tick (:model within) (:keyframes within) 175 {})
+            longer (tick (:model overdue) (:keyframes overdue) 200 {:keyframe-intervals {id {:ms 200}}})
+            new-rig (tick (:model longer) (:keyframes longer) 225 {:fixtures (into [] fixtures)})
+            hdr (tick (:model new-rig) (:keyframes new-rig) 250 {:hdr? true})
+            tempo (tick (assoc-in (:model hdr) [:transport :bpm] 90) (:keyframes hdr) 260 {:hdr? true})
+            saved (storage/restore (storage/freeze (window tempo)) fixtures (:epoch model))
+            resumed (tick (:model tempo) {id saved} 275 {:hdr? true})
+            new-epoch (tick (update (:model resumed) :epoch inc) (:keyframes resumed) 285 {:hdr? true})
+            failed (tick (:model new-epoch) (:keyframes new-epoch) 300 {:keyframe-generation :invalid})
+            quarantined (tick (:model failed) (:keyframes failed) 325 {:keyframe-generation :invalid})
+            recovered (tick (retry (:model quarantined)) (:keyframes quarantined) 350 {})]
+        (is (= [0 225 250 260 275 285 300 350] (mapv (comp long first) @calls)))
+        (is (= [nil nil nil nil nil nil :invalid nil] (mapv second @calls)))
+        (is (identical? (endpoint initial) (endpoint within)))
+        (is (identical? (endpoint initial) (endpoint overdue)))
+        (is (identical? (endpoint initial) (endpoint longer)))
+        (is (not (identical? (endpoint longer) (endpoint new-rig))))
+        (is (not (identical? (endpoint new-rig) (endpoint hdr))))
+        (is (not (identical? (endpoint hdr) (endpoint tempo))))
+        (is (not (identical? (endpoint tempo) (endpoint resumed))))
+        (is (not (identical? (endpoint resumed) (endpoint new-epoch))))
+        (is (= [0.6] (:result (kf/inspect (window resumed) :lamp :white))))
+        (is (= [:effect/failed] (mapv :type (:fault-events failed))))
+        (is (empty? (:contributions failed)))
+        (is (empty? (:keyframes failed)))
+        (is (empty? (:contributions quarantined)))
+        (is (= [:effect/recovered] (mapv :type (:fault-events recovered))))
+        (is (= [0.3] (:result (kf/inspect (window recovered) :lamp :white))))
+        (is (= [0.3] (vec (endpoint initial))))))))
+
+(deftest input-preprocessing-and-authored-windows-use-their-ordinary-sampler
+  (let [calls (atom [])
+        stable (kf/time-invariant
+                (fn [{:keys [frame] :as ctx}]
+                  (swap! calls conj (:time-ms frame))
+                  (update ctx :assignments conj {:target-id :lamp :attribute :white :value 0.3})))
+        changing (fn [ctx]
+                   (if (get-in ctx [:frame :keyframe-generation])
+                     (assoc ctx :assignments [{:target-id :lamp :attribute :dimmer :value 0.6}])
+                     ctx))
+        automatic (fn [step model prior time generation]
+                    (engine/advance model {:time-ms time :keyframes prior :keyframe-generation generation
+                                           :keyframe-intervals {"0:1" {:ms 100}}}
+                                    (constantly step)))
+        preserved (kf/with-inputs stable changing {:preserve-time-invariance? true})
+        first (automatic preserved (show nil) nil 0 nil)
+        overridden (automatic preserved (:model first) (:keyframes first) 25 :new-input)
+        default-step (kf/with-inputs stable identity)]
+    (is (= [0.0 25.0 125.0] (mapv double @calls)))
+    (is (= [0.6] (:result (kf/inspect (get-in overridden [:keyframes "0:1"]) :lamp :dimmer))))
+    (is (seq (:keyframes overridden)))
+    (reset! calls [])
+    (automatic default-step (show nil) nil 0 nil)
+    (advance (show {:interval {:ms 100}}) nil (constantly stable) 0)
+    (is (= [0.0 100.0 0.0 100.0] (mapv double @calls)))))
+
 (deftest changes-to-tempo-and-epoch-discard-the-old-prediction
   (let [compile (compile-recorder (atom [])) model (show {:interval {:bars 1}})
         first (advance model nil compile 0)
@@ -213,6 +297,56 @@
             sample (kf/inspect (get-in half [:keyframes "0:1"]) :lamp attr)]
         (is (:forecast-failed? sample))
         (is (== 1.0 (get-in sample [:result 0 1])))))))
+
+(deftest invariant-geometry-keeps-the-ordinary-forecast-check-and-fallback
+  (let [model (show nil)
+        fixtures [{:id :lamp :position [10.0 0.0 0.0]}]
+        id "0:1"]
+    (doseq [[attribute point valid?] [[:aim [10.0 0.0 0.0] false]
+                                     [:aim [11.0 0.0 0.0] true]
+                                     [:direction [0.0 0.0 0.0] false]
+                                     [:direction [1.0 0.0 0.0] true]]
+            batch? [false true]]
+      (let [run (fn [wrap]
+                  (let [calls (atom 0)
+                        step (wrap (fn [ctx]
+                                     (swap! calls inc)
+                                     (if batch?
+                                       (runtime/append-contributions
+                                        ctx [{:kind :batch
+                                              :batch {:target-ids [:lamp]
+                                                      :outputs {attribute {:type :vec3 :components 3
+                                                                           :values (double-array point)}}}}])
+                                       (assoc ctx :assignments [{:target-id :lamp :attribute attribute :value point}]))))
+                        advance (fn [previous time-ms]
+                                  (engine/advance (:model previous)
+                                                  {:time-ms time-ms :fixtures fixtures :keyframes (:keyframes previous)
+                                                   :keyframe-intervals {id {:ms 100}}}
+                                                  (constantly step)))
+                        frames (vec (rest (reductions advance {:model model} [0 25 175])))]
+                    {:frames frames :calls @calls}))
+            ordinary (run kf/predictable)
+            invariant (run kf/time-invariant)
+            inspected (fn [lane]
+                        (mapv #(kf/inspect (get-in % [:keyframes id]) :lamp attribute) (:frames lane)))]
+        (is (= (inspected ordinary) (inspected invariant)))
+        (is (= (repeat 3 (not valid?)) (map (comp boolean :forecast-failed?) (inspected invariant))))
+        (is (= (if valid? 4 5) (:calls ordinary)))
+        (is (= (if valid? 1 3) (:calls invariant)))))))
+
+(deftest authored-shared-endpoints-still-interpolate-signed-zero
+  (let [model (show {:interval {:ms 100}})
+        step (kf/time-invariant
+              #(assoc % :assignments [{:target-id :lamp :attribute :white :value -0.0}]))
+        initial (advance model nil (constantly step) 0)
+        path [:keyframes "0:1"]
+        origin (get-in initial (conj path :origin))
+        shared (assoc-in initial (conj path :target) origin)
+        regular (advance (:model initial) initial (constantly step) 1/20)
+        at-quarter (advance (:model initial) shared (constantly step) 1/20)
+        bits #(Double/doubleToRawLongBits (get-in % [:assignments 0 :value]))]
+    (is (= Long/MIN_VALUE (bits initial)))
+    (is (= 0 (bits regular) (bits at-quarter)))))
 
 (deftest packed-aim-and-direction-check-every-head-in-its-own-coordinate-space
   (let [fixtures [{:id :left :position [0 2 0]} {:id :right :position [5 0 0]}]

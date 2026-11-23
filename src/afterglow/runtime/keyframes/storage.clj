@@ -25,7 +25,8 @@
 (defn freeze [window]
   (when (and window (not (:forecast-failed? window)))
     (let [encode #(values/map-columns pack %)]
-      (assoc (select-keys window window-keys) :origin (encode (:origin window)) :target (encode (:target window))))))
+      (assoc (with-meta (select-keys window window-keys) nil)
+             :origin (encode (:origin window)) :target (encode (:target window))))))
 
 (defn restore [saved fixtures epoch]
   (when saved
@@ -40,6 +41,6 @@
                      (with-meta (values/validate-blocks! (values/map-columns unpack blocks) (nth inputs 5))
                        {::values/restored true}))
             [origin target] (values/endpoints (decode (:origin saved)) (decode (:target saved)) fixtures (:curve options))]
-        (assoc (select-keys saved window-keys)
+        (assoc (with-meta (select-keys saved window-keys) nil)
                :epoch epoch :rig fixtures :origin origin :target target
                :result (values/blend origin target progress (nth inputs 5)))))))
