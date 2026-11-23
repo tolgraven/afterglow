@@ -1,0 +1,15 @@
+{
+  "matched-positional-case-weights": true,
+  "replay": {
+    "position": {
+      "frames": 12,
+      "artdmx-packets": 1896,
+      "compact-bytes": 34538136
+    },
+    "mixed": {
+      "frames": 12,
+      "artdmx-packets": 1896,
+      "compact-bytes": 34538136
+    }
+  }
+}
