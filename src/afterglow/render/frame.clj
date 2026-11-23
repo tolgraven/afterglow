@@ -426,8 +426,15 @@
 (declare pack-value!)
 
 (defn- create-buffers [patch]
-  (let [indexed (object-array (map (fn [_] (byte-array 512)) (:universes patch)))]
-    {:indexed indexed :universes (into (sorted-map) (map-indexed (fn [i u] [u (aget indexed i)]) (:universes patch)))}))
+  (let [universe-ids (:universes patch)
+        universe-count (count universe-ids)
+        ^objects indexed (object-array universe-count)]
+    (loop [index 0, universes (sorted-map)]
+      (if (< index universe-count)
+        (let [buffer (byte-array 512)]
+          (aset indexed (int index) buffer)
+          (recur (inc index) (assoc universes (nth universe-ids index) buffer)))
+        {:indexed indexed :universes universes}))))
 
 (defn- write-off-bytes! [universes off-bytes]
   (reduce-kv (fn [_ [u index] value]
