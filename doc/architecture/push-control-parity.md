@@ -107,6 +107,14 @@ control cases exercise the actual MIDI decoder, composable session, parameter
 validation, versioned cue publication and shared command reducer with capture
 transports. No MIDI port, native display or physical lighting output is opened.
 
+## Choosing a display view
+
+Display actions are local to each controller session. Push 2 Session opens an eight-page bank. The upper display buttons choose the corresponding page, and Page Left/Right change banks. Choosing a page resets the cue grid origin. Shift + Session cycles the miniature color scheme through combined, cue and type colors. The regular cue pads still control the selected page.
+
+Layout opens the simulator. Shift + Layout opens rig configuration. In either scene, Mix changes the camera between fit, panorama and audience. In rig configuration, Page Left/Right select fixtures. Press the same display button again to return. Device opens parameters, and Shift + Device cycles the visual format. In the history view Shift + Page Left/Right zoom the beat window from half a beat to sixteen beats. Clip selects captured audio. Shift + Clip selects the material stage trace.
+
+Push 3 User Mode can bind captured buttons to the same semantic actions, including `:display/pages`, `[:display/select-page 0]`, `:display/rig`, and `:display/zoom-in`. `push-3/control-view` supplies the selected view to a display consumer. The captured button tests use virtual MIDI transports.
+
 ## Cue pad visualization
 
 An optional session feedback source acquires a handle with `:open!` and calls

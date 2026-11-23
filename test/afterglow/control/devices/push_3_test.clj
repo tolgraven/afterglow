@@ -159,3 +159,34 @@
         (is (nil? (:target-picker (push/control-view (:local (session/snapshot device)) @show))))
         (is (empty? (:errors (session/snapshot device))))
         (finally (session/close! device))))))
+
+(deftest captured-buttons-select-pages-without-launching-cues
+  (let [config (assoc options :button-bindings {:blackout :display/pages :right [:display/select-page 1]})
+        profile (push/profile config)
+        show (assoc-in (initial-model) [:pages :wash] {:id :wash :cells {}})
+        press (fn [state cc] ((:input profile) state ((:decode profile) [0xb4 cc 127]) show {}))
+        overview (press (:initial-state profile) 22)
+        selected (press (:state overview) 23)]
+    (is (empty? (:commands selected)))
+    (is (= :pages (:display-mode (push/control-view (:state overview) show))))
+    (is (= :wash (:page (push/control-view (:state selected) show))))))
+
+(deftest mpe-page-selection-retains-held-voices-and-routes-new-presses
+  (let [options {:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1 2]}
+                 :mpe-note-cells {40 [0 0]}
+                 :button-bindings {:blackout :display/pages :right [:display/select-page 1]}}
+        {:keys [show log receive device]} (harness options)
+        launched #(filter (fn [command] (= :cue/launch (:op command))) @log)]
+    (try
+      (swap! show assoc-in [:pages :wash] {:id :wash :cells {[0 0] :latched}})
+      (session/open! device)
+      (@receive [0x91 40 100])
+      (let [first-instance (:id (first (vals (:instances @show))))]
+        (@receive [0xb4 22 127])
+        (@receive [0xb4 23 127])
+        (@receive [0x92 40 100])
+        (is (= [:held :latched] (mapv :cue-id (launched))))
+        (@receive [0x81 40 0])
+        (is (= first-instance (:instance-id (last (filter #(= :instance/end (:op %)) @log)))))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
