@@ -31,11 +31,22 @@
 (defn- response-deadline [deadline timeout-ms]
   (min deadline (+ (System/nanoTime) (* 1000000 (long timeout-ms)))))
 
+(defn- discard-pending! [^DatagramSocket socket deadline]
+  ;; ArtTodData has no transaction number. On a reused session a duplicate table
+  ;; may still be queued from the last discovery on this same physical port.
+  (let [discard (DatagramPacket. (byte-array 1) 1)]
+    (.setSoTimeout socket 1)
+    (loop []
+      (deadline/remaining-ms deadline)
+      (when (try (.receive socket discard) true (catch SocketTimeoutException _ false))
+        (recur)))))
+
 (defn- discover! [socket {:keys [bind-index physical-port timeout-ms]} deadline universe full?]
   (when-not (or (nil? full?) (boolean? full?))
     (rdm/fail! "Full discovery requires an explicit boolean" {:full? full?}))
   (let [cached-request (packet/discovery-packet universe false)
         decode #(packet/read-tod % universe bind-index physical-port)]
+    (discard-pending! socket deadline)
     (send! socket (if full? (packet/discovery-packet universe true) cached-request) deadline)
     (loop [table {} attempt 0 window (response-deadline deadline timeout-ms)]
       (let [block (try (receive! socket window decode) (catch SocketTimeoutException _ :timeout))]

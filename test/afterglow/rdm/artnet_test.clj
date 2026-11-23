@@ -208,3 +208,20 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (request! "ForceDiscovery" {:universe 1 :full? "false"})))
       (is (thrown? clojure.lang.ExceptionInfo ((run-command command) connection deadline))))))
+
+(deftest a-reused-session-discards-queued-tod-before-flushing-the-gateway
+  (let [duplicate-sent (promise)]
+    (with-node {}
+      (fn [server]
+        (let [[_ dst] (receive server)
+              old-table (tod 1 0 [1])]
+          (send-to server dst old-table)
+          (send-to server dst old-table)
+          (deliver duplicate-sent true)
+          (let [[flush _] (receive server)]
+            (is (= 0x82 (flush 9)))
+            (send-to server dst (tod 1 0 [2])))))
+      (fn [{:keys [request!]} _]
+        (is (= ["1234:00000001"] (:uids (request! "GetUIDs" {:universe 4661}))))
+        (is (= true (deref duplicate-sent 1000 nil)))
+        (is (= ["1234:00000002"] (:uids (request! "ForceDiscovery" {:universe 4661 :full? true}))))))))
