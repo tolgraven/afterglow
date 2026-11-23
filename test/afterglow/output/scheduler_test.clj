@@ -1,6 +1,7 @@
 (ns afterglow.output.scheduler-test
   (:require [clojure.test :refer [deftest is]]
             [afterglow.render.frame :as render]
+            [afterglow.render.presentation :as presentation]
             [afterglow.output.retirement :as retirement]
             [afterglow.output.scheduler :as scheduler]))
 
@@ -245,4 +246,20 @@
           (is (true? (scheduler/complete! owner new (frame 31 0 0))))
           (reset! clock 50.0)
           (is (= 31 (get-in (scheduler/publish! owner) [:universes 0 0])))))
+      (finally (scheduler/close! owner)))))
+
+(deftest publisher-spaces-sends-after-expensive-packet-materialization
+  (let [clock (atom 0.0) next-call (atom nil) sent (atom []) owner (capture clock sent)
+        materialize presentation/materialize]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due f] (reset! next-call [due f]))
+                    presentation/materialize (fn [packet]
+                                               (reset! clock 48.0)
+                                               (materialize packet))]
+        (scheduler/complete! owner (scheduler/begin-frame! owner 0 @patch {} false) (frame 22 0 0))
+        (scheduler/start! owner 25)
+        (reset! clock 25.0)
+        ((second @next-call))
+        (is (== 48 (get-in (scheduler/status owner) [:output-timing :sent-at-ms])))
+        (is (== 75 (first @next-call)) "A send at 50 ms would bunch two real sink invocations"))
       (finally (scheduler/close! owner)))))

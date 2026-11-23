@@ -197,8 +197,11 @@
                   :source-input-age-ms (when (and (:sent-at-ms packet) (:inputs-at-ms packet))
                                          (- (:sent-at-ms packet) (:inputs-at-ms packet)))}]
       (swap! (:status owner) #(-> % (assoc :output-timing timing)
-                                  (update :skipped-output-slots (fnil + 0) (- slot previous 1)))))
-    (catch Exception error (swap! (:status owner) assoc :error (.getMessage error)))))
+                                  (update :skipped-output-slots (fnil + 0) (- slot previous 1))))
+      timing)
+    (catch Exception error
+      (swap! (:status owner) #(-> % (assoc :error (.getMessage error)) (update :failed-publications (fnil inc 0))))
+      nil)))
 
 (defn- start-publications! [owner executor grid]
   (let [now (:now-ms owner)]
@@ -211,8 +214,9 @@
                 (let [started (now) slot (timeline/slot-at grid started)]
                   (if (< slot wanted)
                     (queue-slot wanted previous)
-                    (do (send-slot! owner grid slot previous started)
-                        (queue-slot (timeline/next-output-slot grid slot started (now)) slot))))))]
+                    (let [timing (send-slot! owner grid slot previous started)
+                          sent (or (:sent-at-ms timing) started)]
+                      (queue-slot (timeline/next-output-slot grid slot sent (now)) slot))))))]
       (queue-slot 1 0))))
 
 (defn- render-slot! [owner render! ticket started]
