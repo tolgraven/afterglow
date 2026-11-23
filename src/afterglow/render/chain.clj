@@ -1,6 +1,6 @@
 (ns afterglow.render.chain
-  "Lower adjacent pure field requests onto one native-space IR batch. The ordinary
-  attribution and validation path remains available for every rejected chain."
+  "Lower pure field requests onto native-space IR batches. Keep original requests
+  available for validation and attribution when a plan cannot prove coverage."
   (:require [afterglow.render.frame :as frame]
             [afterglow.render.ir :as ir])
   (:import [java.util Arrays]))
@@ -38,10 +38,6 @@
       (if (and (instance? double/1 a) (instance? double/1 b))
         (Arrays/equals ^doubles a ^doubles b)
         (= a b))))
-
-(defn- same-layout? [a b]
-  (and (same-coordinates? (:positions a) (:positions b))
-       (same-coordinates? (:surface-uvs a) (:surface-uvs b))))
 
 (defn- shape [block]
   (let [{:keys [batch]} block]
@@ -183,42 +179,65 @@
          (= (set (map :attribute fields)) (set (keys (expressions group))))
          (every? (fn [{:keys [attribute type]}] (= type (frame/batch-field-type attribute))) fields))))
 
-(defn- prepare [prepare-group shapes]
+(defn- valid-chart? [uvs n]
+  (let [finite? #(and (number? %) (<= (abs (double %)) Float/MAX_VALUE))]
+    (cond
+      (nil? uvs) true
+      (instance? double/1 uvs) (and (= (* 2 n) (alength ^doubles uvs)) (every? finite? uvs))
+      (vector? uvs) (and (= n (count uvs))
+                         (every? #(or (nil? %) (and (vector? %) (= 2 (count %)) (every? finite? %))) uvs))
+      :else false)))
+
+(defn- compatible-layout? [base group masked?]
+  (and (same-coordinates? (:positions base) (:positions group))
+       (or (same-coordinates? (:surface-uvs base) (:surface-uvs group))
+           ;; The surviving request keeps its own program. A captured chart on
+           ;; the covered material is immaterial to a follower that never reads UV.
+           (and masked? (:surface-uvs base) (nil? (:surface-uvs group))
+                (false? (get-in group [:cpu-plan :surface-uv?]))
+                (not-any? #(some #{[:surface-uv]} (ir/input-paths %)) (vals (expressions group)))))))
+
+(defn- prepare [prepare-group shapes masked?]
   (let [groups (mapv first shapes) first-group (first groups)
         targets (peek (first shapes))]
     ;; A repeated row has already seen writes from other rows of its effect.
     ;; Check once on plan creation, before compiling a row-independent shader.
     (when (and (every? typed-fields? groups)
+               (or (not masked?) (and (every? #(= targets (peek %)) (rest shapes))
+                                      (not-any? :preparation-error groups)
+                                      (valid-chart? (:surface-uvs first-group) (count targets))))
                (= (count targets) (count (set targets)))
-               (every? #(same-layout? first-group %) (rest groups)))
+               (every? #(compatible-layout? first-group % masked?) (rest groups)))
       (let [stages (mapv stage (range) shapes)
             outputs (reduce (fn [acc stage] (or (fold-stage acc stage) (reduced nil))) {} stages)]
         (when outputs
-          {:stages stages
-           :coordinate-ranges (coordinate-ranges first-group (mapcat (comp vals :fields) stages))
-           :prepared (prepare-group outputs (:positions first-group) (ir/compile-batch outputs) (:surface-uvs first-group))})))))
+          (cond-> {:stages stages
+                   :coordinate-ranges (coordinate-ranges first-group (mapcat (comp vals :fields) stages))}
+            (not masked?) (assoc :prepared (prepare-group outputs (:positions first-group)
+                                                         (ir/compile-batch outputs) (:surface-uvs first-group)))))))))
 
-(defn- cached-plan [cache prepare-group shapes]
-  (let [entries @cache]
-    (if (contains? entries shapes) (get entries shapes)
-      (let [plan (prepare prepare-group shapes)]
-        (swap! cache #(assoc (if (< (count %) 32) % {}) shapes plan))
+(defn- cached-plan [cache prepare-group shapes masked?]
+  (let [entries @cache
+        k (if masked? [::across-masks shapes] shapes)]
+    (if (contains? entries k) (get entries k)
+      (let [plan (prepare prepare-group shapes masked?)]
+        (swap! cache #(assoc (if (< (count %) 32) % {}) k plan))
         plan))))
 
-(defn- fuse-run [cache prepare-group blocks]
-  (when (< 1 (count blocks))
-    (try
-      (when-let [{:keys [stages prepared coordinate-ranges]} (cached-plan cache prepare-group (mapv shape blocks))]
-        (let [params (captured stages blocks)
-              bounds-env (assoc params ::positions coordinate-ranges)
-              safe? (reduce #(or (safe-stage %1 %2 bounds-env) (reduced nil)) {} stages)]
-          (when safe?
+(defn- fuse-run [cache prepare-group blocks masked?]
+  (try
+    (when-let [{:keys [stages prepared coordinate-ranges]}
+               (cached-plan cache prepare-group (mapv shape blocks) masked?)]
+      (let [params (captured stages blocks)
+            env (assoc params ::positions coordinate-ranges)]
+        (when (reduce #(or (safe-stage %1 %2 env) (reduced nil)) {} stages)
+          (if masked? (peek blocks)
             {:kind :batch :source (:source (peek blocks))
              :batch {:target-ids (get-in (first blocks) [:batch :target-ids]) :blend :replace
-                     :field-request {:group prepared :env {:params params}}}})))
-      ;; Missing parameters, unsupported ranges and compiler limits use the original
-      ;; requests so the show can attribute any failure to the right running effect.
-      (catch RuntimeException _ nil))))
+                     :field-request {:group prepared :env {:params params}}}}))))
+    ;; Missing parameters, unsupported ranges and compiler limits use the original
+    ;; requests so the show can attribute any failure to the right running effect.
+    (catch RuntimeException _ nil)))
 
 (defn- append-runs
   "Try the entire aligned interval first. Split only at semantic, range or IR
@@ -226,13 +245,13 @@
   compile-batch caps each output at 4,096 nodes and 64 nested operations."
   [cache prepare-group out blocks]
   (if (= 1 (count blocks)) (conj! out (first blocks))
-    (if-let [fused (fuse-run cache prepare-group blocks)]
+    (if-let [fused (fuse-run cache prepare-group blocks false)]
       (conj! out fused)
       (let [i (quot (count blocks) 2)
             left (append-runs cache prepare-group out (subvec blocks 0 i))]
         (append-runs cache prepare-group left (subvec blocks i))))))
 
-(defn fuse
+(defn- fuse-adjacent
   "Replace adjacent compatible requests over identical ordered target IDs with
   one prepared field request. Native layers, annotation-bearing blocks and
   selections that differ are barriers. Each field starts with an opaque replace.
@@ -257,3 +276,50 @@
                   (if (= (count run) (count lowered))
                     (recur end consumed result)
                     (recur end end (into (into (or result []) (subvec ordered consumed start)) lowered))))))))))))
+
+(def ^:private separate-scalars #{:white :dimmer :focus :zoom})
+
+(defn- opaque-request? [{:keys [batch] :as block}]
+  (and (candidate? block) (= :replace (:blend batch :replace)) (== 1 (:opacity batch 1))))
+
+(defn- independent-color-mask? [member-count block]
+  (let [{:keys [id targets transforms inherit-backdrop? target-weights]} (:native-layer block)]
+    (and (= 1 (get member-count id)) (nil? targets) (not inherit-backdrop?)
+         (empty? transforms) (map? target-weights)
+         (candidate? (dissoc block :native-layer)) (typed-fields? (group block))
+         (= #{:color} (set (keys (expressions (group block))))))))
+
+(defn- join-across-masks [cache prepare-group member-count lower masks upper]
+  (when (and (opaque-request? lower) (opaque-request? upper))
+    (let [attributes (keys (expressions (group lower)))
+          final (expressions (group upper))]
+      (when (and (every? separate-scalars attributes) (every? final attributes)
+                 (every? #(independent-color-mask? member-count %) masks))
+        ;; All earlier fields are physically overwritten. The existing reducer
+        ;; proves their captured values and blended ranges before removing them.
+        (fuse-run cache prepare-group [lower upper] true)))))
+
+(defn- masked-runs [blocks]
+  (let [masked? #(:native-layer (nth blocks %))]
+    (filter #(masked? (first %)) (partition-by (comp boolean masked?) (range (count blocks))))))
+
+(defn fuse
+  "Lower compatible field requests while preserving ordered mask writes. A
+  single-member color mask can separate a fully overwritten scalar material
+  from its replacement. Unknown fields, transforms, partial opacity and
+  previous-target dependencies retain their original order and validation."
+  [cache prepare-group blocks]
+  (let [ordered (fuse-adjacent cache prepare-group blocks)]
+    (if-not (and (< 2 (count ordered)) (some :native-layer ordered)) ordered
+      (let [counts (frequencies (keep #(get-in % [:native-layer :id]) ordered))]
+        (loop [runs (seq (masked-runs ordered)) consumed 0 out nil]
+          (if-let [run (first runs)]
+            (let [start (first run) lower (dec start) upper (inc (last run))
+                  masks (subvec ordered start upper)
+                  fused (when (and (<= consumed lower) (< upper (count ordered)))
+                          (join-across-masks cache prepare-group counts (nth ordered lower) masks (nth ordered upper)))]
+              (if fused
+                (let [prefix (into (or out []) (subvec ordered consumed lower))]
+                  (recur (next runs) (inc upper) (conj (into prefix masks) fused)))
+                (recur (next runs) consumed out)))
+            (if out (into out (subvec ordered consumed)) ordered)))))))
