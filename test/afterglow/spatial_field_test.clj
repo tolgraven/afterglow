@@ -178,3 +178,16 @@
           (is (== (* (:min-scale transform) ((:distance sphere) original))
                   ((:distance projected) p)))
           (is (= ((:inside? sphere) original) ((:inside? projected) p))))))))
+
+(deftest decimal-points-at-a-transformed-hard-edge
+  (let [volume {:shape :sphere :radius 0.1M :position [0.3M 0 0]}
+        scaled (assoc volume :scale [1 1 1])
+        local (shape/prepare volume)
+        world (shape/prepare scaled)
+        inverse (:inverse (shape/coordinates scaled (:bounds local)))]
+    (is ((:inside? local) [0.4M 0 0]))
+    (doseq [x [0.3999999999999999M 0.4M 0.4000000000000001M]]
+      (let [point [x 0 0]
+            local-point (inverse point)]
+        (is (== ((:distance local) local-point) ((:distance world) point)))
+        (is (= ((:inside? local) local-point) ((:inside? world) point)))))))
