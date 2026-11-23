@@ -6,6 +6,7 @@
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
             [afterglow.control.devices.session :as session]
+            [afterglow.control.display :as display]
             [afterglow.control.devices.target-picker :as targets]
             [afterglow.control.params :as params]
             [afterglow.control.views :as views]))
@@ -118,7 +119,9 @@
         state (update state :buttons (if down? conj disj) id)
         [x y] (:origin state)]
     (if (and down? (not previously-down?))
-      (case (get-in options [:button-bindings id])
+      (let [action (get-in options [:button-bindings id])]
+        (if (display/action? action) {:state (display/apply-action state model action)}
+        (case action
         :blackout {:state state :commands [{:op :blackout/set :value (not (:blackout? model))}]}
         :transport {:state state :commands [{:op :transport/set :transport {:playing? (not (get-in model [:transport :playing?]))}}]}
         :target-picker {:state (targets/toggle state (:target-search options) model)}
@@ -127,7 +130,7 @@
         :page-up {:state (assoc state :origin [x (+ y 8)])}
         :page-down {:state (assoc state :origin [x (max 0 (- y 8))])}
         :suspend {:state state :lifecycle :suspend}
-        {:state state})
+        {:state state})))
       {:state state})))
 
 (defn- input [options state event model envelope]
@@ -152,13 +155,14 @@
                 (cond-> (:controls state)
                   (get-in state [:mpe :selected-instance])
                   (assoc :selected-instance (get-in state [:mpe :selected-instance]))) state)]
-   {:page (:page-id state) :origin (:origin state)
+   (merge (display/view-options state model)
+          {:page (:page-id state) :origin (:origin state)
    :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
    :target-picker (targets/view state)
    :touches (:touches state) :master (:master model) :blackout? (:blackout? model)
    :parameters (get-in model [:instances (:selected-instance state) :params] {})
    :cells (mapv (fn [[x y]] {:x x :y y :cue (some->> (cue-at state model [x y]) :id (views/cue-view model))})
-                (for [y (range 8) x (range 8)] [x y]))}))
+                (for [y (range 8) x (range 8)] [x y]))})))
 
 (defn- acknowledge [state command ack]
   (let [hold (when-let [gesture (:gesture-id command)]
@@ -194,7 +198,8 @@
               "Encoder bindings need a captured ID, numeric parameter/master target and positive step" {:id id}))
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
-                   (#{:blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action))
+                   (or (display/action? action)
+                       (#{:blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
@@ -248,7 +253,8 @@
                               (and (:target-picker control-state) press? cell)
                               {:state (assoc state :controls (targets/pad control-state key cell))}
                               :else
-                              (let [result ((:input notes) (:mpe state) bytes model envelope)
+                              (let [note-state (merge (:mpe state) (select-keys control-state [:page-id :origin]))
+                                    result ((:input notes) note-state bytes model envelope)
                                     routed (targets/launch control-state (assoc result :state control-state))]
                                 (assoc routed :state (assoc state :controls (:state routed) :mpe (:state result))))))
                   (and control-event (not (#{:pad :poly-pressure :mono-pressure} (:type control-event))))

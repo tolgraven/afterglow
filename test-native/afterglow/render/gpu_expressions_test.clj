@@ -93,3 +93,22 @@
     (is (not= (gpu/group fields positions uvs)
               (gpu/group fields positions (assoc-in uvs [1 0] 0.85))))
     (is (= (gpu/group {:aim position} positions) (gpu/group {:aim position} positions uvs)))))
+
+(deftest uniform-groups-read-one-native-vertex-and-return-owned-field-arrays
+  (let [positions (mapv (fn [i] [i (* -0.2 i) (* 0.5 i)]) (range 13))
+        outputs {:color (param :gain :vec3) :white (param :bias :number)}
+        plan (ir/compile-batch outputs)]
+    (with-open [runner (gpu/open! outputs positions)]
+      (let [{:keys [count vertices readback]} (:resources runner)
+            first-frame (gpu/evaluate! runner env)
+            second-env (assoc-in env [:params :bias] 0.8)]
+        (is (= [13 1 4] [count vertices (.capacity ^java.nio.FloatBuffer readback)]))
+        (verify (ir/evaluate-batch plan env positions) first-frame)
+        (aset-double ^doubles (get-in first-frame [:outputs :color :values]) 0 99.0)
+        (verify (ir/evaluate-batch plan second-env positions) (gpu/evaluate! runner second-env))))
+    (doseq [varying [position {:op :surface-uv :axis :u}]]
+      (with-open [runner (gpu/open! (assoc outputs :extra varying) positions)]
+        (is (= (count positions) (get-in runner [:resources :vertices])))))
+    (with-open [empty-runner (gpu/open! outputs [])]
+      (is (zero? (get-in empty-runner [:resources :vertices])))
+      (is (zero? (:count (gpu/evaluate! empty-runner env)))))))

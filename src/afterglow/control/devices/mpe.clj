@@ -16,10 +16,12 @@
 (defn- diagnose [state entries]
   (update state :diagnostics #(vec (take-last 32 (into % entries)))))
 
-(defn- cue-id [options model note]
+(defn- cue-id [options state model note]
   (or (get (:note-cues options) note)
       (when-let [cell (get (:note-cells options) note)]
-        (get-in model [:pages (get options :page-id :main) :cells cell]))
+        (let [page (get state :page-id (get options :page-id :main))
+              coordinate (mapv + cell (get state :origin [0 0]))]
+          (get-in model [:pages page :cells coordinate])))
       (:cue-id options)))
 
 (defn- mapped-commands [instance-id values]
@@ -32,7 +34,7 @@
     (expressive/plan schemas (:axes options) (:params policy) (dissoc policy :params))))
 
 (defn- note-on [options state event model envelope]
-  (let [id (cue-id options model (:note event)) cue (get-in model [:registry :cues id])
+  (let [id (cue-id options state model (:note event)) cue (get-in model [:registry :cues id])
         current (get-in model [:registry :effects (:effect-id cue)])
         definition (if-let [version (:effect-version cue)]
                      (or (get-in model [:registry :versions [:effects (:effect-id cue) version]])

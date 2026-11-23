@@ -104,17 +104,22 @@
        (assoc :surface-uvs
               (snapshot-uvs xyz surface-uvs))))))
 
+(defn- draw-count [plan heads]
+  (let [inputs (:inputs plan)]
+    (if (or (:position inputs) (:surface-uv inputs)) heads (min 1 heads))))
+
 (defn compile-program! [^GL3 gl {:keys [positions surface-uvs plan]}]
   (let [n (quot (count positions) 3)
-        points (context/floats-buffer (+ (count positions) (count surface-uvs)))
-        readback (context/floats-buffer (* n (:stride plan)))]
+        vertices (draw-count plan n)
+        points (context/floats-buffer (* vertices (if surface-uvs 5 3)))
+        readback (context/floats-buffer (* vertices (:stride plan)))]
     (if surface-uvs
-      (dotimes [i n]
+      (dotimes [i vertices]
         (dotimes [axis 3] (.put points (float (nth positions (+ (* i 3) axis)))))
         (dotimes [axis 2] (.put points (float (nth surface-uvs (+ (* i 2) axis))))))
-      (doseq [value positions] (.put points (float value))))
+      (dotimes [i (* 3 vertices)] (.put points (float (nth positions i)))))
     (.flip points)
-    (assoc (configure! gl plan points n) :plan plan :count n :readback readback)))
+    (assoc (configure! gl plan points vertices) :plan plan :count n :vertices vertices :readback readback)))
 
 (defn open!
   "Compile a map of named expression trees and upload ordered fixture positions
@@ -144,10 +149,18 @@
       3 (.glUniform3f gl location x y z)
       4 (.glUniform4f gl location x y z w))))
 
-(defn- output-field [^FloatBuffer data n stride {:keys [type components offset attribute]}]
+(defn- broadcast! [^doubles values components]
+  ;; The first tuple has already been checked and widened from GPU float32.
+  (loop [filled (long components)]
+    (when (< filled (alength values))
+      (let [more (min filled (- (alength values) filled))]
+        (System/arraycopy values 0 values filled more)
+        (recur (+ filled more))))))
+
+(defn- output-field [^FloatBuffer data n vertices stride {:keys [type components offset attribute]}]
   (let [width (long components) offset (long offset) stride (long stride)
         values (double-array (* n width))]
-    (dotimes [head n]
+    (dotimes [head vertices]
       (let [start (+ (* head stride) offset) dest (* head width)]
         (dotimes [component width]
           (let [value (.get data (int (+ start component)))]
@@ -155,21 +168,22 @@
               (throw (ex-info "Expression produced a nonfinite GPU value"
                               {:attribute attribute :head head :component component})))
             (aset-double values (int (+ dest component)) (double value))))))
+    (when (< vertices n) (broadcast! values width))
     [attribute {:type type :components components :values values}]))
 
 (defn capture-inputs [bindings env]
   (when-not (map? env) (throw (ex-info "Supply a map with captured clocks and parameters" {})))
   (mapv #(uniform-values env %) bindings))
 
-(defn run-program! [owner {:keys [program vao output bindings readback plan] n :count} inputs]
+(defn run-program! [owner {:keys [program vao output bindings readback plan vertices] n :count} inputs]
   (when (pos? n)
     (context/invoke! owner
       (fn [^GL3 gl]
         (.glUseProgram gl program)
         (.glBindVertexArray gl vao)
         (doseq [[binding values] (map vector bindings inputs)] (upload! gl (:location binding) values))
-        (context/capture! gl output n readback (:timeout-ms owner)))))
-  {:count n :outputs (into {} (map #(output-field readback n (:stride plan) %)) (:outputs plan))})
+        (context/capture! gl output vertices readback (:timeout-ms owner)))))
+  {:count n :outputs (into {} (map #(output-field readback n vertices (:stride plan) %)) (:outputs plan))})
 
 (defn evaluate!
   "Evaluate one complete batch using explicit CPU-oracle environment keys.

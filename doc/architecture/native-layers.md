@@ -79,3 +79,20 @@ member that only transforms an earlier result. If launched separately, the
 effect gets a layer at its ordinary priority. With `:targets :previous` and no
 explicit fixture IDs, that standalone effect applies to heads with prior
 writes in the current frame.
+
+### Overwritten packed columns
+
+After native groups read their backdrop and compose, the packed renderer walks
+physical batches in reverse priority order. An opaque replacement of the first
+`n` targets in patch order covers the same field in earlier opaque replacements
+for those targets. The original forward pass still validates the covered
+values and attributes failures to the effect that produced them. It can then
+skip reading, blending and writing those destinations. The remainder of a
+partly covered column keeps its usual blend and order.
+
+A target permutation, varying mask, partial opacity, `:add` or `:max` can use
+the previous field. The planner drops coverage for fields touched by those
+batches. Arbitrary row assignments clear all coverage. General geometry retains
+its calibrated arithmetic and movement history. Effects continue to advance
+state, emit events and produce diagnostics each frame. Removing a cover or
+changing opacity rebuilds the plan on the affected frame.

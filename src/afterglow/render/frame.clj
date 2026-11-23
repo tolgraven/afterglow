@@ -6,6 +6,7 @@
   positive elevation toward +Y. This is a new explicit fixture contract, not
   an implementation of all legacy fixture function ranges/optics."
   (:require [afterglow.render.atmosphere :as atmosphere]
+            [afterglow.render.coverage :as coverage]
             [afterglow.render.emission.dense :as emission]
             [afterglow.render.layers :as layers]
             [afterglow.render.hdr :as hdr]
@@ -917,18 +918,37 @@
                     (sort-by (comp str key) outputs))]
        {:target-ids target-ids :target-indices target-indices :columns columns :blend blend :opacity opacity})) batches))
 
+(defn- validate-covered-prefix!
+  [patch attribute high? ^doubles source width length ^booleans excluded]
+  ;; These opaque inputs cannot contribute to the final column. A hidden
+  ;; invalid value must still fault its source in the original row order.
+  (let [width (long width)]
+    (dotimes [row (long length)]
+      (when-not (and excluded (aget excluded row))
+        (let [allow-hdr? (and high? (or (not= :dimmer attribute)
+                                        (::emission-channels (nth (:fixtures patch) row))))]
+          (dotimes [component width]
+            (let [v (aget source (+ (* row width) component))]
+              (when-not (and (Double/isFinite v) (<= 0.0 v) (or allow-hdr? (<= v 1.0)))
+                (fail! "Typed batch value must be finite and within [0,1]"
+                       {:attribute attribute :row row :value v})))))))))
+
 (defn- merge-packed-batches!
   ([patch target-values target-present batches]
    (merge-packed-batches! patch target-values target-present batches nil))
   ([patch ^doubles target-values ^booleans target-present batches ^booleans excluded]
    (let [stride (int (::stride patch))]
      (doseq [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} batches
-             {:keys [attribute components values slot]} columns]
+             {:keys [attribute components values slot] :as column} columns]
        (let [^doubles source values, row-count (count target-ids), components (int components)
              opacity (double opacity)
+             skip (long (::coverage/validate-prefix column 0))
              high? (and (::hdr? patch) (hdr/light-attributes attribute))]
-         (dotimes [row row-count]
-           (let [index (long (if target-indices (aget ^ints target-indices row) row))
+         (when (pos? skip)
+           (validate-covered-prefix! patch attribute high? source components skip excluded))
+         (dotimes [offset (- row-count skip)]
+           (let [row (+ skip offset)
+                 index (long (if target-indices (aget ^ints target-indices row) row))
                  base (* index stride)
                  opacity (if opacities (aget ^doubles opacities row) opacity)]
              (when-not (or (and opacities (zero? opacity)) (and excluded (aget excluded (int index))))
@@ -1116,7 +1136,8 @@
 
 (defn- resolve-partitioned
   [patch blocks options]
-  (let [size (* (int (::stride patch)) (count (:fixtures patch)))
+  (let [blocks (if (> (count blocks) 1) (coverage/plan blocks) blocks)
+        size (* (int (::stride patch)) (count (:fixtures patch)))
         values (double-array size), present (boolean-array size)
         targets (cond-> (general-targets blocks) (seq (:edge-tracking options)) (into (tracking-ids (:edge-tracking options))))]
     (if (empty? targets)
