@@ -120,3 +120,11 @@
       (let [field {attribute (lit [1 1 1])}
             invalid [(block field :replace 1 default-env) (block field blend 1 default-env)]]
         (is (identical? invalid (chain/fuse cache prepare invalid)))))))
+
+(deftest opaque-replacement-keeps-earlier-typed-field-errors-observable
+  (doseq [[attr wrong right] [[:focus [0.2 0.3 0.4] 0.5] [:color 0.3 [0.2 0.3 0.4]]]]
+    (let [stages [(block {attr (lit wrong)} :replace 1 default-env)
+                  (block {attr (lit right)} :replace 1 default-env)]
+          result (chain/fuse (chain/create-cache) prepare stages)]
+      (is (identical? stages result))
+      (is (thrown? clojure.lang.ExceptionInfo (oracle result))))))

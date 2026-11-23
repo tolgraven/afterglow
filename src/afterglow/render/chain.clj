@@ -1,7 +1,8 @@
 (ns afterglow.render.chain
   "Lower adjacent pure field requests onto one native-space IR batch. The ordinary
   attribution and validation path remains available for every rejected chain."
-  (:require [afterglow.render.ir :as ir])
+  (:require [afterglow.render.frame :as frame]
+            [afterglow.render.ir :as ir])
   (:import [java.util Arrays]))
 
 (defn create-cache
@@ -176,12 +177,19 @@
               (cond-> values (:alpha stage) (assoc (:alpha stage) (get-in block [:batch :opacity] 1)))))
           {} (map vector stages blocks)))
 
+(defn- typed-fields? [group]
+  (let [fields (get-in group [:cpu-plan :outputs])]
+    (and (seq fields)
+         (= (set (map :attribute fields)) (set (keys (expressions group))))
+         (every? (fn [{:keys [attribute type]}] (= type (frame/batch-field-type attribute))) fields))))
+
 (defn- prepare [prepare-group shapes]
   (let [groups (mapv first shapes) first-group (first groups)
         targets (peek (first shapes))]
     ;; A repeated row has already seen writes from other rows of its effect.
     ;; Check once on plan creation, before compiling a row-independent shader.
-    (when (and (= (count targets) (count (set targets)))
+    (when (and (every? typed-fields? groups)
+               (= (count targets) (count (set targets)))
                (every? #(same-layout? first-group %) (rest groups)))
       (let [stages (mapv stage (range) shapes)
             outputs (reduce (fn [acc stage] (or (fold-stage acc stage) (reduced nil))) {} stages)]
