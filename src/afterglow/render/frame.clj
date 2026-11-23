@@ -341,17 +341,29 @@
                         (rotate :y (Math/toRadians (double y)))
                         (rotate :z (Math/toRadians (double z))))}))))
 
+(defn- closer-pan
+  "Prefer a reachable angle. Preserve the first equally close candidate."
+  [previous a b]
+  (let [a-legal? (unit? a)
+        b-legal? (unit? b)]
+    (cond
+      (not= a-legal? b-legal?) (if b-legal? b a)
+      (< (Math/abs (double (- b previous))) (Math/abs (double (- a previous)))) b
+      :else a)))
+
 (defn- normalized-angle [fixture axis degrees previous]
   (let [calibration (axis-calibration fixture axis)
         convert (if (vector? calibration)
                   (fn [angle] (/ (+ (first calibration) (* (/ angle 180.0) (second calibration))) 255.0))
                   (fn [angle] (/ (- angle (:min-deg calibration))
                                  (- (:max-deg calibration) (:min-deg calibration)))))
-        candidates (if (= axis :pan) (mapv convert [degrees (- degrees 360) (+ degrees 360)]) [(convert degrees)])
-        legal (filterv unit? candidates)
-        target (or previous (convert 0))
-        nearest (first (sort-by #(Math/abs (double (- % target))) (if (seq legal) legal candidates)))]
-    {:value (clamp nearest 0 1) :reachable? (boolean (seq legal)) :degrees degrees}))
+        direct (convert degrees)
+        value (if (= axis :tilt)
+                direct
+                (let [target (or previous (convert 0))
+                      nearest (closer-pan target direct (convert (- degrees 360)))]
+                  (closer-pan target nearest (convert (+ degrees 360)))))]
+    {:value (clamp value 0 1) :reachable? (unit? value) :degrees degrees}))
 
 (defn- check-movement-history! [fixture previous]
   (doseq [axis [:pan :tilt] :let [value (get previous axis)]]
