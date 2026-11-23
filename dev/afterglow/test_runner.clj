@@ -3,7 +3,7 @@
 
 (def pure-tests
   '[afterglow.sync-test afterglow.core-test afterglow.runtime-test afterglow.time-test afterglow.reactive-test
-    afterglow.runtime.reuse-test afterglow.runtime.engine-test afterglow.runtime.keyframes-test afterglow.runtime.faults-test afterglow.runtime.executor-test afterglow.runtime.replay-test
+    afterglow.runtime.reuse-test afterglow.runtime.cadence-test afterglow.runtime.engine-test afterglow.runtime.keyframes-test afterglow.runtime.faults-test afterglow.runtime.executor-test afterglow.runtime.replay-test
     afterglow.control.model-test afterglow.control.clock-test afterglow.control.bindings-test afterglow.control.views-test
     afterglow.control.categories-test afterglow.control.system-test afterglow.control.sensors-test
     afterglow.control.parameter-edit-test afterglow.control.devices.push-2-test

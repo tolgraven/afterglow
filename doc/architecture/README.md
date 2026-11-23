@@ -3,6 +3,7 @@
 Afterglow owns the rendering path from ordered effect contributions to physical
 fixture channels. Tolglow supplies show configuration and authored effects.
 
+* [Adaptive effect evaluation](adaptive-keyframes.md)
 * [Overdrive and spatial highlight spill](highlight-spill.md)
 * [Moving volumes and fixture contact events](spatial-fields.md)
 * [Native effect layers and typed transforms](native-layers.md)
