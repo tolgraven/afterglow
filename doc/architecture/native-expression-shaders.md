@@ -145,3 +145,51 @@ render options, and let the show's output owner decide when to publish.
 completed native batches, CPU fallbacks, deadline fallbacks and native session
 metrics. `(compute/movement-status owner output)` reports the movement decision
 and head counts for that output. Pass nil for a status before the first output.
+
+## CPU batch costs on dense pixel rigs
+
+The CPU evaluator samples clock, beat, bar, phrase and parameter inputs once
+per batch invocation. It copies each fixture's xyz coordinates into three
+scratch slots as it evaluates the spatial expression. Scratch belongs to the
+invocation, so workers can share a compiled plan and callers can retain its
+previous output. The renderer identifies batches whose target IDs form a
+prefix of patch order and writes their rows directly. Other orders and repeated
+IDs retain their own row mapping.
+
+The following measurements compare Afterglow `9b7e456` and `fa22954` on a
+shared AMD EPYC 9V74 Linux host. Each stage had 130 warmups and 150 samples
+in OpenJDK 21.0.13, Clojure 1.12.7, with three visible processors and a 1 GiB
+heap. Each sample included compact preview generation. The harness compared
+every universe byte with the scalar renderer outside the timed interval.
+
+| RGBW pixels | Stage | CPU time p50, before → after (ms) | Wall time p95, before → after (ms) | Allocation p50, before → after (bytes) |
+| ---: | --- | ---: | ---: | ---: |
+| 1,000 | Typed fields through DMX | 1.29 → 0.91 | 6.16 → 1.76 | 366,832 → 322,384 |
+| 1,000 | Spatial expression through DMX | 1.73 → 0.92 | 2.03 → 1.77 | 746,584 → 337,416 |
+| 10,000 | Typed fields through DMX | 9.75 → 3.58 | 30.78 → 7.66 | 5,169,824 → 3,240,032 |
+| 10,000 | Spatial expression through DMX | 11.30 → 7.44 | 27.74 → 25.92 | 7,650,184 → 3,326,768 |
+
+Run the same stages from each revision's project root. The report includes
+wall time, current-thread CPU time and allocation samples.
+
+```sh
+JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=3 -Dafterglow.benchmark.revision=$(git rev-parse HEAD)" \
+  lein with-profile +benchmark run -m afterglow.bench-backend \
+  --heads 1000,10000 --warmup 130 --samples 150 \
+  --stages typed-batch-resolution-with-compact-preview,ir-spatial-effect-through-dmx-with-compact-preview
+```
+
+The companion Tolglow sculpture benchmark exercises differently mounted moving
+heads alongside 10,000 or 20,000 RGBW pixels on twisted strips. It includes
+effect scheduling, fixture blending, compact preview and encoded ArtDMX. With
+Afterglow `fa22954` and Tolglow `ebfbcc2`, the 20,000-pixel, 64-mover direct
+output run took 30.09 ms at the median and 48.26 ms at p95. With independent
+output scheduling the corresponding times were 24.81 and 33.80 ms. A 40 Hz
+physical-output target leaves 25 ms per frame. See the
+[Tolglow workload and capture checks](https://github.com/tolgraven/tolglow/blob/ebfbcc20eb4da1793e2862ef048c4d364e1da2da/dev/tolglow/bench_show.clj).
+
+The native shader backend can perform spatial color and motion arithmetic. It
+still reads back fields for CPU blending and packing. Compare complete
+publication times, readback stalls and DMX bytes on the intended GPU when
+selecting that backend. These measurements used the float64 CPU renderer and
+a capture sink. [Moving-head shader calibration and precision](moving-head-shaders.md)
