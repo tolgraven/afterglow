@@ -159,3 +159,14 @@
         (is (nil? (:target-picker (push/control-view (:local (session/snapshot device)) @show))))
         (is (empty? (:errors (session/snapshot device))))
         (finally (session/close! device))))))
+
+(deftest captured-buttons-select-pages-without-launching-cues
+  (let [config (assoc options :button-bindings {:blackout :display/pages :right [:display/select-page 1]})
+        profile (push/profile config)
+        show (assoc-in (initial-model) [:pages :wash] {:id :wash :cells {}})
+        press (fn [state cc] ((:input profile) state ((:decode profile) [0xb4 cc 127]) show {}))
+        overview (press (:initial-state profile) 22)
+        selected (press (:state overview) 23)]
+    (is (empty? (:commands selected)))
+    (is (= :pages (:display-mode (push/control-view (:state overview) show))))
+    (is (= :wash (:page (push/control-view (:state selected) show))))))

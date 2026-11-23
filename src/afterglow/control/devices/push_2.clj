@@ -6,6 +6,7 @@
             [afterglow.control.codecs.midi :as midi]
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.views :as views]
+            [afterglow.control.display :as display]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.target-picker :as targets]))
 
@@ -221,9 +222,39 @@
   (edit-parameter state model (parameter-at state model (- (:controller event) 71))
                   (codec/signed-encoder (:raw-value event)) :relative))
 
+(defn- display-action [state model cc]
+  (let [shift? (:shift? state)
+        mode (display/mode state model)]
+    (case cc
+      51 (if shift? :display/page-colors :display/pages)
+      31 (if shift? :display/rig :display/simulator)
+      110 (if shift? :display/parameter-view :display/parameters)
+      113 (if shift? :display/block-trace :display/audio)
+      112 (when (#{:simulator :rig} mode) :display/camera)
+      (62 63) (cond
+                (= :rig mode) (if (= cc 62) :display/previous-fixture :display/next-fixture)
+                (= :pages mode) (if (= cc 62) :display/previous-bank :display/next-bank)
+                (and shift? (= :parameters mode)
+                     (= :history (display/option state model :parameter-view :auto)))
+                (if (= cc 62) :display/zoom-in :display/zoom-out))
+      (when (and (= :pages mode) (<= 20 cc 27) (not (:record? state)))
+        [:display/select-page (- cc 20)]))))
+
+(defn- display-button [state model {:keys [type controller raw-value]}]
+  (when (and (:ready? state) (= :control-change type) (not (:target-picker state)))
+    (let [held? (contains? (:display-buttons state) controller)
+          down? (pos? raw-value)
+          action (display-action state model controller)]
+      (cond
+        held? {:state (if down? state (update state :display-buttons disj controller))}
+        (and action down?) {:state (-> state (update :display-buttons (fnil conj #{}) controller)
+                                       (display/apply-action model action))}))))
+
 (defn- input [device-id state event model envelope]
-  (let [state (selected-state state model)]
+  (let [state (selected-state state model)
+        display-input (display-button state model event)]
    (cond
+    display-input display-input
     (= :palette (:type event))
     (if (and (not (:ready? state)) (= (:index event) (:next-palette state)))
       (let [index (:index event)
@@ -297,7 +328,8 @@
         defaults (merge (into {} (map (fn [[k schema]] [k (:default schema)]) (:params effect)))
                         (:params cue) (:saved-params cue))
         cue-view (when cue (views/cue-view model (:id cue)))]
-    {:title "Tolglow" :page (:page-id state) :origin (:origin state)
+    (merge (display/view-options state model)
+           {:title "Tolglow" :page (:page-id state) :origin (:origin state)
      :status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
      :master (:master model) :blackout? (:blackout? model)
      :bpm (get-in model [:transport :bpm])
@@ -329,7 +361,7 @@
                             :preview-samples (:preview-samples schema)})) (:ids bank))
      :cells (mapv (fn [x] (when-let [cue (cue-at state model (codec/pad-note x 0))]
                             (views/cue-view model (:id cue)))) (range 8))
-     :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))}))
+     :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))})))
 
 (defn- strip-feedback [state model]
   (if-let [target (system-touch state)]
@@ -401,7 +433,7 @@
 
 (defn- stop [device-id state _model _envelope disconnected?]
   {:state (assoc (targets/clear-selection state) :pads {} :holds {} :ready? false :last-leds {} :last-display nil
-                       :last-touch-strip nil
+                       :last-touch-strip nil :display-buttons #{}
                        :touches {} :touch-order [] :shift? false :record? false :pressed-pads #{} :pad-instances {})
    :commands (mapv (fn [id] {:op :instance/end :instance-id id})
                    (keep :instance-id (vals (get-in state [:holds :gestures]))))
@@ -422,7 +454,7 @@
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
   (let [initial {:page-id page-id :origin [0 0] :palettes {} :next-palette 0
-                 :ready? false :pads {} :holds {} :last-leds {} :led-retries 0
+                 :ready? false :pads {} :holds {} :last-leds {} :led-retries 0 :display-buttons #{}
                  :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
                  :pressed-pads #{} :pad-instances {}}]
     {:id :push-2 :capabilities capabilities :initial-state initial
@@ -444,7 +476,7 @@
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc (targets/clear-selection %) :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
+     :reset-model #(assoc (targets/clear-selection %) :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :record? false
                            :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]
