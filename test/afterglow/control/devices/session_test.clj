@@ -286,3 +286,39 @@
     (is (= 1 (count (filter #(= [:midi/close] %) @(:log h)))))
     (is (= 1 (count (filter #(= [:display/close] %) @(:log h)))))
     (is (some #{"host stopped"} (:errors (session/snapshot device))))))
+
+(deftest visualization-feedback-owns-only-its-mounted-session
+  (let [model (initial-model)
+        operations (atom []) seen-input (atom nil)
+        source {:open! #(do (swap! operations conj :open) :surface)
+                :project! (fn [_ _ m] (assoc m :projected true))
+                :close! (fn [_] (swap! operations conj :close))}
+        profile {:id :test :input (fn [state _ m _] (reset! seen-input m) {:state state})
+                 :feedback (fn [state m _] (swap! operations conj (:projected m)) {:state state})}
+        device (session/create {:session-id "display" :profile profile :feedback-source source
+                                :model! (constantly model) :now-ms! (constantly 0) :dispatch! identity})]
+    (session/open! device)
+    (session/receive! device :press)
+    (is (identical? model @seen-input))
+    (session/suspend! device)
+    (let [before @operations]
+      (session/refresh! device)
+      (is (= before @operations)))
+    (session/resume! device)
+    (session/close! device)
+    (is (= [:open true true :close :open true :close] @operations))))
+
+(deftest continuously-moving-pad-colors-share-the-midi-budget
+  (let [red (atom 0)
+        h (harness {:feedback-source
+                    {:open! #(Object.) :close! (fn [_])
+                     :project! (fn [_ _ m]
+                                 (assoc m :afterglow.control.views/pad-colors
+                                        {:held [(/ (mod (swap! red inc) 15) 15.0) 0.0 0.0]}))}})
+        coords (for [x (range 8) y (range 8)] [x y])]
+    (swap! (:show h) assoc-in [:pages :main :cells] (zipmap coords (repeat :held)))
+    (try
+      (ready! h)
+      (dotimes [_ 7] (led-ack! h))
+      (is (= (set coords) (set (keys (get-in (session/snapshot (:session h)) [:local :last-leds])))))
+      (finally (session/close! (:session h))))))

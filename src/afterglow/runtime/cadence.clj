@@ -88,7 +88,7 @@
   :elapsed-ms includes complete host work. Only eligible expensive effects slow
   down. Each pressure window can slow one effect. Two real cheap samples
   restore that instance regardless of the scene load. State is disposable."
-  [previous {:keys [epoch versions samples period-ms elapsed-ms]} config]
+  [previous {:keys [epoch versions samples period-ms elapsed-ms] :as timings} config]
   (when-not (and (time/finite-number? period-ms) (pos? period-ms)
                  (time/finite-number? elapsed-ms) (not (neg? elapsed-ms)))
     (throw (ex-info "Frame timings require a positive period and nonnegative elapsed time" {})))
@@ -105,7 +105,7 @@
         quiet? (and (< measured (* 0.85 budget)) (< missed 0.1))
         hot (if pressure? (inc (:over-budget-frames prior 0)) 0)
         cool (if quiet? (inc (:under-budget-frames prior 0)) 0)
-        slow (when (and (>= hot pressure-frames) (> elapsed-ms budget))
+        slow (when (and (not (:defer-live-slowdown? timings)) (>= hot pressure-frames) (> elapsed-ms budget))
                (slowdown-candidate entries config))
         fast (when (and (>= cool recovery-frames) (< elapsed-ms budget))
                (recovery-candidate entries (- budget measured)))

@@ -30,3 +30,9 @@ scene. Interpolated frames do not count as samples. Twenty-four quiet frames
 can restore one interval by a factor of two when its expected cost fits the
 remaining budget. Smoothed duration and missed-frame frequency govern the two
 windows. Epoch and definition changes reset their corresponding histories.
+
+A host may set `:defer-live-slowdown?` on the frame timing input while it is
+reducing the keyframe rate of mounted presentation surfaces. Measurements and
+recovery continue through this interval. Once the visual sampler reaches its
+lowest rate, the host clears the flag and normal cost-ranked effect throttling
+resumes if pressure persists.
