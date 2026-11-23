@@ -1,0 +1,61 @@
+(ns afterglow.render.blocks-test
+  (:require [afterglow.render.blocks :as blocks]
+            [afterglow.render.ir :as ir]
+            [clojure.test :refer [deftest is testing]]))
+
+(defn close? [a b] (< (abs (- a b)) 1.0e-10))
+
+(deftest one-water-material-for-color-focus-and-dimmer
+  (let [water {:block :optics/through-water}
+        plan (blocks/plan {:base [0.8 0.7 0.3] :stages [water {:block :optics/gel}]})
+        scalar (ir/compile-expression (:expression plan))
+        trace (blocks/compile-trace plan)
+        fields {:color (:expression plan)
+                :focus (:expression (blocks/plan {:base 0.65 :stages [water]}))
+                :dimmer (:expression (blocks/plan {:base 0.9 :stages [water]}))}
+        batch (ir/compile-batch fields)
+        shader (ir/emit-glsl-batch fields)
+        positions [[1.0 0.0 0.4] [1.0 2.0 -0.3]]]
+    (is (= 5 (:stride shader)))
+    (is (re-find #"sin\(" (:source shader)))
+    (doseq [beat [0.0 0.25 1.5]]
+      (let [env {:elapsed-beats beat} result (ir/evaluate-batch batch env positions)
+            colors (partition 3 (get-in result [:outputs :color :values]))]
+        (doseq [[p rgb] (map vector positions colors)]
+          (let [sample (trace (assoc env :position p))]
+            (is (= [:optics/through-water :optics/gel] (mapv :block (:stages sample))))
+            (is (= (scalar (assoc env :position p)) (:result sample)))
+            (is (every? true? (map close? rgb (:result sample))))
+            (is (every? true? (map close? (:result sample)
+                                   (reduce #(mapv + %1 (:offset %2)) (:base sample) (:stages sample)))))))
+        (is (not= (first colors) (second colors)))))))
+
+(deftest middleware-preserves-context-and-runs-in-order
+  (let [catalog (assoc blocks/library :show/lift {:mode :add :inputs {:by 0.1} :expression {:op :input :key :by}})
+        chain [{:block :show/lift} {:block :optics/ribbed-glass :coordinates [0.0 1.0]}]
+        apply-blocks (blocks/middleware catalog [:effect :private :focus] :number chain (constantly {}))
+        context {:effect {:private {:focus 0.3}} :assignments [:keep]}
+        result (apply-blocks context)]
+    (is (close? 0.33 (get-in result [:effect :private :focus])))
+    (is (= [:keep] (:assignments result)))
+    (is (= 0.3 (get-in context [:effect :private :focus])))
+    (is (thrown? Exception (blocks/plan {:base 0 :stages [{:block :missing}]})))
+    (is (thrown? Exception (blocks/plan {:base 0 :stages [{:block :lfo/sine :inputs {:bogus 0.2}}]})))))
+
+(deftest uv-mapping-ignores-depth-and-wet-zero-is-dry
+  (let [water {:block :optics/through-water :coordinates :surface-uv}
+        evaluate #(ir/compile-expression (:expression (blocks/plan {:base 1.0 :stages [%]})))
+        a {:position [0.2 0.8 -9.0] :elapsed-beats 1.0}
+        b (assoc a :position [0.2 0.8 11.0])]
+    (is (= ((evaluate water) a) ((evaluate water) b)))
+    (is (= 1.0 ((evaluate (assoc water :amount 0.0)) a)))))
+
+(deftest calibrated-fog-uses-the-same-fragment-and-field
+  (let [plan (blocks/plan {:base 0.8 :stages [{:block :optics/fog-transmission
+                                               :inputs {:extinction 0.4 :density 0.25 :distance 10.0}}]})
+        expression (:expression plan) expected (* 0.8 (Math/exp -1.0))
+        result (ir/evaluate-batch (ir/compile-batch {:dimmer expression}) {} [[0 0 0]])]
+    (is (close? expected (ir/evaluate expression {})))
+    (is (close? expected (aget ^doubles (get-in result [:outputs :dimmer :values]) 0)))
+    (is (= 1.0 (ir/evaluate (blocks/fog-transmission-expression -1.0 0.3 2.0) {})))
+    (is (re-find #"in vec2 v_uv" (:source (ir/emit-glsl expression :surface-uv))))))

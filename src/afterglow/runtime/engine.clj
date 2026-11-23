@@ -373,7 +373,7 @@
   (let [evaluated (runtime/merge-results {:frame snapshot :effects descriptors} evaluations)
         instances (into {} (keep (fn [result]
                                   (when-not (:done? result)
-                                    [(:id result) (assoc (:instance result) :state (:state result))]))) evaluations)
+                                    [(:id result) (runtime/observable-instance result)]))) evaluations)
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
     {:model (faults/record-events (assoc model :instances instances) events)
      :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)

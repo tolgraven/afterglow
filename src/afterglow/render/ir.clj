@@ -83,7 +83,7 @@
 
 (defn- operation [node path depth]
   (let [op (:op node)
-        unary? (#{:sin :cos :abs :floor :fract :sqrt} op)
+        unary? (#{:sin :cos :abs :floor :fract :sqrt :exp} op)
         arities (cond unary? #{1}
                       (#{:clamp :mix} op) #{3}
                       (= :vec2 op) #{2}
@@ -109,6 +109,7 @@
                      :abs #(Math/abs (double %)) :floor #(Math/floor (double %))
                      :fract #(- % (Math/floor (double %)))
                      :sqrt #(Math/sqrt (double %))
+                     :exp #(Math/exp (double %))
                      :pow (fn [a b]
                             ;; GLSL pow is undefined for negative bases, including
                             ;; integer exponents; keep the CPU oracle's domain aligned.
@@ -189,7 +190,7 @@
                              (checked (:position env) :vec3 path)
                              (nth (:position env) index))})
     (:add :subtract :multiply :divide :min :max :sin :cos :abs :floor :fract
-     :sqrt :pow :clamp :mix :vec2 :vec3 :vec4)
+     :sqrt :exp :pow :clamp :mix :vec2 :vec3 :vec4)
     (operation node path depth)
     (invalid! (conj path :op) "Unknown expression operation" {:operation (:op node)})))
 
@@ -296,6 +297,7 @@
               :abs (reify ScalarExpression (evalDouble [_ inputs] (Math/abs (.evalDouble a inputs))))
               :floor (reify ScalarExpression (evalDouble [_ inputs] (Math/floor (.evalDouble a inputs))))
               :fract (reify ScalarExpression (evalDouble [_ inputs] (let [x (.evalDouble a inputs)] (- x (Math/floor x)))))
+              :exp (reify ScalarExpression (evalDouble [_ inputs] (Math/exp (.evalDouble a inputs))))
               :sqrt (reify ScalarExpression (evalDouble [_ inputs] (Math/sqrt (.evalDouble a inputs))))
               :pow (reify ScalarExpression
                      (evalDouble [_ inputs]
@@ -497,10 +499,15 @@
   "Generate a complete GLSL ES 3 fragment shader and binding metadata.
   CPU doubles are the reference. Inputs and valid operator domains must also
   be representable on a float32 GPU."
-  [expression]
-  (let [node (compile-node expression)
+  ([expression] (emit-glsl expression :world))
+  ([expression coordinates]
+  (let [input-declaration (case coordinates
+                            :world "in vec3 v_position;\n"
+                            :surface-uv "in vec2 v_uv;\n#define v_position vec3(v_uv, 0.0)\n"
+                            (invalid! [:coordinates] "Expected :world or :surface-uv"))
+        node (compile-node expression)
         uniforms (shader-uniforms [node])
-        inputs (merge (shader-inputs [expression]) time-inputs {:position "v_position"})
+        inputs (merge (shader-inputs [expression]) time-inputs {:position (if (= coordinates :surface-uv) "v_uv" "v_position")})
         source-expression (bind-expression node uniforms)
         result-type (:type node)
         result (case result-type
@@ -511,10 +518,10 @@
     {:type result-type :expression source-expression :uniforms uniforms
      :inputs inputs :numeric-contract numeric-contract
      :source (str "#version 300 es\nprecision highp float;\n"
-                  "uniform float u_time_ms;\nuniform float u_elapsed_ms;\nin vec3 v_position;\n"
+                  "uniform float u_time_ms;\nuniform float u_elapsed_ms;\n" input-declaration
                   (uniform-declarations (dissoc inputs :position :elapsed-ms :time-ms) uniforms)
                   "out vec4 fragColor;\nvoid main() {\n  " (glsl-type result-type)
-                  " value = " source-expression ";\n  fragColor = " result ";\n}\n")}))
+                  " value = " source-expression ";\n  fragColor = " result ";\n}\n")})))
 
 (defn emit-glsl-batch
   "Compile named fixture expressions to a vertex shader for interleaved transform
