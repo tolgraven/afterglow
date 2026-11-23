@@ -128,3 +128,20 @@
           result (chain/fuse (chain/create-cache) prepare stages)]
       (is (identical? stages result))
       (is (thrown? clojure.lang.ExceptionInfo (oracle result))))))
+
+(defn- masked-color [id]
+  (assoc (block {:color (lit [0.2 0.6 0.4])} :replace 1 default-env)
+         :native-layer {:id id :member 0 :target-weights {:left 0.25 :right 0.75}}))
+
+(deftest a-later-opaque-scalar-retains-the-independent-color-mask
+  (let [spatial (-> (block {:focus {:op :surface-uv :axis :u}} :replace 1 default-env)
+                    (assoc-in [:batch :field-request :group :surface-uvs] [[0.2 0.3] [0.7 0.4]]))
+        paint (masked-color :wash)
+        final (block {:focus (parameter :level)} :replace 1 default-env)
+        render (fn [stages] (oracle (chain/fuse (chain/create-cache) prepare stages)))]
+    (doseq [opacity [0.0 0.5 1.0]
+            :let [stages [spatial paint (assoc-in final [:batch :opacity] opacity)]]]
+      (is (= (oracle stages) (render stages))))
+    (is (= (oracle [spatial paint]) (render [spatial paint])))
+    (is (not= (get-in (render [spatial paint final]) [:values :right :focus])
+              (get-in (render [spatial paint]) [:values :right :focus])))))
