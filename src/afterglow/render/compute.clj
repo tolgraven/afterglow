@@ -125,7 +125,7 @@
 (def ^:private late {:stage :deadline :type :budget-exhausted :message "GPU result exceeded this frame's deadline"})
 
 (defn- draw! [session shader env deadline]
-  (let [^Future job ((:submit! @native) session shader env)]
+  (let [^Future job ((:submit! @native) session shader env :fixture-frame)]
     (try
       (let [batch (.get job (max 0 (- deadline (System/nanoTime))) TimeUnit/NANOSECONDS)]
         (if (< (System/nanoTime) deadline) {:batch batch} {:error late}))

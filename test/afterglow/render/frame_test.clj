@@ -845,3 +845,68 @@
     ;; Removing/reordering the cover exposes the lower contribution immediately.
     (is (= [26 51 77] (bytes-at (sample [upper lower]) 1 1 4 7)))
     (is (= [26 51 77] (bytes-at (sample [lower]) 1 1 4 7)))))
+
+(deftest uniform-native-tuples-and-expanded-arrays-paint-identical-fixtures
+  (let [ids [:left 42 "right"]
+        rig (frame/compile-patch
+             (mapv (fn [i id] {:id id :universe 0 :address (inc (* i 8))
+                               :position [i 2 1] :channels {:red 1 :green 2 :blue 3 :pan 4 :tilt 5 :focus 6}})
+                   (range) ids))
+        input (fn [uniform? targets attribute tuple]
+                (let [n (count targets)
+                      width (count tuple)
+                      data {:type (if (= width 1) :number :vec3) :components width
+                            :values (double-array (if uniform? tuple (mapcat identity (repeat n tuple))))}
+                      field (if uniform? (fields/map->UniformField data) data)]
+                  {:kind :batch :source source-a :batch {:target-ids targets :outputs {attribute field}}}))
+        draw (fn [uniform? targets general? weights]
+               (let [color (-> (input uniform? targets :color [1.2 0.25 0.15])
+                               (assoc :native-layer {:id :mask :member 0 :opacity 0.8 :target-weights weights}))
+                     scene (cond-> [color (input uniform? ids :focus [0.75])]
+                             general? (conj (input uniform? [42] :aim [0.75 0.0 0.25])))]
+                 (frame/resolve-contributions rig scene {:hdr {} :compact-values? true})))]
+    (doseq [targets [ids ["right" 42 42 :left] [:left]] general? [true false]
+            weights [{:left 0.0 42 0.5 "right" 1.0} (zipmap ids (repeat 1.0))]]
+      (let [expanded (draw false targets general? weights)
+            uniform (draw true targets general? weights)]
+        (is (= (frame/portable-frame expanded) (frame/portable-frame uniform)))
+        (is (= (frame/project-compact (:compact expanded)) (frame/project-compact (:compact uniform))))))
+    (let [hidden (input true ids :red [Double/NaN])
+          cover (input true [:left 42] :red [0.5])
+          error (caught-exception #(frame/resolve-contributions rig [hidden cover] {:include-values? false}))]
+      (is (= source-a (:effect-source (ex-data error))))
+      (is (= 0 (:row (ex-data error)))))
+    (let [field-path [:batch :outputs :red]
+          ordinary (input false ids :red [0.5])
+          compact (input true ids :red [0.5])]
+      (doseq [invalid [(assoc-in ordinary (conj field-path :values) (double-array [0.5]))
+                       (assoc-in compact (conj field-path :values) (double-array [0.1 0.2]))]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid typed batch"
+                              (frame/resolve-contributions rig [invalid])))))))
+
+(deftest scoped-emission-gains-scale-the-intended-uniform-field-rows
+  (let [ids [:a :b :c] rig (frame/compile-patch (mapv #(assoc rgb :id %1 :address %2) ids [1 4 7]))
+        rgb-tuple [0.25 0.125 0.0625]
+        compact (fields/->UniformField :vec3 3 (double-array rgb-tuple))
+        expanded (field :vec3 3 (mapcat identity (repeat 3 rgb-tuple)))
+        draw (fn [field targets gain-options intrinsic?]
+               (let [block (cond-> {:kind :batch :source source-a
+                                    :batch {:target-ids ids :outputs {:color field}}}
+                             intrinsic? (assoc :emission-gain 2.0))]
+                 (frame/resolve-contributions rig [block] {:compact-values? true
+                                                          :hdr (assoc gain-options :fixture-ids targets)})))]
+    (doseq [targets [ids [:a] [:b] [:a :c] []]
+            [settings intrinsic?] [[{:cue-gains {:left 2.0}} false]
+                                   [{:instance-gains {"a" 2.0}} false]
+                                   [{} true]]]
+      (let [after (draw compact targets settings intrinsic?)
+            before (draw expanded targets settings intrinsic?)]
+        (is (= (frame/portable-frame before) (frame/portable-frame after)))
+        (is (= (mapv #(if (some #{%} targets) 128 64) ids) (bytes-at after 1 1 4 7)))))
+    (let [dimmer {:kind :assignments :source source-a
+                  :assignments [(assignment :b :dimmer 0.5)]}
+          paint (fn [field] {:kind :batch :source source-a :batch {:target-ids ids :outputs {:color field}}})
+          render #(frame/resolve-contributions rig [dimmer (paint %)] {:hdr {:instance-gains {"a" 2.0}}})]
+      (is (= (frame/portable-frame (render expanded)) (frame/portable-frame (render compact))))
+      (is (= [128 64 128] (bytes-at (render compact) 1 1 4 7))))
+    (is (= rgb-tuple (vec (:values compact))))))

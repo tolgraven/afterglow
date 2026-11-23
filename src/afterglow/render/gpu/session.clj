@@ -1,7 +1,8 @@
 (ns afterglow.render.gpu.session
   "One show-owned native context, a bounded queue and a bounded LRU of shaders.
   Results belong to the submitting frame. This owner never publishes a frame."
-  (:require [afterglow.render.gpu.expressions :as expressions]
+  (:require [afterglow.render.fields :as fields]
+            [afterglow.render.gpu.expressions :as expressions]
             [afterglow.render.gpu.native-context :as context]
             [afterglow.render.gpu.lifecycle :as lifecycle]
             [afterglow.runtime.reuse :as reuse])
@@ -108,7 +109,11 @@
                  batch))
         evaluate (reuse/evaluator {:pure? true :inputs [[:uniforms]]} draw)]
     (if uniform?
-      (fn [inputs] (expressions/expand-uniform (evaluate inputs) heads))
+      (fn [inputs]
+        (let [sample (evaluate inputs)]
+          (if (::uniform-fields? inputs)
+            (fields/uniform-batch sample heads)
+            (expressions/expand-uniform sample heads))))
       evaluate)))
 
 (defn- resident! [{:keys [owner programs max-programs stats] :as session} group]
@@ -129,12 +134,18 @@
 (defn submit!
   "Submit an immutable group and a captured environment, returning a Future
   for the owned CPU-compatible batch. A saturated queue immediately throws
-  ::busy. No clocks, fixture positions or parameters are sampled later."
-  [session group env]
-  (when-not (instance? afterglow.render.gpu.expressions.Group group)
-    (throw (ex-info "Use session/group to describe the expressions and ordered positions" {})))
-  (let [inputs (expressions/capture-inputs (:bindings group) env)]
-    (enqueue! session #((:evaluate (resident! session group)) {:uniforms inputs}))))
+  ::busy. No clocks, fixture positions or parameters are sampled later.
+  The default :expanded layout owns an array for every output. The local
+  :fixture-frame layout may supply one owned tuple per uniform field."
+  ([session group env] (submit! session group env :expanded))
+  ([session group env layout]
+   (when-not (instance? afterglow.render.gpu.expressions.Group group)
+     (throw (ex-info "Use session/group to describe the expressions and ordered positions" {})))
+   (when-not (#{:expanded :fixture-frame} layout)
+     (throw (ex-info "Unknown GPU field layout" {:layout layout})))
+   (let [inputs {:uniforms (expressions/capture-inputs (:bindings group) env)
+                 ::uniform-fields? (= :fixture-frame layout)}]
+     (enqueue! session #((:evaluate (resident! session group)) inputs)))))
 
 (defn- await-result [^Future future]
   (try (.get future) (catch ExecutionException error (throw (.getCause error)))))
