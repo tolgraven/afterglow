@@ -1,7 +1,8 @@
 (ns afterglow.render.blocks
   "Portable effect materials and generators. Lower once to the same numeric IR
   used by scalar effects, dense CPU fields, and GLSL transform feedback."
-  (:require [afterglow.render.ir :as ir]))
+  (:require [afterglow.render.ir :as ir]
+            [afterglow.render.blocks.glsl :as glsl]))
 
 (defn- fail! [path message]
   (throw (ex-info message {:path path :message message})))
@@ -47,8 +48,12 @@
                 :expression (op :clamp (input :transmission) 0.0 1.0)}
    :optics/ribbed-glass {:name "Ribbed glass" :mode :multiply
                          :inputs {:frequency 2.0 :transmission 0.65}
-                         :expression (op :mix (input :transmission) 1.0
-                                             (wave (op :multiply (coord :x) (input :frequency))))}
+                         :glsl "mix(transmission, 1.0, 0.5 + 0.5 * sin(6.283185307179586 * position.x * frequency))"}
+   :lfo/triangle {:name "Triangle" :mode :replace :inputs {:phase {:op :beat}}
+                  :glsl "1.0 - abs(2.0 * fract(phase) - 1.0)"}
+   :lfo/saw {:name "Saw" :mode :replace :inputs {:phase {:op :beat}} :glsl "fract(phase)"}
+   :lfo/pulse {:name "Pulse" :mode :replace :inputs {:phase {:op :beat} :duty 0.5}
+               :glsl "1.0 - floor(fract(phase) + (1.0 - clamp(duty, 0.0, 1.0)))"}
    :lfo/sine {:name "Sine" :mode :replace :inputs {:phase {:op :beat} :cycles 1.0 :offset 0.0}
               :expression (wave (op :add (input :offset) (op :multiply (input :cycles) (input :phase))))}})
 
@@ -90,8 +95,11 @@
     (when-not template (fail! [:block] (str "Unknown effect block " block)))
     (when-not (and (or (nil? inputs) (map? inputs)) (every? (set (keys (:inputs template))) (keys inputs)))
       (fail! [:inputs] "Unknown prefab input"))
-    (let [bindings (update-vals (merge (:inputs template) inputs) expr)
-          signal (prepare (substitute (:expression template) bindings (coordinate-nodes coordinates)))
+    (when (= (contains? template :glsl) (contains? template :expression))
+      (fail! [:block block] "Supply one GLSL or IR expression per prefab"))
+    (let [tree (if (contains? template :glsl) (glsl/expression (:glsl template)) (:expression template))
+          bindings (update-vals (merge (:inputs template) inputs) expr)
+          signal (prepare (substitute tree bindings (coordinate-nodes coordinates)))
           mode (or mode (:mode template))
           wet (when (contains? spec :amount) (prepare (expr amount)))]
       {:block block :signal signal :mode mode :amount wet :expression (combine mode before signal wet)})))

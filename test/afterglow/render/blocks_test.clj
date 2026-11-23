@@ -59,3 +59,18 @@
     (is (close? expected (aget ^doubles (get-in result [:outputs :dimmer :values]) 0)))
     (is (= 1.0 (ir/evaluate (blocks/fog-transmission-expression -1.0 0.3 2.0) {})))
     (is (re-find #"in vec2 v_uv" (:source (ir/emit-glsl expression :surface-uv))))))
+
+(deftest authored-glsl-runs-on-scalar-and-packed-fixture-fields
+  (let [catalog (assoc blocks/library :custom/wave
+                       {:mode :replace :inputs {:phase {:op :beat}}
+                        :glsl "clamp(1.0 - 2.0 * abs(uv.x - .5) + sin(phase) / 4.0, 0., 1.)"})
+        material (fn [catalog] (:expression (blocks/plan catalog {:base 0.0 :stages [{:block :custom/wave}]})))
+        tree (material catalog)
+        env {:elapsed-beats 0.5 :position [0.8 0.0 0.0]}
+        expected (+ 0.4 (/ (Math/sin 0.5) 4.0))]
+    (is (close? expected (ir/evaluate tree env)))
+    (is (close? expected (first (get-in (ir/evaluate-batch (ir/compile-batch {:focus tree})
+                                                          env [(:position env)]) [:outputs :focus :values]))))
+    (doseq [bad ["phase; return 2." "unknownInput" "1.0 /* skip */" "sine(0.0)"
+                 "clamp(1.0" "1+2 garbage" "" "uv.z"]]
+      (is (thrown? Exception (material (assoc-in catalog [:custom/wave :glsl] bad)))))))
