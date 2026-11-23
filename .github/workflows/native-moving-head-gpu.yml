@@ -12,8 +12,9 @@ jobs:
   choose-mac:
     if: >-
       vars.LOCAL_MAC_NATIVE_GPU == 'enabled' &&
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      ((github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/master'))
     runs-on: ubuntu-latest
     timeout-minutes: 47
     outputs:
