@@ -1,6 +1,7 @@
 (ns afterglow.render.frame-test
   (:require [clojure.test :refer [deftest is testing]]
             [afterglow.render.ir :as ir]
+            [afterglow.render.coverage :as coverage]
             [afterglow.render.fields :as fields]
             [afterglow.render.frame :as frame]))
 
@@ -787,3 +788,46 @@
     (is (nil? (read-first :missing)))
     (is (thrown? clojure.lang.ExceptionInfo
           (frame/compact-reader (frame/compact-index [:dimmer :lamp]) first-frame [:aim])))))
+
+(deftest covered-prefixes-retain-partial-target-fields-and-fault-order
+  (let [rig (frame/compile-patch (mapv #(assoc rgb :id %1 :address %2) [:a :b :c] [1 4 7]))
+        typed (fn [source ids attr values]
+                {:kind :batch :source source
+                 :batch {:target-ids ids :outputs {attr (field :number 1 values)}}})
+        lower (typed source-a [:a :b :c] :red [0.1 0.2 0.3])
+        other (typed source-a [:a :b :c] :blue [0.8 0.7 0.6])
+        upper (typed source-b [:a :b] :red [0.45 0.5])
+        draw #(frame/resolve-contributions rig % {:include-values? false :compact-values? true})
+        prefixes (atom [])
+        plan coverage/plan
+        observe (fn [blocks] (let [result (plan blocks)]
+                               (reset! prefixes (mapv #(get-in % [:compiled :columns 0 ::coverage/validate-prefix]) result))
+                               result))
+        sample (fn [blocks] (with-redefs [coverage/plan observe] (draw blocks)))
+        blocks [lower other upper]
+        expected (with-redefs [coverage/plan identity] (draw blocks))
+        actual (sample blocks)]
+    (is (= [2 nil nil] @prefixes))
+    (is (= (buffer-values expected) (buffer-values actual)))
+    (is (= (frame/project-compact (:compact expected)) (frame/project-compact (:compact actual))))
+    (is (= [115 0 204 128 0 179 77 0 153] (apply bytes-at actual 1 (range 1 10))))
+    (doseq [barrier [(assoc-in upper [:batch :opacity] 0.5)
+                     (assoc-in upper [:batch :blend] :add)
+                     (assoc-in upper [:batch :blend] :max)
+                     (assoc-in upper [:batch :target-ids] [:b :a])]]
+      (let [scene [lower barrier]]
+        (is (= (buffer-values (with-redefs [coverage/plan identity] (draw scene)))
+               (buffer-values (sample scene))))
+        (is (every? nil? @prefixes))))
+    ;; An intervening add may overflow even if a later replace hides the result.
+    (let [overflow (typed source-b [:a] :red [1.0])
+          scene [lower (assoc-in overflow [:batch :blend] :add) upper]]
+      (is (= source-b (:effect-source (ex-data (caught-exception #(sample scene))))))
+      (is (every? nil? @prefixes)))
+    (let [bad (typed source-a [:a :b :c] :red [Double/NaN 0.2 0.3])
+          fault (caught-exception #(sample [bad upper]))]
+      (is (= source-a (:effect-source (ex-data fault))))
+      (is (= 0 (:row (ex-data fault)))))
+    ;; Removing/reordering the cover exposes the lower contribution immediately.
+    (is (= [26 51 77] (bytes-at (sample [upper lower]) 1 1 4 7)))
+    (is (= [26 51 77] (bytes-at (sample [lower]) 1 1 4 7)))))
