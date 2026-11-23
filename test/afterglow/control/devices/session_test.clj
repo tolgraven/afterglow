@@ -307,3 +307,18 @@
     (session/resume! device)
     (session/close! device)
     (is (= [:open true true :close :open true :close] @operations))))
+
+(deftest continuously-moving-pad-colors-share-the-midi-budget
+  (let [red (atom 0)
+        h (harness {:feedback-source
+                    {:open! #(Object.) :close! (fn [_])
+                     :project! (fn [_ _ m]
+                                 (assoc m :afterglow.control.views/pad-colors
+                                        {:held [(/ (mod (swap! red inc) 15) 15.0) 0.0 0.0]}))}})
+        coords (for [x (range 8) y (range 8)] [x y])]
+    (swap! (:show h) assoc-in [:pages :main :cells] (zipmap coords (repeat :held)))
+    (try
+      (ready! h)
+      (dotimes [_ 7] (led-ack! h))
+      (is (= (set coords) (set (keys (get-in (session/snapshot (:session h)) [:local :last-leds])))))
+      (finally (session/close! (:session h))))))

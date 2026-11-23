@@ -346,6 +346,16 @@
         {:mode mode :value (long (Math/round (* 16383.0 (parameter-edit/position schema value {:component component}))))})
       {:mode :off})))
 
+(defn- next-led-batch [desired {:keys [last-leds led-cursor] :or {led-cursor 0}} limit]
+  ;; Keep the ACK budget fair even when the first few pads change every frame.
+  (into [] (comp (map (fn [offset]
+                        (let [index (mod (+ led-cursor offset) 64)
+                              xy [(quot index 8) (mod index 8)]]
+                          [xy (get desired xy)])))
+                 (remove (fn [[xy color]] (= color (get last-leds xy))))
+                 (take limit))
+        (range 64)))
+
 (defn- feedback [device-id timeout-ms batch-size state model envelope]
   (let [state (selected-state state model)
         alive (set (keys (:instances model)))
@@ -384,8 +394,8 @@
                                               (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
                                       (if cue (rgb (views/pad-view model (:id cue))) [0 0 0])))])))
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
-                  (take batch-size (filter (fn [[xy color]] (not= color (get-in state [:last-leds xy])))
-                                           (sort-by key desired))))
+                  (next-led-batch desired state batch-size))
+        [last-x last-y] (first (peek changes))
         messages (into (vec strip-messages) (mapcat (fn [[[x y] color]]
                                (codec/pad-led-messages device-id x y color
                                  (last (get-in state [:palettes (codec/pad-note x y)])))) changes))
@@ -393,7 +403,8 @@
                         (empty? changes) (>= (- time (:last-led-at-ms state time)) (/ timeout-ms 2)))
         query? (or (seq changes) keepalive?)]
     (cond-> {:state (cond-> state
-                     (seq changes) (update :last-leds into changes)
+                     (seq changes) (assoc :last-leds (into (:last-leds state) changes)
+                                          :led-cursor (mod (inc (+ (* 8 last-x) last-y)) 64))
                      query? (assoc :awaiting-led-ack? true :last-led-at-ms time))
              :midi (cond-> messages query? (conj (codec/sysex device-id [0x09])))}
       display-changed? (assoc :display display)
