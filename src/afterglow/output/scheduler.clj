@@ -19,10 +19,18 @@
   prepare-safety-output receives a private copy of the last successfully sent
   arrays, or current idle arrays if the initial send threw. Its metadata adds
   :stale-source? and :uncertain? (a handoff may have sent some universes before
-  throwing). Return nil or the corrected buffers. now-ms is monotonic."
-  [{:keys [send! prepare-output prepare-safety-output now-ms receipt-capacity]}]
+  throwing). Return nil or the corrected buffers.
+
+  For time-bounded safety state, optional output-valid-until-ms receives the
+  preparation metadata and monotonic time immediately before preparation. It
+  returns the earliest boundary strictly after that time, or nil. If packing
+  crosses it while the slot is still eligible, prepare again from fresh buffers.
+  Both preparation hooks receive the current gate's optional :output-context.
+  now-ms supplies the monotonic clock."
+  [{:keys [send! prepare-output prepare-safety-output output-valid-until-ms now-ms receipt-capacity]}]
   (let [origin (System/nanoTime)]
     {:send! send! :prepare-output prepare-output :prepare-safety-output prepare-safety-output
+     :output-valid-until-ms output-valid-until-ms
      :wire (when (and send! prepare-safety-output) (atom nil))
      :now-ms (or now-ms #(/ (- (System/nanoTime) origin) 1.0e6))
      :gate (atom nil) :counter (atom 0)
@@ -32,7 +40,7 @@
      :scheduler (atom nil) :timeline (atom nil) :ready (atom nil) :state (atom nil)
      :status (atom {:published 0 :coalesced 0})}))
 
-(defn- gate! [owner epoch patch options dark? timeline-id]
+(defn- gate! [owner epoch patch options dark? {:keys [timeline-id output-context]}]
   (let [key [epoch patch options (boolean dark?) timeline-id]
         current @(:gate owner)]
     (when-not @(:closed? owner)
@@ -44,17 +52,20 @@
               (if (= key (:key latest))
                 latest
                 (reset! (:gate owner)
-                        {:key key :generation (inc (:generation latest 0))
-                         :epoch epoch :plan (policy/compile-plan patch)
-                         :options (dissoc (validate-options options) :epoch)
-                         :dark? (boolean dark?)})))))))))
+                        (cond-> {:key key :generation (inc (:generation latest 0))
+                                 :epoch epoch :plan (policy/compile-plan patch)
+                                 :options (dissoc (validate-options options) :epoch)
+                                 :dark? (boolean dark?)}
+                          (some? output-context) (assoc :output-context output-context)))))))))))
 
 (defn begin-frame!
   "Capture a completion identity before evaluation. Epoch/patch/policy/darkness
-  changes invalidate all older completions and buffered bright frames."
+  changes invalidate all older completions and buffered bright frames. The
+  optional ticket's :output-context belongs to the newly opened gate and
+  remains stable while that gate is reused."
   ([owner epoch patch options dark?] (begin-frame! owner epoch patch options dark? nil))
   ([owner epoch patch options dark? ticket]
-   (when-let [gate (gate! owner epoch patch options dark? (:timeline-id ticket))]
+   (when-let [gate (gate! owner epoch patch options dark? ticket)]
      (cond-> {:generation (:generation gate) :epoch epoch :frame-id (swap! (:counter owner) inc)
               :time-ms (if (:slot ticket) (:deadline-ms ticket) ((:now-ms owner)))}
        (:slot ticket) (merge (select-keys ticket [:slot :started-at-ms :inputs-at-ms]))))))
@@ -159,33 +170,52 @@
     (when snapshot (reset! (:wire owner) {:last-sent snapshot}))
     (assoc packet :sent-at-ms started :sent-by-ms finished)))
 
+(defn- preparation-context [gate source]
+  (cond-> source
+    (contains? gate :output-context) (assoc :output-context (:output-context gate))))
+
+(defn- prepare-and-handoff! [owner packet source context prepare! expires-at]
+  (let [now (:now-ms owner)
+        boundary (when (:safety-state context) (:output-valid-until-ms owner))]
+    (loop [checked-at (when boundary (now))]
+      (let [valid-until (when boundary (boundary context checked-at))
+            _ (when (and (some? valid-until)
+                         (not (and (number? valid-until) (Double/isFinite (double valid-until))
+                                   (< checked-at valid-until))))
+                (throw (ex-info "Output safety boundary must be finite and strictly future" {})))
+            output (prepare!)
+            snapshot (when (and output (:wire owner)) (wire-snapshot source output))
+            started (now)]
+        (cond
+          (and expires-at (>= started expires-at)) {:expired-before-send? true}
+          (and valid-until (>= started valid-until)) (recur started)
+          output (handoff! owner packet output snapshot started))))))
+
 (defn- send-safety-output! [owner gate]
   (let [{:keys [last-sent uncertain?]} (some-> (:wire owner) deref)]
     (when (or last-sent uncertain?)
-      (let [source (if last-sent
-                     (update last-sent :universes copy-buffers)
-                     (policy/materialize {:frame-id 0 :generation (:generation gate)
-                                          :universes (get-in gate [:plan :idle-universes])}))
-            metadata (dissoc source :universes)
-            context (assoc metadata :uncertain? (boolean uncertain?)
-                                    :stale-source? (not= (:generation gate) (:generation source)))]
-        (when-let [corrected ((:prepare-safety-output owner) (:universes source) context)]
-          (let [snapshot (wire-snapshot metadata corrected)]
-            (assoc (handoff! owner metadata corrected snapshot ((:now-ms owner)))
-                   :safety-output? true)))))))
+      (let [source (if last-sent (dissoc last-sent :universes)
+                       {:frame-id 0 :generation (:generation gate)})
+            context (preparation-context gate (assoc source :uncertain? (boolean uncertain?)
+                                                           :stale-source? (not= (:generation gate) (:generation source))))
+            prepare! (fn []
+                       (let [buffers (if last-sent (copy-buffers (:universes last-sent))
+                                         (:universes (policy/materialize {:universes (get-in gate [:plan :idle-universes])})))]
+                         ((:prepare-safety-output owner) buffers context)))]
+        (when-let [sent (prepare-and-handoff! owner source source context prepare! nil)]
+          (assoc sent :safety-output? true))))))
 
 (defn- send-packet! [owner gate packet expires-at]
   (if (:send! owner)
-    (let [{:keys [universes]} (policy/materialize packet)
-          source (assoc packet :generation (:generation gate))
-          output (if-let [prepare (:prepare-output owner)]
-                   (prepare universes (select-keys source [:frame-id :safety-state]))
-                   universes)
-          snapshot (when (:wire owner) (wire-snapshot source output))
-          started ((:now-ms owner))]
-      (if (and expires-at (>= started expires-at) (not (:dark? gate)))
+    (let [source (assoc packet :generation (:generation gate))
+          context (preparation-context gate (select-keys packet [:frame-id :safety-state]))
+          prepare! (fn []
+                     (let [{:keys [universes]} (policy/materialize packet)]
+                       (if-let [prepare (:prepare-output owner)] (prepare universes context) universes)))
+          sent (prepare-and-handoff! owner packet source context prepare! (when-not (:dark? gate) expires-at))]
+      (if (:expired-before-send? sent)
         (assoc (send-safety-output! owner gate) :expired-before-send? true)
-        (let [sent (handoff! owner packet output snapshot started)]
+        (when sent
           (receipt! owner gate packet (:sent-by-ms sent))
           sent)))
     packet))
