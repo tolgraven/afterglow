@@ -202,3 +202,28 @@
         (is (= (mapv double expected) (run env positions)))
         (is (= (mapv double expected) (run env (double-array (mapcat identity positions)))))))
     (is (thrown? clojure.lang.ExceptionInfo (run (dissoc second-frame :meter) positions)))))
+
+(deftest batch-binary-arithmetic-preserves-broadcasts-and-fault-locations
+  (let [x {:op :position :axis :x}
+        positions [[-4.0 1.0 2.0] [0.25 3.0 4.0]]
+        evaluate (fn [expression] (ir/evaluate-batch (ir/compile-batch {:field expression}) {} positions))]
+    (doseq [op [:add :multiply :min :max]
+            args [[x] [x (c [0.5 -2.0 4.0])] [(c [0.5 -2.0 4.0]) x]
+                  [(c 0.25) x (c -2.0) (c 4.0)]]]
+      (let [expression {:op op :args args}
+            scalar (ir/compile-expression expression)
+            expected (double-array (mapcat (fn [point] (let [value (scalar {:position point})]
+                                                        (if (vector? value) value [value]))) positions))]
+        (is (java.util.Arrays/equals expected ^doubles (get-in (evaluate expression) [:outputs :field :values]))
+            (str op " " args))))
+    ;; Both operands can fail. The first failing child must still identify its
+    ;; original expression path, even when the enclosing operation could mask it.
+    (let [bad-rhs {:op :divide :args [x (c 0)]}
+          bad-lhs {:op :multiply :args [(c Double/MAX_VALUE) x]}]
+      (doseq [op [:add :multiply :min :max]
+              [args path] [[[bad-lhs bad-rhs] [:args 0]] [[x bad-rhs] [:args 1]]]]
+        (try
+          (evaluate {:op op :args args})
+          (is false (str "Expected an arithmetic fault for " op))
+          (catch clojure.lang.ExceptionInfo error
+            (is (= path (:path (ex-data error))))))))))
