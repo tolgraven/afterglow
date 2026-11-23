@@ -92,14 +92,20 @@
 
   metadata has nonnegative integer :epoch/:frame-id, monotonic physical
   :time-ms (sample/scheduled time) and :completed-at-ms. Completion cannot
-  precede the sample. Input buffer ownership must remain exclusive during copy."
+  precede the render start. An explicit :started-at-ms permits a physical
+  deadline sample to finish early. Input buffer ownership must remain exclusive during copy."
   [metadata rendered]
-  (let [{:keys [epoch frame-id time-ms completed-at-ms]} metadata]
+  (let [{:keys [epoch frame-id time-ms completed-at-ms started-at-ms]} metadata]
     (when-not (and (natural? epoch) (natural? frame-id) (nonnegative? time-ms)
-                   (nonnegative? completed-at-ms) (<= time-ms completed-at-ms))
+                   (nonnegative? completed-at-ms)
+                   (if (some? started-at-ms)
+                     (and (nonnegative? started-at-ms) (<= started-at-ms time-ms)
+                          (<= started-at-ms completed-at-ms))
+                     (<= time-ms completed-at-ms)))
       (fail! "Invalid completed frame identity or timestamps" {:metadata metadata}))
-    {:epoch epoch :frame-id frame-id :time-ms time-ms :completed-at-ms completed-at-ms
-     :universes (immutable-universes (:universes rendered))}))
+    (cond-> {:epoch epoch :frame-id frame-id :time-ms time-ms :completed-at-ms completed-at-ms
+             :universes (immutable-universes (:universes rendered))}
+      (some? started-at-ms) (assoc :started-at-ms started-at-ms))))
 
 (defn materialize
   "Return fresh transport-owned byte arrays. Never share returned arrays between

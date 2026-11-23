@@ -7,3 +7,9 @@ Keep retiring pumps off on later packets, including when other devices still
 occupy their old universe. A newly claimed slot or fixture footprint takes
 precedence immediately. Keep renderer buffers and cached idle templates private
 to their owners.
+
+Use one monotonic origin and numbered output deadlines for the physical clock
+and its optional producer. Capture immutable inputs at the scheduled render
+start. Test late effects and blocked sends with an injected clock, including
+the configured hold/fade and buffered policies. Report render-ready time,
+nominal deadline and actual send times separately.

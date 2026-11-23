@@ -1,7 +1,8 @@
 (ns afterglow.output.scheduler
   "Owned physical output clock. Effect evaluation only hands over immutable
   completions; the publisher never takes the show-owner lock or runs effects."
-  (:require [afterglow.render.presentation :as policy])
+  (:require [afterglow.render.presentation :as policy]
+            [afterglow.output.timeline :as timeline])
   (:import [java.util.concurrent LinkedBlockingDeque ArrayBlockingQueue Executors ScheduledExecutorService TimeUnit]
            [java.util.concurrent.atomic AtomicLong]))
 
@@ -21,29 +22,35 @@
      :receipts (when receipt-capacity (ArrayBlockingQueue. (int receipt-capacity)))
      :receipt-drops (AtomicLong. 0)
      :queue (LinkedBlockingDeque. 3) :lock (Object.) :closed? (atom false)
-     :scheduler (atom nil) :state (atom nil) :status (atom {:published 0 :coalesced 0})}))
+     :scheduler (atom nil) :timeline (atom nil) :ready (atom nil) :state (atom nil)
+     :status (atom {:published 0 :coalesced 0})}))
+
+(defn- gate! [owner epoch patch options dark?]
+  (let [key [epoch patch options (boolean dark?)]
+        current @(:gate owner)]
+    (when-not @(:closed? owner)
+      (if (= key (:key current))
+        current
+        (locking (:lock owner)
+          (when-not @(:closed? owner)
+            (let [latest @(:gate owner)]
+              (if (= key (:key latest))
+                latest
+                (reset! (:gate owner)
+                        {:key key :generation (inc (:generation latest 0))
+                         :epoch epoch :plan (policy/compile-plan patch)
+                         :options (dissoc (validate-options options) :epoch)
+                         :dark? (boolean dark?)})))))))))
 
 (defn begin-frame!
   "Capture a completion identity before evaluation. Epoch/patch/policy/darkness
   changes invalidate all older completions and buffered bright frames."
-  [owner epoch patch options dark?]
-  (let [key [epoch patch options (boolean dark?)]
-        current @(:gate owner)]
-    (when-not @(:closed? owner)
-      (when-let [gate (if (= key (:key current))
-                        current
-                        (locking (:lock owner)
-                          (when-not @(:closed? owner)
-                            (let [latest @(:gate owner)]
-                              (if (= key (:key latest))
-                                latest
-                                (reset! (:gate owner)
-                                        {:key key :generation (inc (:generation latest 0))
-                                         :epoch epoch :plan (policy/compile-plan patch)
-                                         :options (dissoc (validate-options options) :epoch)
-                                         :dark? (boolean dark?)}))))))]
-        {:generation (:generation gate) :epoch epoch :frame-id (swap! (:counter owner) inc)
-         :time-ms ((:now-ms owner))}))))
+  ([owner epoch patch options dark?] (begin-frame! owner epoch patch options dark? nil))
+  ([owner epoch patch options dark? ticket]
+   (when-let [gate (gate! owner epoch patch options dark?)]
+     (cond-> {:generation (:generation gate) :epoch epoch :frame-id (swap! (:counter owner) inc)
+              :time-ms (if ticket (:deadline-ms ticket) ((:now-ms owner)))}
+       ticket (merge (select-keys ticket [:slot :started-at-ms :inputs-at-ms]))))))
 
 (defn complete!
   "Freeze an exclusively owned renderer result and offer without blocking the
@@ -51,25 +58,51 @@
   [owner token rendered]
   (when (and token (not @(:closed? owner))
              (= (:generation token) (:generation @(:gate owner))))
-    (let [packet (policy/freeze-frame (assoc token :completed-at-ms ((:now-ms owner))) rendered)
+    (let [now (:now-ms owner)
+          frozen (policy/freeze-frame (assoc token :completed-at-ms (now)) rendered)
           marker (:calibration token)
-          packet (cond-> packet marker
+          verified (cond-> frozen marker
                    (assoc :calibration (dissoc marker :expected-bytes)
                           :calibration-verified?
                           (every? (fn [[[universe index] value]]
-                                    (= value (get-in packet [:universes universe index]))) (:expected-bytes marker))))
-          entry {:generation (:generation token) :packet packet}
+                                    (= value (get-in frozen [:universes universe index]))) (:expected-bytes marker))))
+          ready (now)
+          packet (assoc verified :completed-at-ms ready)
+          options (:options @(:gate owner))
+          due (when (:slot token)
+                (+ (:time-ms token) (if (= :buffered-interpolation (:mode options)) (:latency-ms options) 0)))
+          entry {:generation (:generation token) :packet packet :due-at-ms due}
           ^LinkedBlockingDeque queue (:queue owner)]
-      (when-not (.offerLast queue entry)
-        (.pollFirst queue)
-        (swap! (:status owner) update :coalesced inc)
-        (.offerLast queue entry))
-      true)))
+      (when (:slot token)
+        (reset! (:ready owner) (assoc (select-keys token [:slot :time-ms :show-time-ms :beat :inputs-at-ms]) :ready-at-ms ready)))
+      (if (and due (> ready due))
+        (do (swap! (:status owner) update :missed-render-deadlines (fnil inc 0)) false)
+        (do
+          (when-not (.offerLast queue entry)
+            (.pollFirst queue)
+            (swap! (:status owner) update :coalesced inc)
+            (.offerLast queue entry))
+          true)))))
+
+(defn- admit-completion [gate deadline-ms state {:keys [generation due-at-ms packet]}]
+  (cond
+    (not= (:generation gate) generation) state
+    (and due-at-ms deadline-ms (< due-at-ms deadline-ms))
+    (update state :expired-at-publication (fnil inc 0))
+    :else
+    (let [{next-state :state accepted? :accepted?} (policy/complete state packet)]
+      (if accepted?
+        (update next-state :history
+                (fn [history]
+                  (update history (dec (count history)) merge
+                          (select-keys packet [:calibration :calibration-verified?]))))
+        next-state))))
 
 (defn publish!
   "Present one physical deadline. Safe to call manually with an injected clock.
   Transport work is serialized here, independently from the show/effect owner."
-  [owner]
+  ([owner] (publish! owner nil))
+  ([owner deadline-ms]
   (locking (:lock owner)
     (when-not @(:closed? owner)
       (when-let [gate @(:gate owner)]
@@ -79,15 +112,7 @@
                         (policy/new-state (:plan gate) (assoc (:options gate) :epoch (:epoch gate))))
               completions (java.util.ArrayList. 3)
               _ (.drainTo ^LinkedBlockingDeque (:queue owner) completions 3)
-              state (reduce (fn [state entry]
-                              (if (= (:generation gate) (:generation entry))
-                                (let [{next-state :state accepted? :accepted?} (policy/complete state (:packet entry))]
-                                  (if accepted?
-                                    (update next-state :history
-                                            (fn [history]
-                                              (update history (dec (count history)) merge
-                                                      (select-keys (:packet entry) [:calibration :calibration-verified?]))))
-                                    next-state)) state)) state completions)
+              state (reduce #(admit-completion gate deadline-ms %1 %2) state completions)
               {next-state :state packet :packet} (policy/present state now)
               packet (if (or (:dark? gate) (nil? packet))
                        {:frame-id (:frame-id packet 0) :epoch (:epoch gate)
@@ -122,8 +147,9 @@
                     (if (.offer mailbox receipt) (.set drops 0) (.incrementAndGet drops)))))
               (swap! (:status owner) #(-> % (update :published inc)
                                            (assoc :last (:presentation packet)
-                                                  :accepted (:accepted next-state) :dropped (:dropped next-state))))))
-          packet)))))
+                                                  :accepted (:accepted next-state) :dropped (:dropped next-state)
+                                                  :expired-at-publication (:expired-at-publication next-state 0))))))
+          packet))))))
 
 
 (defn drain-receipts!
@@ -135,20 +161,77 @@
 (defn status [owner]
   (merge @(:status owner) {:scheduled? (some? @(:scheduler owner)) :closed? @(:closed? owner)
                           :pending (.size ^LinkedBlockingDeque (:queue owner))
-                          :options (:options @(:gate owner))}))
+                          :options (:options @(:gate owner))
+                          :render-timing (dissoc @(:timeline owner) :costs)}))
 
-(defn start! [owner period-ms]
-  (locking (:lock owner)
-    (when (or @(:closed? owner) @(:scheduler owner))
-      (throw (ex-info "Output publisher is closed or already scheduled" {})))
-    (let [scheduler (Executors/newSingleThreadScheduledExecutor)]
-      (reset! (:scheduler owner) scheduler)
-      (.scheduleAtFixedRate scheduler
-                            ^Runnable #(try (publish! owner)
-                                            (catch Exception error
-                                              (swap! (:status owner) assoc :error (.getMessage error))))
-                            0 (long (* 1.0e6 period-ms)) TimeUnit/NANOSECONDS)))
-  owner)
+(defn- at! [owner ^ScheduledExecutorService executor at-ms f]
+  (when-not @(:closed? owner)
+    (let [delay (max 0.0 (- at-ms ((:now-ms owner))))]
+      (try (.schedule executor ^Runnable f (long (Math/ceil (* delay 1e6))) TimeUnit/NANOSECONDS)
+           (catch java.util.concurrent.RejectedExecutionException e
+             (when-not @(:closed? owner) (throw e)))))))
+
+(defn- send-slot! [owner grid slot previous started]
+  (try
+    (let [due (timeline/deadline grid slot)
+          packet (publish! owner due)
+          timing {:slot slot :deadline-ms due :started-at-ms started :finished-at-ms ((:now-ms owner))
+                  :source-time-ms (:time-ms packet) :frame-id (:frame-id packet)}]
+      (swap! (:status owner) #(-> % (assoc :output-timing timing)
+                                  (update :skipped-output-slots (fnil + 0) (- slot previous 1)))))
+    (catch Exception error (swap! (:status owner) assoc :error (.getMessage error)))))
+
+(defn- start-publications! [owner executor grid]
+  (let [now (:now-ms owner)]
+    (letfn [(queue-slot [wanted previous]
+              (at! owner executor (timeline/deadline grid wanted) #(wake wanted previous)))
+            (wake [wanted previous]
+              ;; Repatch and blackout share this gate. Select the eligible slot
+              ;; after any wait for them, so a stalled wake cannot send old work.
+              (locking (:lock owner)
+                (let [started (now) slot (timeline/slot-at grid started)]
+                  (if (< slot wanted)
+                    (queue-slot wanted previous)
+                    (do (send-slot! owner grid slot previous started)
+                        (queue-slot (timeline/next-output-slot grid slot started (now)) slot))))))]
+      (queue-slot 1 0))))
+
+(defn- render-slot! [owner render! ticket started]
+  (try (render! (assoc ticket :started-at-ms started))
+       (catch Exception error (swap! (:status owner) assoc :render-error (.getMessage error))))
+  (let [sample @(:ready owner)
+        sample (when (= (:slot ticket) (:slot sample)) sample)
+        ticket (merge ticket (select-keys sample [:show-time-ms :beat :inputs-at-ms]))]
+    (swap! (:timeline owner) timeline/observed ticket started (:ready-at-ms sample) ((:now-ms owner)))))
+
+(defn- start-renders! [owner executor render! grid]
+  (let [now (:now-ms owner) state (:timeline owner)]
+    (letfn [(queue-ticket [ticket]
+              (at! owner executor (:start-at-ms ticket) #(wake ticket)))
+            (wake [ticket]
+              (let [start (now)]
+                (cond
+                  (< start (:start-at-ms ticket)) (queue-ticket ticket)
+                  (>= start (:deadline-ms ticket)) (queue-ticket (timeline/next-render @state start))
+                  :else (let [observed (render-slot! owner render! ticket start)]
+                          (queue-ticket (timeline/next-render observed (get-in observed [:last :finished-at-ms])))))))]
+      (queue-ticket (timeline/next-render grid (:origin-ms grid))))))
+
+(defn start!
+  "Own the physical publisher and optional render producer on separate workers.
+  The producer receives the next physical deadline and its actual start time."
+  ([owner period-ms] (start! owner period-ms nil))
+  ([owner period-ms render!]
+   (locking (:lock owner)
+     (when (or @(:closed? owner) @(:scheduler owner))
+       (throw (ex-info "Output publisher is closed or already scheduled" {})))
+     (let [grid (timeline/timeline ((:now-ms owner)) period-ms)
+           executor (Executors/newScheduledThreadPool (if render! 2 1))]
+       (reset! (:scheduler owner) executor)
+       (reset! (:timeline owner) grid)
+       (start-publications! owner executor grid)
+       (when render! (start-renders! owner executor render! grid))))
+   owner))
 
 (defn close!
   "Fence late completions and wait only for an already sending transport, never

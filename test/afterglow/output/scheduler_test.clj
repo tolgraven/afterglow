@@ -135,3 +135,89 @@
           (scheduler/publish! owner)
           (is (= [180 0] @output)))
         (finally (deliver release true) (deref publication 1500 nil) (scheduler/close! owner))))))
+
+(deftest early-physical-samples-wait-for-their-slot-and-late-direct-samples-expire
+  (let [physical (atom 0) sent (atom []) owner (capture physical sent)
+        begin (fn [slot due start options]
+                (reset! physical start)
+                (scheduler/begin-frame! owner 0 @patch options false
+                                        {:slot slot :started-at-ms start :deadline-ms due}))
+        finish (fn [token at red]
+                 (reset! physical at)
+                 (scheduler/complete! owner token (frame red 0 0)))
+        present (fn [at]
+                  (reset! physical at)
+                  (scheduler/publish! owner at)
+                  (first (get-in (last @sent) [:bytes 0])))]
+    (try
+      (let [early (begin 1 25 15 {})]
+        (is (true? (finish early 20 123)))
+        (is (zero? (present 24)))
+        (is (= 123 (present 25))))
+      (let [late (begin 2 50 40 {})]
+        (is (= 123 (present 50)))
+        (is (false? (finish late 53 210))))
+      (is (= 123 (present 75)))
+      (is (true? (finish (begin 4 100 90 {}) 95 177)))
+      (is (= 123 (present 125)) "Overdue undelivered slots cannot advance direct output")
+      (is (= 1 (:missed-render-deadlines (scheduler/status owner))))
+      (is (= 1 (:expired-at-publication (scheduler/status owner))))
+      (let [buffered {:mode :buffered-interpolation :latency-ms 25}]
+        (is (true? (finish (begin 6 150 140 buffered) 155 90)))
+        (is (zero? (present 160)))
+        (is (= 90 (present 175))))
+      (finally (scheduler/close! owner)))))
+
+(deftest scheduled-producer-and-sender-share-a-grid-without-catching-up-on-expired-slots
+  (let [clock (atom 0.0) calls (atom (sorted-map)) serial (atom 0) sent (atom []) rendered (atom [])
+        owner (scheduler/create {:now-ms #(deref clock)
+                                 :send! (fn [u id] (swap! sent conj [@clock id (bit-and 255 (aget ^bytes (get u 0) 0))]))})
+        queue! (fn [_ _ at f] (swap! calls assoc [at (swap! serial inc)] f))]
+    (letfn [(until! [time]
+              (loop []
+                (when-let [[[at :as key] f] (first @calls)]
+                  (when (<= at time)
+                    (swap! calls dissoc key)
+                    (swap! clock max at)
+                    (f)
+                    (recur))))
+              (swap! clock max time))
+            (render! [ticket]
+              (let [id (:slot ticket) cost (if (= id 3) 55 7)
+                    token (scheduler/begin-frame! owner 1 @patch {} false ticket)]
+                (swap! rendered conj [id @clock (:deadline-ms ticket)])
+                (until! (+ @clock cost))
+                (scheduler/complete! owner token (frame id 0 0))))]
+      (try
+        (with-redefs [scheduler/at! queue!]
+          (scheduler/start! owner 25 render!)
+          (until! 175)
+          (is (= [1 0.0 25.0] (first @rendered)))
+          (is (< 41.0 (second (second @rendered)) 43.0) "Fresh inputs for the second 50 ms slot")
+          (is (not-any? #(= 3 (last %)) @sent) "The slow render cannot take over at a later deadline")
+          (is (= [25.0 50.0 75.0 100.0 125.0 150.0 175.0] (mapv first @sent)))
+          (is (pos? (:missed-render-deadlines (scheduler/status owner))))
+          (is (pos? (get-in (scheduler/status owner) [:render-timing :skipped]))))
+        (finally (scheduler/close! owner))))))
+
+(deftest blocked-wire-resumes-on-a-future-slot-with-a-single-send
+  (let [clock (atom 0.0) next-call (atom nil) started (atom [])
+        owner (scheduler/create {:now-ms #(deref clock)
+                                 :send! (fn [_ _]
+                                          (swap! started conj @clock)
+                                          (when (= 1 (count @started)) (reset! clock 81.0)))})]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due f] (reset! next-call [due f]))]
+        (let [token (scheduler/begin-frame! owner 0 @patch {} false)]
+          (scheduler/complete! owner token (frame 90 0 0)))
+        (scheduler/start! owner 25)
+        (is (== 25 (first @next-call)))
+        (reset! clock 49.5)
+        ((second @next-call))
+        (is (== 100 (first @next-call)))
+        (reset! clock 100.0)
+        ((second @next-call))
+        (is (= [49.5 100.0] @started))
+        (is (= 2 (:skipped-output-slots (scheduler/status owner))))
+        (is (= 4 (get-in (scheduler/status owner) [:output-timing :slot]))))
+      (finally (scheduler/close! owner)))))

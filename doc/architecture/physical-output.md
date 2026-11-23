@@ -14,6 +14,45 @@ Both DMX sinks accept a map of universe ID to channel bytes via `(:send! sink)`,
 
 The scheduler hands completed, detached channel buffers to a physical publication clock. Its fallback and interpolation policies come from `afterglow.render.presentation`. A host supplies epoch changes, blackout intent and fixture/channel semantics via `begin-frame!` before painting. It hands the result to `complete!`, starts the clock with `start!` or drives it explicitly with `publish!`, then releases the publisher via `close!`.
 
+## Sample time and physical publication
+
+At 40 Hz the wire has a nominal slot every 25 ms. Pass a render callback to
+`(scheduler/start! owner 25 render!)` to run both clocks from one monotonic
+origin. Each ticket carries its slot number, deadline, planned start, actual
+start and reserved lead in milliseconds. Freeze external controls when the
+callback acquires the show, then evaluate the *deadline's* musical position
+with that snapshot. Pass the ticket to the six-argument `begin-frame!`.
+Completions can arrive early. The sender first makes them visible when the
+corresponding physical time arrives. Pure `afterglow.output.timeline` owns
+the scheduling rules and has no device or thread dependencies.
+
+The first render starts a period ahead. Later starts reserve the larger of the
+latest cost and the 90th percentile over the last 24 observed render costs,
+plus a jitter allowance of 10% or 0.4 ms, whichever is larger. A single outlier
+can raise the cost estimate to a full period. Two successive long renders can
+raise it further. For example, seven milliseconds of observed work reserves
+7.7 ms. The next 50 ms output then begins sampling around 42.3 ms. An operating
+system wake and the host's show lock can delay that start. The producer chooses
+an achievable future slot after a slow render. The sender also skips missed
+slots following a late wake or a blocked transport.
+
+`:direct` and `:hold-fade` discard a newly completed sample that missed its
+scheduled deadline. A held source may still drive the configured fallback.
+`:buffered-interpolation` accepts completion within the configured presentation
+latency and blends continuous channels using the delayed timeline. Function
+channels retain the lower sample. A patch, blackout or epoch change fences
+previously prepared packets. High refresh-rate local UI animation keeps its
+own presentation clock.
+
+Inspect `(scheduler/status owner)` for the following measurements.
+
+| Measurement | Meaning |
+| --- | --- |
+| `:render-timing :last` | Planned release and deadline, actual start, input capture start, ready and finish, render cost and time remaining at handoff. Hosts can supply show time and beat. |
+| `:render-timing :on-time`, `:renders`, `:skipped` | Rendered samples ready by their nominal slot, attempts made and intervening slots the producer skipped. |
+| `:output-timing` | Most recent physical slot, nominal time, actual publisher start and completion, source sample time and frame ID. The transport call ends before the completion timestamp. |
+| `:missed-render-deadlines`, `:expired-at-publication`, `:skipped-output-slots` | Renders completed outside their policy window, queued samples waiting past their policy window in the current generation, and elapsed slots the sender skipped. |
+
 RDM runs independently of DMX publication. The connection's `:request!` performs `ForceDiscovery` or `RDMCommand`; `command!` follows timed acknowledgements and reports responder NACKs. The job owner registers the provided close function before connect, closes the connection on cancellation or its deadline, and closes it in `finally`. Tolglow selects devices, associates discoveries with the fixture registry and saves that show configuration.
 
 ## Direct RDM over Art-Net
