@@ -107,3 +107,20 @@
     (is (= #{} (get-in frame [:members :fast])))
     (is (= [:spatial/enter :spatial/exit :spatial/enter :spatial/exit] (mapv :type hits)))
     (is (every? true? (map near [2.25 2.45 2.55 2.75] (map :time-ms hits))))))
+
+(deftest moving-a-volume-emits-only-changes-in-printed-fixture-order
+  (let [groups [[-1 ["z-old" :left/a "a-old" :left/b]]
+                [0 [:retained]]
+                [1 [:right/b "a-new" :right/a "z-new"]]]
+        fixtures (for [[x ids] groups id ids] {:id id :position [x 2 0]})
+        step (fn [prior lo hi t]
+               (let [box {:shape :box :min [lo 1 -1] :max [hi 3 1]}]
+                 (spatial/advance (:state prior) (scene {:window box}) {:time-ms t :epoch 3} fixtures {})))
+        before (step nil -2 0.5 0)
+        moved (step before -0.5 2 25)
+        changed (fn [type ids] (mapv (fn [id] {:type type :volume-id :window :fixture-id id :time-ms 25}) ids))]
+    (is (= (into (changed :spatial/exit ["a-old" "z-old" :left/a :left/b])
+                 (changed :spatial/enter ["a-new" "z-new" :right/a :right/b]))
+           (:events moved)))
+    (is (= #{:retained :right/b "a-new" :right/a "z-new"} (get-in moved [:members :window])))
+    (is (empty? (:events (step moved -0.5 2 50))))))

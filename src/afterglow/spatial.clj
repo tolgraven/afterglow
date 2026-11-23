@@ -56,12 +56,18 @@
     (hdr-members rig (:source-id volume) (:threshold volume 0.0) contacts)
     (geometry/fixtures-in rig (cond-> volume body (assoc :position (:position body))))))
 
+(defn- append-transitions [events event-type volume-id now from other]
+  ;; Neighboring frames often share thousands of fixtures. Retain only the
+  ;; changed IDs and compute their printable ordering keys once.
+  (let [changed (into [] (comp (remove #(contains? other %)) (map (juxt pr-str identity))) from)
+        event (fn [[_ fixture-id]]
+                {:type event-type :volume-id volume-id :fixture-id fixture-id :time-ms now})]
+    (into events (map event) (sort-by first changed))))
+
 (defn- transitions [id previous current now]
-  (into [] (mapcat (fn [[event-type ids]]
-                     (map (fn [fixture-id] {:type event-type :volume-id id :fixture-id fixture-id :time-ms now})
-                          (sort-by pr-str ids))))
-        [[:spatial/exit (set/difference previous current)]
-         [:spatial/enter (set/difference current previous)]]))
+  (-> []
+      (append-transitions :spatial/exit id now previous current)
+      (append-transitions :spatial/enter id now current previous)))
 
 (defn- observe [state ids specs rig hdr now]
   (reduce (fn [out id]
