@@ -93,3 +93,11 @@ for the union was 11.32 → 10.91 ms, with p95 of 15.62 → 18.80 ms. The single
 box retained 45 fixtures and took 12.46 → 6.92 ms at the median. Each run used
 40 warmups and 55 timed scans. A fully weighted, unattenuated sample now lets
 the scan finish that head immediately.
+
+A prepared rig shares the mounted direction, lens and field of view of fixed
+emitters across frames and volumes. The first lit sample computes that beam.
+Changing the patch rebuilds the rig. A committed pose, direction, mechanical
+pan/tilt or zoom takes precedence for that frame. The beam's emitted color,
+shutter gates, optical range, atmosphere and line of sight still come from
+the current observation. Prepared geometry belongs to the host and is omitted
+from a saved show.

@@ -135,3 +135,26 @@
             (doseq [values [(:values full) {:lamp (first (frame/project-compact compact))} reader]]
               (is (= open? (contains? (:weights (field/sample volume rig {:values values})) :lamp))
                   (pr-str [gate spec value])))))))))
+
+(deftest fixed-mount-retains-live-directivity-and-zoom
+  (let [spot {:id :strip :position [0 0 0] :direction [0 0 1] :channels {:red 1}
+              :zoom-range-deg [4 80] :lens-radius-m 0.05}
+        rig (spatial/prepare-rig [spot])
+        volume {:shape :sphere :radius 0.1 :position [2 0 4] :selection #{:beam}}
+        red {:emitted-color [0.8 0 0]}
+        weight (fn [frame] (get-in (field/sample volume rig {:values {:strip frame}}) [:weights :strip]))]
+    (is (identical? rig (spatial/prepare-rig rig)))
+    (is (nil? (weight red)))
+    (is (= 0.8 (weight (assoc red :zoom 1.0))))
+    (is (= 0.8 (weight (assoc red :channels {:zoom 1.0}))))
+    (is (= 0.8 (weight (assoc red :pose {:direction [2 0 4]}))))
+    (is (= 0.8 (weight (assoc red :direction [2 0 4]))))
+    (is (nil? (weight (assoc red :direction [2 0 4] :shutter-open? false))))
+    (is (nil? (weight red)))))
+
+(deftest fixed-mount-beam-errors-occur-only-when-lit
+  (let [rig (spatial/prepare-rig [{:id :bad :channels {:red 1} :beam-angle 180}])
+        volume {:shape :sphere :position [0 0 2] :radius 1 :selection #{:beam}}]
+    (is (empty? (:weights (field/sample volume rig {}))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle"
+                          (field/sample volume rig {:values {:bad {:emitted-color [1 1 1]}}})))))

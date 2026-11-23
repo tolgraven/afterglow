@@ -1,7 +1,8 @@
 (ns afterglow.spatial
   "Advance a venue's selection volumes from an explicit clock, patch and observed
   HDR field. Transport, cue ownership and running user callbacks belong to the host."
-  (:require [afterglow.spatial.geometry :as geometry]
+  (:require [afterglow.spatial.field :as field]
+            [afterglow.spatial.geometry :as geometry]
             [afterglow.spatial.motion :as motion]
             [afterglow.spatial.trace :as trace]
             [afterglow.time :as time]
@@ -43,7 +44,7 @@
             traces (into {} (keep local-shape) balls)]
         (->Scene bounds gravity volumes order balls traces)))))
 
-(defn prepare-rig [fixtures] (geometry/prepare-rig fixtures))
+(defn prepare-rig [fixtures] (field/prepare-rig fixtures))
 
 (defn- hdr-members [rig source-id threshold contacts]
   (into #{} (comp (mapcat seq) (keep (fn [[id peak]]
