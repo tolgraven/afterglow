@@ -80,7 +80,7 @@
     (is (= [0 0 0 0] (bytes-at dark 0 1 2 3 4)))
     (is (= [255 128 64 128 0] (bytes-at dark 0 10 11 12 13 14)))
     (is (= [255] (bytes-at dark 1 512)))
-    (is (= [0] (bytes-at dark 2 1)))
+    (is (= [255] (bytes-at dark 2 1)))
     (is (= 0 (:time-ms half)))
     (is (= 75 (get-in half [:presentation :presented-at-ms])))
     (is (= 0.5 (get-in half [:presentation :gain])))))
@@ -88,12 +88,12 @@
 (deftest fine-inverted-dimmer-and-reversed-physical-offsets-use-whole-values
   (let [state (admitted (presentation/new-state plan {:mode :hold-fade :fade-ms 100}) (packet 1 0))
         half (frame-at state 75)]
-    ;; Renderer fractional-255 convention: inverted half is 127 + 128/255.
+    ;; An inverted half level packs to 0x8000.
     ;; Fade in semantic space to approximately quarter, then invert back.
-    (is (= [191] (bytes-at half 1 512)))
-    (is (= [64] (bytes-at half 2 1)))
-    (is (= [0 102] (bytes-at half 2 2 3)))
-    (is (= [127 128] (bytes-at (frame-at state 0) 0 15 16)))))
+    (is (= [192] (bytes-at half 1 512)))
+    (is (= [0] (bytes-at half 2 1)))
+    (is (= [102 102] (bytes-at half 2 2 3)))
+    (is (= [128 0] (bytes-at (frame-at state 0) 0 15 16)))))
 
 (deftest one-buffer-interpolation-holds-discrete-controls-until-next-sample
   (let [old (packet 1 0 0 [(a :head :pan 0) (a :head :strobe 0.2) (a :head :gobo 0.3)])
@@ -102,17 +102,17 @@
         half (frame-at state 37.5)]
     (is (nil? (frame-at state 24)))
     (is (= (:universes old) (:universes (frame-at state 25))))
-    (is (= [127 128 51 77] (bytes-at half 0 15 16 19 20)))
-    (is (= [255 0 204 230] (bytes-at (frame-at state 50) 0 15 16 19 20)))
+    (is (= [128 0 51 77] (bytes-at half 0 15 16 19 20)))
+    (is (= [255 255 204 230] (bytes-at (frame-at state 50) 0 15 16 19 20)))
     (is (= [0 25] (get-in half [:presentation :source-times])))
     (is (= 0.5 (get-in half [:presentation :weight])))
     (is (= 12.5 (get-in half [:presentation :target-time-ms])))))
 
 (deftest interpolation-is-whole-word-not-independent-byte-interpolation
-  (let [left (packet 1 0 0 [(a :head :pan (/ 127.99 255))])
-        right (packet 2 25 25 [(a :head :pan (/ 128.01 255))])
+  (let [left (packet 1 0 0 [(a :head :pan (/ 32765.0 65535))])
+        right (packet 2 25 25 [(a :head :pan (/ 32771.0 65535))])
         state (-> (presentation/new-state plan {:mode :buffered-interpolation}) (admitted left) (admitted right))]
-    (is (= [127 252] (bytes-at left 0 15 16)))
+    (is (= [127 253] (bytes-at left 0 15 16)))
     (is (= [128 3] (bytes-at right 0 15 16)))
     (is (= [128 0] (bytes-at (frame-at state 37.5) 0 15 16)))))
 
