@@ -3,6 +3,7 @@
   The physical output uses the local float64 reference, even for a successful check."
   (:require [afterglow.render.ir :as ir])
   (:import [java.nio ByteBuffer ByteOrder FloatBuffer]
+           [java.security SecureRandom]
            [java.util Arrays]))
 
 (defn- slice [points width start n]
@@ -34,12 +35,16 @@
                 (:outputs plan)))
       cpu)))
 
-(def ^:private random-source (java.security.SecureRandom.))
+(def ^:private random-source (delay (SecureRandom.)))
 
 (defn- indices [n]
-  (if (<= n 4) (range n)
-    (loop [rows #{}]
-      (if (= 4 (count rows)) rows (recur (conj rows (.nextInt random-source n)))))))
+  (if (<= n 4)
+    (range n)
+    (let [^SecureRandom rng @random-source]
+      (loop [rows #{}]
+        (if (= 4 (count rows))
+          rows
+          (recur (conj rows (.nextInt rng n))))))))
 
 (defn agree?
   "Compare all corresponding float32 values. Then independently verify up to
