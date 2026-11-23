@@ -3,6 +3,16 @@
   (:require [afterglow.runtime.faults :as faults])
   (:import [java.util IdentityHashMap]))
 
+(defrecord UniformField [type components values])
+
+(defn uniform-batch
+  "Represent a known uniform GPU sample using one exclusively owned tuple per
+  field. Only the local fixture renderer consumes this layout."
+  [sample target-count]
+  (assoc sample :count target-count :outputs (update-vals (:outputs sample) map->UniformField)))
+
+(defn uniform-field? [field] (instance? UniformField field))
+
 (defn- scale-field! [outputs attribute gain]
   (let [values (get-in outputs [attribute :values])]
     (when-not (and (instance? double/1 values)

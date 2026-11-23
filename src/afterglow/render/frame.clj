@@ -7,6 +7,7 @@
   an implementation of all legacy fixture function ranges/optics."
   (:require [afterglow.render.atmosphere :as atmosphere]
             [afterglow.render.coverage :as coverage]
+            [afterglow.render.fields :as fields]
             [afterglow.render.emission.dense :as emission]
             [afterglow.render.layers :as layers]
             [afterglow.render.hdr :as hdr]
@@ -903,13 +904,15 @@
        (fail! "Invalid batch shape, count or blend" {}))
      (let [target-indices (batch-target-indices patch target-ids)
            columns (mapv
-                    (fn [[attribute {:keys [type components values]}]]
+                    (fn [[attribute {:keys [type components values] :as field}]]
                       (let [expected-type (batch-field-type attribute)
                             vector? (= :vec3 expected-type)
-                            expected-width (if vector? 3 1)]
+                            expected-width (if vector? 3 1)
+                            uniform? (fields/uniform-field? field)
+                            rows (if uniform? 1 (clojure.core/count target-ids))]
                         (when-not (and (keyword? attribute) (= components expected-width) (= type expected-type)
                                        (instance? doubles-class values)
-                                       (= (alength ^doubles values) (* expected-width (clojure.core/count target-ids))))
+                                       (= (alength ^doubles values) (* expected-width rows)))
                           (fail! "Invalid typed batch output field" {:attribute attribute}))
                         (when (and (geometric-attributes attribute) (not= :replace blend))
                           (fail! "Geometry assignments require :replace blend" {:attribute attribute}))
@@ -919,60 +922,87 @@
                             (when-not (contains? (::supported (get (:by-id patch) id)) attribute)
                               (fail! "Fixture does not implement batch attribute" {:target-id id :attribute attribute}))))
                         {:attribute attribute :components components :values values
-                         :slot (if (= attribute :color) 0 (get (::attribute-slots patch) attribute))}))
+                         :source-stride (if uniform? 0 components) :slot (if (= attribute :color) 0 (get (::attribute-slots patch) attribute))}))
                     (sort-by (comp str key) outputs))]
        {:target-ids target-ids :target-indices target-indices :columns columns :blend blend :opacity opacity})) batches))
 
 (defn- validate-covered-prefix!
-  [patch attribute high? ^doubles source width length ^booleans excluded]
+  [patch attribute high? ^doubles source width source-stride length ^booleans excluded]
   ;; These opaque inputs cannot contribute to the final column. A hidden
   ;; invalid value must still fault its source in the original row order.
-  (let [width (long width)]
+  (let [width (long width) source-stride (long source-stride)]
     (dotimes [row (long length)]
       (when-not (and excluded (aget excluded row))
         (let [allow-hdr? (and high? (or (not= :dimmer attribute)
                                         (::emission-channels (nth (:fixtures patch) row))))]
           (dotimes [component width]
-            (let [v (aget source (+ (* row width) component))]
+            (let [v (aget source (+ (* row source-stride) component))]
               (when-not (and (Double/isFinite v) (<= 0.0 v) (or allow-hdr? (<= v 1.0)))
                 (fail! "Typed batch value must be finite and within [0,1]"
                        {:attribute attribute :row row :value v})))))))))
 
+(defn- assign-uniform!
+  [^doubles target-values ^booleans target-present ^booleans excluded stride
+   {:keys [target-ids target-indices]} {:keys [slot values] :as column}]
+  (let [stride (long stride) skip (long (::coverage/validate-prefix column 0))
+        rows (count target-ids) ^doubles tuple values]
+    (dotimes [component (alength tuple)]
+      (let [value (aget tuple component) field-slot (+ (int slot) component)]
+        (loop [row skip]
+          (when (< row rows)
+            (let [index (if target-indices (long (aget ^ints target-indices row)) row)]
+              (when-not (and excluded (aget excluded index))
+                (let [destination (+ (* index stride) field-slot)]
+                  (aset target-values destination value)
+                  (aset target-present destination true))))
+            (recur (inc row))))))))
+
+(defn- merge-packed-column!
+  [patch ^doubles target-values ^booleans target-present ^booleans excluded stride
+   {:keys [target-ids target-indices blend opacity ::layers/opacities]}
+   {:keys [attribute components values slot source-stride] :as column}]
+  (let [^doubles source values, row-count (count target-ids), components (int components)
+        stride (long stride) opacity (double opacity) source-stride (long source-stride)
+        skip (long (::coverage/validate-prefix column 0))
+        high? (and (::hdr? patch) (hdr/light-attributes attribute))]
+    (when (pos? skip)
+      (validate-covered-prefix! patch attribute high? source components source-stride skip excluded))
+    (dotimes [offset (- row-count skip)]
+      (let [row (+ skip offset)
+            index (if target-indices (long (aget ^ints target-indices row)) row)
+            base (* index stride)
+            opacity (if opacities (aget ^doubles opacities row) opacity)]
+        (when-not (or (and opacities (zero? opacity)) (and excluded (aget excluded (int index))))
+          (dotimes [component components]
+            (let [value (aget source (+ (* row source-stride) component))
+                  permitted? (and high? (or (not= :dimmer attribute)
+                                             (::emission-channels (nth (:fixtures patch) index))))]
+              (when-not (and (Double/isFinite value) (<= 0.0 value) (or permitted? (<= value 1.0)))
+                (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
+              (let [destination (+ base (int slot) component)
+                    before (aget target-values destination)
+                    blended (case blend :replace value :add (+ before value) :max (max before value))
+                    level (if (== 1.0 opacity) blended (+ before (* opacity (- blended before))))]
+                (when-not (and (Double/isFinite level) (<= 0.0 level) (or permitted? (<= level 1.0)))
+                  (fail! "Blended assignment exceeds its finite attribute range"
+                         {:target-id (nth target-ids row) :attribute attribute :value level}))
+                (when (pos? opacity)
+                  (aset target-values destination level)
+                  (aset target-present destination true))))))))))
+
 (defn- merge-packed-batches!
   ([patch target-values target-present batches]
    (merge-packed-batches! patch target-values target-present batches nil))
-  ([patch ^doubles target-values ^booleans target-present batches ^booleans excluded]
-   (let [stride (int (::stride patch))]
-     (doseq [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} batches
-             {:keys [attribute components values slot] :as column} columns]
-       (let [^doubles source values, row-count (count target-ids), components (int components)
-             opacity (double opacity)
-             skip (long (::coverage/validate-prefix column 0))
-             high? (and (::hdr? patch) (hdr/light-attributes attribute))]
-         (when (pos? skip)
-           (validate-covered-prefix! patch attribute high? source components skip excluded))
-         (dotimes [offset (- row-count skip)]
-           (let [row (+ skip offset)
-                 index (long (if target-indices (aget ^ints target-indices row) row))
-                 base (* index stride)
-                 opacity (if opacities (aget ^doubles opacities row) opacity)]
-             (when-not (or (and opacities (zero? opacity)) (and excluded (aget excluded (int index))))
-               (dotimes [component components]
-                 (let [value (aget source (+ (* row components) component))
-                       permitted? (and high? (or (not= :dimmer attribute)
-                                                  (::emission-channels (nth (:fixtures patch) index))))]
-                   (when-not (and (Double/isFinite value) (<= 0.0 value) (or permitted? (<= value 1.0)))
-                     (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
-                   (let [destination (+ base (int slot) component)
-                         before (aget target-values destination)
-                         blended (case blend :replace value :add (+ before value) :max (max before value))
-                         level (if (== 1.0 opacity) blended (+ before (* opacity (- blended before))))]
-                     (when-not (and (Double/isFinite level) (<= 0.0 level) (or permitted? (<= level 1.0)))
-                       (fail! "Blended assignment exceeds its finite attribute range"
-                              {:target-id (nth target-ids row) :attribute attribute :value level}))
-                     (when (pos? opacity)
-                       (aset target-values destination level)
-                       (aset target-present destination true)))))))))))))
+  ([patch target-values target-present batches excluded]
+   (let [stride (::stride patch)]
+     (doseq [{:keys [columns blend opacity ::layers/opacities] :as batch} batches
+             {:keys [slot source-stride values] :as column} columns]
+       ;; Normalized replacement is independent of the backdrop and of per-fixture HDR rules.
+       ;; An exceptional tuple still takes the ordinary path to preserve the first fault.
+       (if (and (some? slot) (zero? source-stride) (= :replace blend) (== 1.0 opacity)
+                (nil? opacities) (every? unit? values))
+         (assign-uniform! target-values target-present excluded stride batch column)
+         (merge-packed-column! patch target-values target-present excluded stride batch column))))))
 
 (defn- merge-packed-assignments!
   [patch ^doubles values ^booleans present assignments]
@@ -988,6 +1018,13 @@
             (write-packed-assignment! values present (+ base (int (get slots attribute))) value
                                       blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute)))))))))
 
+(defn- column-value [{:keys [values components source-stride]} row]
+  (let [start (* (long source-stride) (long row))
+        ^doubles values values]
+    (if (= 1 components)
+      (aget values start)
+      [(aget values start) (aget values (inc start)) (aget values (+ start 2))])))
+
 (defn- expand-batch
   ([batch] (expand-batch batch nil))
   ([{:keys [target-ids columns blend opacity ::layers/opacities]} selected]
@@ -995,10 +1032,9 @@
          :let [id (nth target-ids row)]
          :when (and (or (nil? selected) (contains? selected id))
                     (or (nil? opacities) (pos? (aget ^doubles opacities row))))
-         {:keys [attribute components values]} columns]
+         {:keys [attribute] :as column} columns]
      {:target-id id :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
-      :value (if (= 1 components) (aget ^doubles values row)
-                 (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
+      :value (column-value column row)})))
 
 (defn- layer-rows [block targets]
   (case (:kind block)
@@ -1031,10 +1067,9 @@
                                  (or (nil? opacities) (pos? (aget ^doubles opacities row))))
                           (conj! selected row) selected))
                  (persistent! selected)))]
-    (for [row rows, {:keys [attribute components values]} columns]
+    (for [row rows, {:keys [attribute] :as column} columns]
       {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
-       :value (if (= 1 components) (aget ^doubles values row)
-                  (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
+       :value (column-value column row)})))
 
 (defn- geometry-source-storage [patch blocks]
   (when (some #(some? (:source %)) blocks)

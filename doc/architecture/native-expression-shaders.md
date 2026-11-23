@@ -92,6 +92,15 @@ clock or parameter triggers another evaluation. Evicting a group releases its
 sample as well as its compiled program. The direct program handle evaluates on
 every call.
 
+The local physical renderer requests the `:fixture-frame` layout. A group that
+reads only uniform values can return one detached scalar or three-component
+tuple per field. The renderer applies the tuple at each selected fixture in the
+original target order. A full-opacity replacement within the normalized range
+can fill its physical slot after one range check. Per-target masks, HDR,
+geometry, blends and fault attribution follow the same rules as expanded
+fields. Programs reading positions or surface UVs retain per-target arrays.
+The three-argument `submit!` and `evaluate!` APIs return expanded arrays.
+
 One worker serializes GPU calls. Multiple frame workers can call `evaluate!`
 or use `(gpu/submit! owner group env)` for a Java Future. Submission captures
 uniforms immediately. The queue has room for `:queue-capacity` waiting jobs

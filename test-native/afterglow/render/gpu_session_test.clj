@@ -155,3 +155,18 @@
         (is (session/evict! owner group))
         (latest inputs)
         (is (= 3 (:draws (session/status owner))))))))
+
+(deftest only-local-uniform-groups-get-one-owned-tuple-per-field
+  (with-open [owner (session/open!)]
+    (let [positions [[0 0 0] [0.5 0 0] [0.75 0 0]]
+          uniform (session/group {:level {:op :param :key :level}} positions)
+          chart (session/group spatial positions)
+          packed #(.get ^Future (session/submit! owner % env :fixture-frame))
+          result (packed uniform)]
+      (is (= 3 (:count result)))
+      (is (= [0.25] (levels result)))
+      (aset ^doubles (get-in result [:outputs :level :values]) 0 0.75)
+      (is (= [0.25] (levels (packed uniform))))
+      (is (= [0.25 0.25 0.25] (levels (session/evaluate! owner uniform env))))
+      (is (= 1 (:draws (session/status owner))))
+      (is (= [0.25 0.75 1.0] (levels (packed chart)))))))

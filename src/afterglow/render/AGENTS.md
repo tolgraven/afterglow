@@ -99,6 +99,11 @@ expressions. Bind varying names in returned order. Offsets and stride measure
 float32 components per fixture. Validate the device's interleaved component
 limit and use the declared clock and parameter bindings before a draw.
 
+Keep expanded arrays for public GPU evaluations and distributed results.
+The local fixture renderer can carry one detached tuple for a proven uniform
+field. Exercise reversed or repeated targets, masked sources, geometry, fault
+attribution and ordinary dense arrays when changing the physical column reader.
+
 The optional JVM moving-head solver uses a private desktop OpenGL context and the
 same packaged GLSL. Keep geometry out of the JOGL binding. Reuse the CPU frame
 history lookup for stable fixture IDs, and explicitly retire failed contexts.
