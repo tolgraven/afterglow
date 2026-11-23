@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is]]
             [afterglow.control.devices.transports :as transports]
             [afterglow.control.devices.generic :as generic])
-  (:import [java.awt.image BufferedImage]))
+  (:import [java.awt Font]
+           [java.awt.image BufferedImage]))
 
 (deftest transports-remain-inert-until-explicit-open
   (is (map? (transports/midi-transport {:input-index 0 :output-index 1})))
@@ -43,6 +44,50 @@
                  (transports/render-view! image {:bpm 120 :master 1 :touched-control {:target :tempo :editable? editable?}})
                  (vec (.getRGB image 0 32 960 24 nil 0 960))))]
     (is (not= (draw true) (draw false)))))
+
+(deftest fine-feedback-appears-only-while-held
+  (let [image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)
+        view {:title "Tolglow" :page :main :status :ready :bpm 120 :master 1
+              :blackout? true :touched-control {:target :tempo :editable? false}
+              :parameters [{:name "Level" :value 0.5}]}
+        pixels (fn [y height] (vec (.getRGB image 0 y 960 height nil 0 960)))
+        frame (fn [view]
+                (transports/render-view! image view)
+                [(pixels 0 32) (pixels 32 24) (pixels 56 104)])
+        [header status parameters :as normal] (frame view)
+        [fine-header fine-status fine-parameters] (frame (assoc view :fine? true))]
+    (is (not= status fine-status))
+    (is (= [header parameters] [fine-header fine-parameters]))
+    (is (= normal (frame (assoc view :fine? false))))))
+
+(deftest numeric-display-labels-fit-with-their-exponents
+  (let [image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)
+        graphics (.createGraphics image)]
+    (try
+      (.setFont graphics (Font. "SansSerif" Font/PLAIN 14))
+      (let [metrics (.getFontMetrics graphics)
+            available-width 104
+            label #(#'transports/parameter-value-label metrics % available-width)
+            small (/ 1.0 65535.0)
+            large 1.2345678901234567E120
+            compact-large "1.23457e120"]
+        (is (= "42" (label 42)))
+        (is (= "0.51" (label 0.51)))
+        (is (= "1/3" (label 1/3)))
+        (is (= ":open" (label :open)))
+        (is (= "0.123457" (label 0.123456789)))
+        (is (= "0.510015" (label (+ 0.51 small))))
+        (is (= compact-large
+               (#'transports/parameter-value-label metrics large
+                                                  (.stringWidth metrics compact-large))))
+        (doseq [value [small (- small) large]]
+          (let [text (label value)]
+            (is (re-find #"[eE][+-]?\d+$" text))
+            (is (<= (.stringWidth metrics text) available-width))))
+        (doseq [value [small (- small) large]
+                :let [text (#'transports/parameter-value-label metrics value 200)]]
+          (is (< (Math/abs (- 1.0 (/ (Double/parseDouble text) value))) 1e-5))))
+      (finally (.dispose graphics)))))
 
 (deftest a-slow-native-driver-never-owns-the-caller-and-retries-reuse-its-scan
   (let [running (promise)
