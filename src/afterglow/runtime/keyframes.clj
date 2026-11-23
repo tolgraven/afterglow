@@ -92,7 +92,9 @@
         source (delay (sample ctx))
         origin (cond
                  (and reuse? prior (not (:forecast-failed? prior)))
-                 (:result (sample-window prior ctx options now))
+                 (if (:progress options)
+                   (:result prior)
+                   (:target prior))
 
                  (and prior (= (:epoch prior) (:epoch window)) (identical? (:rig prior) (:rig window))
                       (= (first (:inputs prior)) (first (:inputs window)))

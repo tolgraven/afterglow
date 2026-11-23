@@ -50,9 +50,9 @@
         next (tick back 1 0.2)]
     (is (= 0.0625 (get-in first [:assignments 0 :value])))
     (is (< (get-in back [:assignments 0 :value]) (get-in forward [:assignments 0 :value])))
-    (is (== 0.025 (get-in next [:assignments 0 :value])))
+    (is (== (get-in back [:assignments 0 :value]) (get-in next [:assignments 0 :value])))
     (is (= 3 (count @calls)))
-    (is (= {:origin [0.025] :target [0.25] :result [0.025]}
+    (is (= {:origin [0.0125] :target [0.25] :result [0.0125]}
            (select-keys (kf/inspect (get-in next [:keyframes "0:1"]) :lamp :dimmer) [:origin :target :result])))))
 
 (deftest uncertified-and-stateful-effects-run-on-the-real-clock

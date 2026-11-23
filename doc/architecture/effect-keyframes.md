@@ -10,7 +10,7 @@ A pure lighting effect can declare how often its full function should run. At th
 
 Choose one interval unit from `:beats`, `:bars`, `:phrases` and `:ms`. Bars and phrases use the current meter. Both current and projected contexts carry coherent flat and nested transport clocks. A missed evaluation preserves the musical grid. Tempo, meter, parameter, definition and rig changes trigger a fresh prediction.
 
-Progress normally advances from zero to one. An authored numeric parameter or path under show `:variables` can replace the clock fraction or add an offset. The source can increase or decrease each frame. Missing or nonfinite inputs use clock progress for replacement and zero for offsets. The easing function samples the bounded fraction. A spring or a Bézier with an elevated handle can overshoot in native coordinates or HDR emission. Normalized controls retain their physical bounds. At rollover the previous segment samples the current progress source before the next segment starts, including when a quiet audio return left it short of its previous target.
+Progress normally advances from zero to one. An authored numeric parameter or path under show `:variables` can replace the clock fraction or add an offset. The source can increase or decrease each frame. Missing or nonfinite inputs use clock progress for replacement and zero for offsets. The easing function samples the bounded fraction. A spring or a Bézier with an elevated handle can overshoot in native coordinates or HDR emission. Normalized controls retain their physical bounds. At rollover an externally driven segment starts from its last displayed value, even if a large new audio sample just arrived. An unmodulated segment reaches its time-based target at the boundary.
 
 ## Kernel and host
 
