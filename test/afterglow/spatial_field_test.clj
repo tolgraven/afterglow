@@ -79,6 +79,37 @@
     (is (= {:spot 0.5} (:weights (field/sample (assoc volume :selection #{:beam}) rig observations))))
     (is (= [:spot] @read-ids))))
 
+(deftest frame-sampler-shares-emissions-and-keeps-frame-and-selection-boundaries
+  (let [spot {:id :spot :position [0 0 0] :direction [0 0 1] :beam-angle 12 :channels {:red 1}}
+        mover {:id :mover :position [1 0 0] :channels {:red 1 :pan 2 :tilt 3}}
+        fixtures [spot mover]
+        rig (field/prepare-rig fixtures)
+        volume {:shape :sphere :position [0 0 3] :radius 0.4}
+        values {:spot {:emitted-color [0.7 0.2 0]} :mover {:emitted-color [0 0 0]}}
+        reads (atom [])
+        settings (field/prepare-observations {:range-m 8 :extinction-per-m 0.04})
+        sample (field/sampler rig (assoc settings :values #(do (swap! reads conj %) (get values %))))]
+    (is (= (field/positions volume rig) (sample volume)))
+    (is (empty? @reads))
+    (doseq [selection [#{:beam} #{:aimable :beam} #{:position :beam}]]
+      (let [field (assoc volume :selection selection)]
+        (is (= (field/sample field rig (assoc settings :values values)) (sample field)))))
+    (is (= [:spot :mover] @reads))
+    (let [dark (field/sampler rig (assoc settings :values {}))
+          field (assoc volume :selection #{:beam})]
+      (is (pos? (get-in (sample field) [:weights :spot])))
+      (is (empty? (:weights (dark field)))))))
+
+(deftest observing-a-frame-keeps-invalid-unlit-or-distant-optics-lazy
+  (let [fixture {:id :bad :position [0 0 0] :channels {:green 1} :beam-angle 180}
+        volume {:shape :sphere :position [0 0 3] :selection #{:beam} :radius 0.25}
+        lit (field/sampler [fixture] {:range-m 2 :values {:bad {:emitted-color [0 1 0]}}})
+        dark (field/sampler [fixture] {:values {}})]
+    (is (empty? (:weights (lit volume))))
+    (is (empty? (:weights (dark volume))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle"
+                          (lit (assoc volume :position [0 0 1]))))))
+
 (deftest clipped-and-occluded-radial-maxima-match-field-membership
   (let [lamp {:id :lamp :position [0 0 0] :direction [0 0 1] :beam-angle 30 :lens-radius-m 0.05 :channels {:red 1}}
         volume {:shape :sphere :position [1.4 0 4] :radius 0.7
