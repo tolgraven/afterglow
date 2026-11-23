@@ -82,3 +82,19 @@ backdrop. Supply `:beam` to include a lit cone or `:aimable` to include a
 reachable mover. Alpha uses the strongest qualifying contribution. The previous
 frame supplies emitted RGB, pose, fog attenuation and known receiver planes.
 [Optical selection and probe limits](spatial-beam-selection.md)
+
+Translated and stretched spheres can calculate distance directly from the three
+world coordinates. The calculation retains the inverse scale and subtraction
+order of the local sphere, including hard-edge membership at the boundary and
+the minimum-axis rule for feathering. Compound shapes still transform their
+children through their prepared geometry.
+
+A paired replay on 20,000 RGBW pixels and 64 moving heads placed four moving
+beam-aware fields in a room with finite receivers. Each revision ran 5 warmup
+frames and 9 measured frames, in alternating order. The median allocation per
+complete frame fell from 240.95 MB to 114.52 MB, summed coordinator/worker CPU
+from 347.78 to 255.04 ms, and wall time from 547.56 to 396.69 ms. Each frame's
+model, intents, selected previews and ArtDMX bytes agreed. The p95 wall times
+were 758 and 1,810 ms respectively on this shared machine. All 18 measured
+frames exceeded 25 ms. This profile uses Tolglow `2a6b8ce`, Afterglow
+`742d17b`, a 768 MiB heap and two effect workers with in-memory output.

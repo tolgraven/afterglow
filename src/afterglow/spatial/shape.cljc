@@ -81,17 +81,31 @@
       {:forward (fn [p] (mapv (fn [x k t] (+ (* x k) t)) p s offset))
        :inverse (fn [p] (mapv (fn [x k t] (/ (- x t) k)) p s offset))
        :inverse-delta (fn [d] (mapv / d s))
-       :scale s :min-scale (reduce min s)})))
+       :scale s :offset offset :min-scale (reduce min s)})))
 
-(defn- transformed [{:keys [distance inside? bounds witnesses] :as plan} transform]
+(defn- sphere-local-distance
+  "Use the same inverse transform as contact tracing without constructing a
+  temporary world-to-local coordinate vector for every fixture or beam probe."
+  [{[cx cy cz] :position radius :radius} {[sx sy sz] :scale [ox oy oz] :offset}]
+  (let [cx (double cx) cy (double cy) cz (double cz) r (double radius)
+        sx (double sx) sy (double sy) sz (double sz)
+        ox (double ox) oy (double oy) oz (double oz)]
+    (fn [[x y z]]
+      (let [dx (- (/ (- (double x) ox) sx) cx)
+            dy (- (/ (- (double y) oy) sy) cy)
+            dz (- (/ (- (double z) oz) sz) cz)]
+        (- (math/hypot (math/hypot dx dy) dz) r)))))
+
+(defn- transformed [{:keys [distance inside? bounds witnesses] :as plan} transform local-distance]
   (if-not transform plan
     (let [{:keys [forward inverse min-scale scale]} transform
+          distance-at (or local-distance (comp distance inverse))
           move-witness (fn [w]
                          (if (map? w)
                            (-> w (update :center forward) (update :radius * min-scale))
                            (forward w)))]
-      {:inside? (comp inside? inverse)
-       :distance (fn [p] (* min-scale (distance (inverse p))))
+      {:inside? (if local-distance (fn [p] (<= (local-distance p) 0.0)) (comp inside? inverse))
+       :distance (fn [p] (* min-scale (distance-at p)))
        ;; Distances scale by the smallest axis. A one-metre level set in
        ;; this distance field can therefore extend farther along a long axis.
        :falloff-stretch (mapv (fn [prior k] (* prior (/ k min-scale)))
@@ -104,7 +118,7 @@
   A ball may carry a :geometry expressed in coordinates relative to its physical centre."
   [{:keys [shape position radius geometry parts size rounding translation planes] :as spec}]
   (let [plan (case shape
-               :ball (if geometry (transformed (prepare geometry) (coordinates {:translation position} nil)) (sphere spec))
+               :ball (if geometry (transformed (prepare geometry) (coordinates {:translation position} nil) nil) (sphere spec))
                :sphere (sphere spec)
                :box (let [lo (:min spec) hi (:max spec)]
                       (rounded-box (mapv #(* 0.5 (+ %1 %2)) lo hi) (mapv #(* 0.5 (- %2 %1)) lo hi) 0.0))
@@ -112,8 +126,11 @@
                               (rounded-box position half-size (* (or rounding 0.0) (reduce min half-size))))
                :cylinder (cylinder spec)
                :polyhedron {:distance (extrema max (mapv half-space planes)) :bounds nil}
-               (:union :intersection :difference) (compound shape (mapv prepare parts)))]
+               (:union :intersection :difference) (compound shape (mapv prepare parts)))
+        transform (coordinates spec (:bounds plan))
+        sphere-distance (when (and transform (#{:sphere :ball} shape) (nil? geometry))
+                          (sphere-local-distance spec transform))]
     (transformed (cond-> plan
                    (nil? (:inside? plan)) (assoc :inside? (fn [p] (<= ((:distance plan) p) 0.0)))
                    (nil? (:witnesses plan)) (assoc :witnesses (if-let [p (center (:bounds plan))] [p] [])))
-                 (coordinates spec (:bounds plan)))))
+                 transform sphere-distance)))
