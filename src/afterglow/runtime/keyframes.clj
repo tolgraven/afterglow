@@ -19,9 +19,11 @@
 (defn with-inputs
   "Preprocess current and projected contexts through the same input middleware."
   [step transform]
-  (let [run (comp step transform)]
-    (if-let [sample (::sampler (meta step))]
-      (predictable run (comp sample transform))
+  (let [run (comp step transform)
+        info (meta step)
+        sample (::sampler info)]
+    (if info
+      (with-meta run (cond-> info sample (assoc ::sampler (comp sample transform))))
       run)))
 
 (defn validate! [{:keys [interval curve progress] :as options}]
@@ -84,11 +86,28 @@
     (measure (:effect-id ctx) eligible? f)
     (f)))
 
-(defn- input-generation [instance frame]
-  (let [paths (filter #(= :variables (first %)) (keys (get-in instance [:definition :blocks])))
-        generation (:keyframe-generation frame)]
+(defn- variable-path? [path]
+  (and (vector? path) (< 1 (count path)) (= :variables (first path))))
+
+(defn- variable-dependencies [declared bindings prior]
+  (cond
+    (and (nil? declared) (nil? bindings)) nil
+    (and (identical? declared (:declared prior)) (identical? bindings (:bindings prior))) prior
+    (or (nil? declared) (and (or (vector? declared) (set? declared)) (every? variable-path? declared)))
+    {:declared declared :bindings bindings
+     :paths (into (set declared) (filter #(= :variables (first %))) (keys bindings))}
+    :else (throw (ex-info "Declare full show variable paths on a predictable step" {::variable-paths declared}))))
+
+(def ^:private missing (Object.))
+
+(defn- variable-entry [frame path]
+  (let [value (get-in frame path missing)]
+    (when-not (identical? missing value) [path value])))
+
+(defn- input-generation [paths frame]
+  (let [generation (:keyframe-generation frame)]
     (if (seq paths)
-      {::generation generation ::variables (into {} (map (fn [path] [path (get-in frame path)])) paths)}
+      {::generation generation ::variables (into {} (keep #(variable-entry frame %)) paths)}
       generation)))
 
 (defn- declared-variables [signature]
@@ -101,10 +120,10 @@
       (update :frame dissoc :keyframes :measure-effect :keyframe-intervals)
       (update :instance vary-meta dissoc ::runtime/observe)))
 
-(defn- signature [instance frame options clock]
+(defn- signature [instance frame options clock paths]
   [(:effect-version instance) (dissoc (:params instance) (get-in options [:progress :param]))
    (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
-   (:targets instance) (:started-at-beat instance) (input-generation instance frame)])
+   (:targets instance) (:started-at-beat instance) (input-generation paths frame)])
 
 (defn- fresh-window [window prior same-inputs? sample ctx]
   (let [{:keys [options origin-clock target-clock]} window
@@ -139,14 +158,14 @@
           (sample-window window ctx options (:start window))))
       (assoc window :forecast-failed? true :result @source))))
 
-(defn- run-window [step ctx options prior adaptive]
+(defn- run-window [step ctx options prior adaptive paths]
   (let [{:keys [frame instance]} ctx
         clock (time/frame-clock frame)
         {:keys [unit value]} (duration (:interval options) adaptive clock)
         _ (when-not (and (time/finite-number? value) (pos? value))
             (throw (ex-info "Invalid predictive cadence" {:interval value})))
         now (time/coordinate clock unit)
-        inputs (signature instance frame options clock)
+        inputs (signature instance frame options clock paths)
         sample (fn [at] (call ctx true #(let [input (sample-input at)] (values/blocks input (step input)))))
         same-inputs? (and prior (= (:epoch frame) (:epoch prior)) (identical? (:rig prior) (:fixtures frame))
                           (= inputs (:inputs prior)) (= options (:options prior))
@@ -176,7 +195,11 @@
                        (not= false (:playing? frame)) (time/finite-number? (:beat frame))
                        (time/finite-number? (:bpm frame)) (pos? (:bpm frame)))]
     (if (and eligible? (or options adaptive))
-      (let [window (run-window sampler ctx options (get-in frame [:keyframes (:id instance)]) adaptive)
+      (let [prior (get-in frame [:keyframes (:id instance)])
+            dependencies (variable-dependencies (::variable-paths (meta step)) (get-in instance [:definition :blocks])
+                                                (::dependencies prior))
+            window (cond-> (run-window sampler ctx options prior adaptive (:paths dependencies))
+                     (or dependencies (::dependencies prior)) (assoc ::dependencies dependencies))
             result (assoc ctx :contributions (:result window) ::window window)]
         (if-let [reader (observations/reader window frame)]
           (vary-meta result assoc ::runtime/observe reader)

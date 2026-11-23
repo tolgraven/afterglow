@@ -12,6 +12,28 @@ Choose one interval unit from `:beats`, `:bars`, `:phrases` and `:ms`. Bars and 
 
 Progress normally advances from zero to one. An authored numeric parameter or path under show `:variables` can replace the clock fraction or add an offset. The source can increase or decrease each frame. Missing or nonfinite inputs use clock progress for replacement and zero for offsets. The easing function samples the bounded fraction. A spring or a Bézier with an elevated handle can overshoot in native coordinates or HDR emission. Normalized controls retain their physical bounds. At rollover an externally driven segment starts from its last displayed value, even if a large new audio sample just arrived. An unmodulated segment reaches its time-based target at the boundary.
 
+## Sampling show variables
+
+When a compiled sampler reads external show variables, declare their full paths on the compiled step. For example, a material controlling a dimmer can read the current bass level directly from the frame.
+
+```clojure
+(require '[afterglow.runtime.keyframes :as keyframes])
+
+(def bass-path [:variables :audio :bass])
+
+(def bass-dimmer
+  (vary-meta
+   (keyframes/predictable
+    (fn [{:keys [frame] :as ctx}]
+      (assoc ctx :assignments
+             [{:target-id :wash :attribute :dimmer :value (get-in frame bass-path 0.0)}])))
+   assoc ::keyframes/variable-paths #{bass-path}))
+```
+
+Supply a persistent set or vector of paths. Each path starts with `:variables` and addresses at least one key or index below it. Collect these paths once when compiling the program. The runtime combines them with direct variable keys in the definition's `:blocks` and reads the leaves from the same resolved frame the sampler sees. `keyframes/with-inputs` carries the declaration through input middleware, including when the compiled step has a separate forecast sampler.
+
+A changed leaf resamples both endpoints immediately. Other variable updates retain the forecast and its endpoint observations. Removing a leaf and assigning it `nil` are distinguishable. Saved windows retain the sampled values. On restoration the live compiled step supplies its dependency paths again.
+
 ## Kernel and host
 
 * A compiler marks its safe step with `afterglow.runtime.keyframes/predictable`. A separate numeric sampler may accompany a deferred GPU step. Certified callbacks must leave state, completion and intents untouched, use immutable inputs and write continuous native assignments in a stable order. Discrete functions, timed lifecycle transitions and user callbacks without that declaration execute on the live clock.
