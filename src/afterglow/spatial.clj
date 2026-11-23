@@ -36,9 +36,11 @@
     (let [{:keys [bounds gravity volumes] :or {bounds default-bounds gravity default-gravity volumes {}}} (validate! config)
           order (vec (sort-by pr-str (keys volumes)))]
       (let [balls (filterv #(= :ball (:shape (volumes %))) order)
-            traces (into {} (keep (fn [id]
-                                    (when-let [geometry (get-in volumes [id :geometry])]
-                                      [id (trace/prepare geometry)]))) balls)]
+            local-shape (fn [id]
+                          (let [{:keys [geometry scale] :as ball} (volumes id)]
+                            (when (or geometry scale)
+                              [id (trace/prepare (-> ball (dissoc :translation) (assoc :position [0.0 0.0 0.0])))])))
+            traces (into {} (keep local-shape) balls)]
         (->Scene bounds gravity volumes order balls traces)))))
 
 (defn prepare-rig [fixtures] (geometry/prepare-rig fixtures))

@@ -65,11 +65,15 @@
   "Compile geometry once before stepping the body. Call :intervals with the
   initial local point and its displacement relative to the moving body."
   [{:keys [parts translation] :as spec}]
-  (let [local (dissoc spec :translation)
+  (let [local (dissoc spec :translation :scale)
         plan (shape/prepare local)
-        trace (if (#{:union :intersection :difference} (:shape local))
+        trace (cond
+                (and (= :ball (:shape local)) (:geometry local))
+                (let [child (:intervals (prepare (:geometry local)))]
+                  (fn [p d] (child (mapv - p (:position local)) d)))
+                (#{:union :intersection :difference} (:shape local))
                 (partial boolean-trace (mapv (comp :intervals prepare) parts) (:inside? plan))
-                (partial convex local plan))
-        shift #(mapv - % translation)]
+                :else (partial convex local plan))
+        {:keys [inverse inverse-delta]} (shape/coordinates spec (:bounds plan))]
     {:bounds (:bounds (shape/prepare spec))
-     :intervals (if translation (fn [point delta] (trace (shift point) delta)) trace)}))
+     :intervals (if inverse (fn [point delta] (trace (inverse point) (inverse-delta delta))) trace)}))

@@ -20,6 +20,7 @@
 
 (defn- shape-valid? [{:keys [shape position radius height parts planes] :as spec} depth]
   (and (< depth 16)
+       (or (not (contains? spec :scale)) (and (vec3? (:scale spec)) (every? pos? (:scale spec))))
        (or (not (contains? spec :translation)) (vec3? (:translation spec)))
        (or (not (contains? spec :geometry))
            (and (= shape :ball) (not= :ball (:shape (:geometry spec))) (shape-valid? (:geometry spec) (inc depth))))
@@ -38,6 +39,10 @@
          false)))
 
 (defn validate! [spec]
+  (let [children (fn [v] (if-let [g (:geometry v)] [g] (:parts v)))
+        nodes (tree-seq #(or (:geometry %) (:parts %)) children spec)]
+    (when (> (bounded-count 1025 nodes) 1024)
+      (invalid! "A sculpted volume can contain at most 1024 shape nodes" nil)))
   (when-not (shape-valid? spec 0) (invalid! "Invalid venue shape or nesting" spec))
   spec)
 
@@ -58,7 +63,7 @@
                            [id position]))
                     (sort-by (comp first second)) vec)]
       (let [directional? (fn [{:keys [beam-angle channels direction]}]
-                           (or beam-angle direction (:pan channels) (:tilt channels)))]
+                           (or beam-angle direction (:pan channels) (:tilt channels) (:red channels) (:white channels) (:dimmer channels)))]
         (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))
                (filterv directional? fixtures))))))
 

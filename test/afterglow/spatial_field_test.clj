@@ -47,3 +47,20 @@
            (mapv :type (:events result))))
     (is (every? #(< (abs %) 1.0e-8) (map - [1.0 1.7 2.3 3.0] (map :time-ms (:events result)))))
     (is (empty? (get-in result [:members :body])))))
+
+(deftest stretch-keeps-the-centre-and-transforms-both-child-and-body
+  (let [volume {:shape :sphere :position [1 2 3] :radius 1 :scale [3 1 0.5] :translation [1 0 0]}
+        {:keys [weight-at bounds witnesses]} (field/prepare volume)]
+    (is (= [5.0 3.0 3.5] (:max bounds)))
+    (is (= [2.0 2.0 3.0] (:center (first witnesses))))
+    (is (= 1.0 (weight-at [4.9 2 3])))
+    (is (zero? (weight-at [2 2 3.6])))
+    (is (thrown? clojure.lang.ExceptionInfo (field/prepare (assoc volume :scale [1 0 2]))))))
+
+(deftest field-combines-live-beams-and-head-positions
+  (let [spot {:id :spot :position [0 0 0] :direction [0 0 1] :beam-angle 12 :channels {:red 1}}
+        pixel {:id :pixel :position [0 0 4]}
+        volume {:shape :sphere :radius 0.25 :position [0 0 4] :selection #{:position :beam}}
+        prior {:values {:spot {:emitted-color [0.6 0 0] :direction [0 0 1]}}}]
+    (is (= {:pixel 1.0 :spot 0.6} (:weights (field/sample volume [spot pixel] prior))))
+    (is (= {:pixel 1.0} (:weights (field/sample volume [spot pixel] (assoc prior :extinction-per-m 3.0)))))))
