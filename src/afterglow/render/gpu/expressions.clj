@@ -157,6 +157,16 @@
         (System/arraycopy values 0 values filled more)
         (recur (+ filled more))))))
 
+(defn expand-uniform
+  "Expand one validated native tuple into independently owned arrays for n heads."
+  [sample n]
+  (let [expand (fn [{:keys [components] :as field}]
+                 (let [tuple ^doubles (:values field)
+                       values (java.util.Arrays/copyOf tuple (int (* n components)))]
+                   (broadcast! values components)
+                   (assoc field :values values)))]
+    (assoc sample :count n :outputs (update-vals (:outputs sample) expand))))
+
 (defn- output-field [^FloatBuffer data n vertices stride {:keys [type components offset attribute]}]
   (let [width (long components) offset (long offset) stride (long stride)
         values (double-array (* n width))]
