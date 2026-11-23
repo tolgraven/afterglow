@@ -21,7 +21,7 @@
       :enum (and (vector? (or values options))
                  (boolean (some #(= value %) (or values options))))
       :color (and (vector? value) (= 3 (count value))
-                  (every? #(and (finite-number? %) (<= 0 % 1)) value))
+                  (every? #(and (bounded? %) (<= 0 % 1)) value))
       :vector (and (vector? value) (or (nil? size) (= size (count value)))
                    (every? bounded? value))
       :range (and (vector? value) (= 2 (count value))
@@ -54,6 +54,17 @@
                     (not (valid-value? (get schemas k) value))
                     {:path [k] :message "Value does not satisfy parameter schema"})))
           values)))
+
+(defn dependent-cue-errors
+  "Report overrides that would become invalid if this effect revision were
+  published. Archived and pinned cues keep their captured effect schema."
+  [cues effect]
+  (into [] (for [[id cue] cues
+                 :when (and (= (:id effect) (:effect-id cue)) (nil? (:effect-version cue)))
+                 field [:params :saved-params]
+                 :when (contains? cue field)
+                 error (validate-values (:params effect {}) (get cue field))]
+             (update error :path #(into [:cues id field] %)))))
 
 (defn resolve-values
   "Merge schema defaults and overrides; throw with validation errors if invalid."

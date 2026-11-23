@@ -78,6 +78,38 @@
         (is (empty? (:events result))))))
   (is (= :invalid-command (get-in (model/apply-command (model/new-show) nil) [:ack :code]))))
 
+(deftest effect-edits-preserve-dependent-cue-presets
+  (let [pin {:id :pinned :effect-id :wash :effect-version 1 :saved-params {:level 0.9}}
+        show (-> (configured)
+                 (apply! {:op :cue/put :cue pin})
+                 (apply! {:op :cue/put :cue {:id :saved :effect-id :wash :saved-params {:level 0.8}}})
+                 (apply! {:op :cue/launch :cue-id :red}))
+        edit {:op :registry/publish :kind :effects
+              :definition (-> effect (assoc :version 2) (assoc-in [:params :level :bounds] [0 0.5]))}
+        rejected (model/apply-command show (command show edit))
+        repaired (-> show
+                     (apply! {:op :cue/put :cue {:id :red :effect-id :wash :params {:level 0.4}}})
+                     (apply! {:op :cue/delete :cue-id :saved})
+                     (apply! edit))
+        launch (model/apply-command repaired (command repaired {:op :cue/launch :cue-id :pinned}))]
+    (is (= :incompatible-cue-presets (get-in rejected [:ack :code])))
+    (is (= #{[:cues :red :params :level] [:cues :saved :saved-params :level]}
+           (set (map :path (get-in rejected [:ack :details :errors])))))
+    (is (identical? show (:model rejected)))
+    (is (empty? (:events rejected)))
+    (is (= 2 (get-in repaired [:registry :effects :wash :version])))
+    (is (= 0.9 (get-in launch [:model :instances (get-in launch [:ack :instance-id]) :params :level])))))
+
+(deftest narrowing-color-component-bounds-checks-the-cue-preset
+  (let [show (apply! (configured) {:op :cue/put :cue {:id :accent :effect-id :wash
+                                                       :saved-params {:color [0.7 0.2 0.1]}}})
+        revised (-> effect (assoc :version 2)
+                    (assoc-in [:params :color] {:type :color :bounds [0 0.5] :default [0.5 0 0]}))
+        result (model/apply-command show (command show {:op :registry/publish :kind :effects
+                                                        :definition revised}))]
+    (is (= [[:cues :accent :saved-params :color]] (mapv :path (get-in result [:ack :details :errors]))))
+    (is (identical? show (:model result)))))
+
 (deftest launch-uses-defaults-overrides-and-captured-version
   (let [show (configured)
         result (model/apply-command show
@@ -262,7 +294,8 @@
         (is (= code (get-in result [:ack :code])))
         (is (identical? show (:model result)))
         (is (= [] (:events result)))))
-    (let [changed (apply! show {:op :registry/publish :kind :effects
+    (let [without-override (apply! show {:op :cue/put :cue {:id :red :effect-id :wash}})
+          changed (apply! without-override {:op :registry/publish :kind :effects
                                :definition (-> effect (assoc :version 2) (update :params dissoc :level))})
           result (model/apply-command changed (command changed {:op :cue/save-params :cue-id :red :instance-id id}))]
       (is (= :invalid-params (get-in result [:ack :code]))))
