@@ -68,18 +68,25 @@
       (let [metrics (.getFontMetrics graphics)
             available-width 104
             label #(#'transports/parameter-value-label metrics % available-width)
-            small (/ 1.0 65535.0)]
+            small (/ 1.0 65535.0)
+            large 1.2345678901234567E120
+            compact-large "1.23457e120"]
         (is (= "42" (label 42)))
         (is (= "0.51" (label 0.51)))
         (is (= "1/3" (label 1/3)))
         (is (= ":open" (label :open)))
         (is (= "0.123457" (label 0.123456789)))
         (is (= "0.510015" (label (+ 0.51 small))))
-        (doseq [value [small (- small) 1.2345678901234567E120]]
+        (is (= compact-large
+               (#'transports/parameter-value-label metrics large
+                                                  (.stringWidth metrics compact-large))))
+        (doseq [value [small (- small) large]]
           (let [text (label value)]
             (is (re-find #"[eE][+-]?\d+$" text))
-            (is (<= (.stringWidth metrics text) available-width))
-            (is (< (Math/abs (- 1.0 (/ (Double/parseDouble text) value))) 1e-5)))))
+            (is (<= (.stringWidth metrics text) available-width))))
+        (doseq [value [small (- small) large]
+                :let [text (#'transports/parameter-value-label metrics value 200)]]
+          (is (< (Math/abs (- 1.0 (/ (Double/parseDouble text) value))) 1e-5))))
       (finally (.dispose graphics)))))
 
 (deftest a-slow-native-driver-never-owns-the-caller-and-retries-reuse-its-scan

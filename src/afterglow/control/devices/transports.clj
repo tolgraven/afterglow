@@ -183,8 +183,12 @@
                             mantissa (if (str/includes? mantissa ".")
                                        (str/replace mantissa #"\.?0+$" "")
                                        mantissa)
-                            compact (if exponent (str mantissa "e" exponent) mantissa)]
-                        (when (fits? compact) compact)))
+                            label (if exponent (str mantissa "e" exponent) mantissa)]
+                        (if (fits? label)
+                          label
+                          (when exponent
+                            (let [shorter (str mantissa "e" (Long/parseLong exponent))]
+                              (when (fits? shorter) shorter))))))
                     (range significant-digits 0 -1))
               (when (fits? "…") "…")
               ""))))))
