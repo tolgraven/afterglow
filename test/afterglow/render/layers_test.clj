@@ -158,3 +158,23 @@
         error (try (frame/resolve-contributions patch [member invalid]) nil
                    (catch clojure.lang.ExceptionInfo cause cause))]
     (is (= (:source member) (:effect-source (ex-data error))))))
+
+(deftest spatial-weights-blend-the-completed-scene-once
+  (let [ids [:inside :edge :outside :zero]
+        rig (frame/compile-patch (mapv (fn [i id] {:id id :universe 1 :address (inc i)
+                                                   :channels {:focus 1}}) (range) ids))
+        batch {:kind :batch :batch {:target-ids ids :outputs {:focus {:type :number :components 1 :values (double-array (repeat 4 0.6))}}}}
+        background (apply block (map #(assoc (row :focus 0.2) :target-id %) ids))
+        mask {:inside 1.0 :edge 0.5 :zero 0.0}
+        weighted (fn [member transforms input]
+                   (assoc-in (layer member 0.5 transforms input) [:native-layer :target-weights] mask))
+        transform [{:attribute :focus :value (expr :add (field :previous :focus) 0.4)}]
+        modifier (assoc-in (weighted 1 transform (block)) [:native-layer :targets] :previous)
+        result (frame/resolve-contributions rig [background (weighted 0 [] batch) modifier])
+        values (mapv #(get-in result [:values % :channels :focus]) ids)]
+    (is (every? #(< (abs %) 1e-8) (map - values [0.6 0.4 0.2 0.2])))
+    (is (= [153 102 51 51] (mapv #(bit-and 255 %) (take 4 (get-in result [:universes 1])))))
+    (is (thrown? Exception (frame/resolve-contributions rig
+                            [(assoc-in (weighted 0 [] batch) [:native-layer :target-weights :edge] 2)])))
+    (is (thrown? Exception (frame/resolve-contributions rig
+                            [(weighted 0 [] batch) (assoc-in modifier [:native-layer :target-weights] {})])))))
