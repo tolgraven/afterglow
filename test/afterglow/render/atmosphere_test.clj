@@ -1,6 +1,9 @@
 (ns afterglow.render.atmosphere-test
   (:require [afterglow.render.atmosphere :as fog]
             [afterglow.render.frame :as frame]
+            [afterglow.render.blocks :as blocks]
+            [afterglow.render.fog-optics :as optics]
+            [afterglow.render.ir :as ir]
             [clojure.test :refer [deftest is]]))
 
 (def fixture {:id :jet :position [1 2 3] :universe 4 :address 512 :channels {:fog [1 2]}
@@ -149,3 +152,21 @@
     (is (< (:mixed-m3 state) (:mixed-m3 peak) 3))
     (let [clear (fog/initial plan 0 0)]
       (is (= {:after-s 0.0 :mixed-m3 0.0 :fog-level 0.0} (fog/coasting-peak plan clear))))))
+
+(deftest shared-material-and-measured-sightline
+  (doseq [[extinction density distance expected]
+          [[1.25 0.1 8.0 (/ 1 Math/E)]
+           [2.5 0.1 8.0 (Math/exp -2)]
+           [-2.5 0.1 8.0 1.0]
+           [1.25 -0.1 8.0 1.0]
+           [1.25 0.1 -8.0 1.0]
+           [1000.0 1.0 1.0 0.0]]]
+    (let [depth (optics/optical-depth extinction density distance)
+          material (blocks/fog-transmission-expression extinction density distance)]
+      (is (near? expected (ir/evaluate material {})))
+      (is (near? expected (optics/transmittance depth)))
+      (is (near? (- 1 expected) (optics/absorptance depth)))))
+  ;; Local control needs the absorbed fraction even below double precision at 1.
+  (let [depth (optics/optical-depth 1 1e-19 1)]
+    (is (== 1.0 (optics/transmittance depth)))
+    (is (== 1e-19 (optics/absorptance depth)))))

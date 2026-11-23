@@ -1,6 +1,7 @@
 (ns afterglow.render.atmosphere
   "Venue fog mass balance from the DMX levels actually presented. Volumes are
-  equivalent cubic metres at the fogger's manufacturer-rated output density.")
+  equivalent cubic metres at the fogger's manufacturer-rated output density."
+  (:require [afterglow.render.fog-optics :as optics]))
 
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
 (defn- xyz? [v] (and (vector? v) (= 3 (count v)) (every? finite? v)))
@@ -112,7 +113,7 @@
 
 (defn- mixed-state [state plan volume]
   (let [density (/ volume (:volume-m3 plan))
-        optical-depth (* density (:extinction-per-m plan) (:reference-path-m plan))
+        optical-depth (optics/optical-depth (:extinction-per-m plan) density (:reference-path-m plan))
         ;; The nozzle first fills a local plume. Only material mixing into
         ;; the room changes its attenuation along the reference sightline.
         mixing (reduce-kv (fn [flow i source]
@@ -121,8 +122,8 @@
         net-flow (- mixing (* volume (:loss-per-s plan)))
         depth-rate (* (/ net-flow (:volume-m3 plan)) (:extinction-per-m plan) (:reference-path-m plan))]
     (assoc state :mixed-m3 volume :mixed-density density
-           :fog-level (- (Math/expm1 (- optical-depth)))
-           :fog-level-change-per-s (* (Math/exp (- optical-depth)) depth-rate))))
+           :fog-level (optics/absorptance optical-depth)
+           :fog-level-change-per-s (* (optics/transmittance optical-depth) depth-rate))))
 
 (defn initial [plan epoch now]
   (require! (finite? now) "Expected a finite monotonic sample time" {:time now})

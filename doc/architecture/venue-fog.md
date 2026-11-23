@@ -26,3 +26,9 @@ Store the accepted `:clearance-half-life-s`, `:extinction-per-m` and `:reference
 Call `(coasting-peak plan state)` to estimate the greatest room-wide attenuation if all pumps stop at this sample. It returns `:fog-level`, the mixed volume in `:mixed-m3` and the time to the peak in `:after-s`. A controller can use that forecast to avoid repeatedly pulsing a machine while a slow jet is still localized.
 
 For initial mixed volume `M`, local plume volumes `Lᵢ`, mixing rates `kᵢ` and the venue clearance rate `d`, the mixed volume after stopping is `exp(−d t) × [M + Σ Lᵢ (1 − exp(−kᵢ t))]`. The derivative has at most one positive root. The implementation brackets that root and solves for it, using the current time as the peak when the room is already clearing. The sightline calculation uses the same room volume and calibrated coefficients as `advance`.
+
+## Calibrated sightlines
+
+The effect library's `:optics/fog-transmission` material takes the same extinction per metre and relative fog density as the room model, plus the ray's length in metres. Transmitted direct light is `exp(-extinction × density × distance)`. At unit-density extinction 1.25 per metre, a 10% uniform mixture transmits about 36.8% across eight metres. Negative material inputs are clamped to zero, so a zero-length path or empty room transmits all the light.
+
+The host evaluates the material's optical-depth expression once per mixed-state update. It computes the absorbed fraction with `expm1` so a controller can still observe trace haze. Studio consumes a static ES module emitted from the same material for the GPU volume pass and reflected-light paths. From the paired Tolglow checkout, regenerate it with `lein run -m afterglow.render.fog-optics js/preview/fog-optics.generated.js` after changing this material.
