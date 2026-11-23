@@ -96,9 +96,10 @@
       (invalid! "Effect step must return :state, vector :assignments, vector :intents and boolean :done?"
                 {:type ::invalid-result :effect-id id}))
     ;; Identity comes from the instance, never from the effect's return value.
-    {:id id :state (:state result) :assignments (:assignments result)
+    (cond-> {:id id :state (:state result) :assignments (:assignments result)
      :contributions (:contributions (append-contributions result []))
-     :intents (:intents result) :done? (:done? result)}))
+     :intents (:intents result) :done? (:done? result)}
+      (:afterglow.runtime.keyframes/window result) (assoc :keyframe (:afterglow.runtime.keyframes/window result)))))
 
 (defn- index-results
   [instances results]
