@@ -755,3 +755,14 @@
     (is (= (bytes-at rich 1 1 2 3 4 5 6) (bytes-at dense 1 1 2 3 4 5 6)))
     (doseq [row [(get-in rich [:values :rgb]) (first (frame/project-compact (:compact dense)))]]
       (is (every? true? (map near? [0.5 0.355 0.3] (:emitted-color row)))))))
+
+(deftest typed-target-indices-handle-prefix-then-repeated-and-reordered-rows
+  (let [patch (frame/compile-patch (mapv #(assoc rgb :id %1 :address %2) [:a :b :c] [1 4 7]))
+        target-ids [:a :b :a :c :b]
+        levels [0.2 0.4 0.6 0.8 1.0]
+        batch {:target-ids target-ids :outputs {:red (field :number 1 levels)}}
+        expected (frame/resolve-frame patch (mapv #(assignment %1 :red %2) target-ids levels))
+        actual (frame/resolve-batches patch [batch] {:include-values? false})]
+    (is (= (buffer-values expected) (buffer-values actual)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unknown batch target"
+                         (frame/resolve-batches patch [(update batch :target-ids assoc 2 :missing)])))))
