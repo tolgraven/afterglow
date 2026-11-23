@@ -4,6 +4,7 @@
             [afterglow.runtime.engine :as engine]
             [afterglow.runtime.keyframes :as kf]
             [afterglow.runtime.keyframes.storage :as storage]
+            [afterglow.runtime.keyframes.values :as values]
             [afterglow.runtime.executor :as executor]
             [afterglow.runtime :as runtime]
             [afterglow.render.frame :as render]))
@@ -199,6 +200,25 @@
             sample (kf/inspect (get-in half [:keyframes "0:1"]) :lamp attr)]
         (is (:forecast-failed? sample))
         (is (== 1.0 (get-in sample [:result 0 1])))))))
+
+(deftest packed-aim-and-direction-check-every-head-in-its-own-coordinate-space
+  (let [fixtures [{:id :left :position [0 2 0]} {:id :right :position [5 0 0]}]
+        make-column (fn [a b] {:type :vec3 :components 3 :values (double-array (concat a b))})
+        fields (fn [aim direction]
+                 [{:kind :batch :batch {:target-ids [:left :right]
+                    :outputs {:aim (make-column [1 2 0] aim)
+                              :direction (make-column [0 1 0] direction)}}}])
+        start (fields [6 0 0] [1 0 0])
+        finish (fields [6 1 0] [1 1 0])
+        checked (values/endpoints start finish fixtures :linear)]
+    (is (identical? start (first checked)))
+    (is (identical? finish (second checked)))
+    (doseq [end [(fields [4 0 0] [1 1 0]) (fields [6 1 0] [-1 0 0])
+                 (fields [5 0 0] [1 1 0]) (fields [6 1 0] [0 0 0])]]
+      (is (thrown? clojure.lang.ExceptionInfo (values/endpoints start end fixtures :linear))))
+    (let [collinear (fields [7 0 0] [1 0 0])]
+      (is (= [start collinear] (values/endpoints start collinear fixtures :linear)))
+      (is (thrown? clojure.lang.ExceptionInfo (values/endpoints start collinear fixtures :spring))))))
 
 (defn- traced-model []
   (let [opts {:interval {:beats 1} :progress {:mode :replace :param :progress}}]
