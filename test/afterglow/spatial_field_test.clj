@@ -240,3 +240,36 @@
             local-point (inverse point)]
         (is (== ((:distance local) local-point) ((:distance world) point)))
         (is (= ((:inside? local) local-point) ((:inside? world) point)))))))
+
+(deftest spherical-samples-retain-distance-and-falloff-precision
+  (let [center [0.25 -0.5 1.75]
+        radius 2.25
+        distances [0.0 (Math/nextDown 1.75) 1.75 (Math/nextUp 1.75)
+                   2.1 2.25 (Math/nextDown 3.0) 3.0 (Math/nextUp 3.0)]
+        points (into [[1/3 1/7 2/9] [0.125M 1.25M 2.3M] [2 1 1]]
+                     (map (fn [d] [(+ 0.25 d) -0.5 1.75])) distances)]
+    (doseq [curve [:linear :smoothstep]
+            [inner outer] [[0.0 0.0] [0.5 0.75] [0.0 0.75] [1/2 3/4]]
+            strength [0.8 -0.0]
+            :let [spec {:shape :sphere :radius radius :strength strength :position center
+                        :falloff {:curve curve :inner-m inner :outer-m outer}}
+                  sphere (field/prepare spec)
+                  ;; A one-child union exercises the general signed-distance evaluator.
+                  generic (field/prepare (assoc spec :shape :union :parts [spec]))]]
+      (doseq [point points]
+        (is (= (Double/doubleToRawLongBits ((:weight-at generic) point))
+               (Double/doubleToRawLongBits ((:weight-at sphere) point)))
+            (str [curve inner outer strength point])))
+      (doseq [d distances
+              :let [delta (- d radius)
+                    phase (cond (<= delta (- inner)) 1.0 (>= delta outer) 0.0
+                                :else (/ (- outer delta) (+ outer inner)))
+                    expected (* strength (if (= :smoothstep curve) (* phase phase (- 3 (* 2 phase))) phase))]]
+        (is (= (Double/doubleToRawLongBits expected)
+               (Double/doubleToRawLongBits ((get-in sphere [:radial :by-distance]) d)))))))
+  ;; Exact subtraction before conversion to double matters at a large integral centre.
+  (let [b 9007199254740992N
+        spec {:shape :sphere :position [b 0 0] :radius 1.0}
+        weights (:weights (field/positions spec [{:id :edge :position [(inc b) 0 0]}
+                                                 {:id :outside :position [(+ b 2) 0 0]}]))]
+    (is (= {:edge 1.0} weights))))
