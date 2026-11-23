@@ -43,3 +43,34 @@
                  (transports/render-view! image {:bpm 120 :master 1 :touched-control {:target :tempo :editable? editable?}})
                  (vec (.getRGB image 0 32 960 24 nil 0 960))))]
     (is (not= (draw true) (draw false)))))
+
+(deftest a-slow-native-driver-never-owns-the-caller-and-retries-reuse-its-scan
+  (let [running (promise)
+        release (promise)
+        calls (atom 0)
+        ports [{:index 0 :name "Controller"}]
+        enumerate! (fn []
+                     (swap! calls inc)
+                     (deliver running (.isDaemon (Thread/currentThread)))
+                     @release
+                     ports)
+        list! (#'transports/port-scanner enumerate! 100)
+        error-reason (fn [] (try (list!) (catch clojure.lang.ExceptionInfo error (:reason (ex-data error)))))]
+    (try
+      (is (= :midi/discovery-pending (error-reason)))
+      (is (true? (deref running 3000 false)))
+      (is (= :midi/discovery-pending (error-reason)))
+      (is (= 1 @calls))
+      (deliver release true)
+      (is (= ports (list!)))
+      (is (= 1 @calls))
+      (is (= ports (list!)))
+      (is (= 2 @calls))
+      (finally (deliver release true)))))
+
+(deftest discovery-surfaces-the-original-provider-error-and-can-retry
+  (let [attempts (atom 0)
+        failure (ex-info "Disconnected MIDI provider" {:device :test})
+        list! (#'transports/port-scanner #(if (= 1 (swap! attempts inc)) (throw failure) []) 3000)]
+    (is (identical? failure (try (list!) (catch Exception error error))))
+    (is (= [] (list!)))))

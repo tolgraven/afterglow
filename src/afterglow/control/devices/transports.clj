@@ -4,7 +4,7 @@
   (:import [javax.sound.midi MidiSystem MidiDevice MidiMessage Receiver ShortMessage SysexMessage]
            [java.awt Color Font RenderingHints]
            [java.awt.image BufferedImage]
-           [java.util.concurrent Executors ThreadFactory TimeUnit]))
+           [java.util.concurrent Callable ExecutionException Executors FutureTask ThreadFactory TimeUnit TimeoutException]))
 
 (defn scheduler
   "Return an explicit session scheduler factory. Each acquisition owns one daemon
@@ -21,8 +21,7 @@
                  (long interval-ms) (long interval-ms) TimeUnit/MILLISECONDS)]
       (fn [] (.cancel task false) (.shutdown executor)))))
 
-(defn midi-ports
-  "Explicitly enumerate JVM MIDI ports. No device is opened or auto-selected."
+(defn- enumerate-midi-ports
   []
   (mapv (fn [index info]
           (let [device (MidiSystem/getMidiDevice info)]
@@ -31,6 +30,36 @@
              :input? (not (zero? (.getMaxTransmitters device)))
              :output? (not (zero? (.getMaxReceivers device)))}))
         (range) (MidiSystem/getMidiDeviceInfo)))
+
+(defn- port-scanner [enumerate! wait-ms]
+  (let [active (atom nil)
+        scan (fn []
+               (let [task (FutureTask. ^Callable enumerate!)
+                     thread (doto (Thread. task "afterglow-midi-discovery") (.setDaemon true))]
+                 (.start thread)
+                 (reset! active task)))]
+    (fn []
+      (let [^FutureTask task (locking active (or @active (scan)))]
+        (try
+          (let [ports (.get task (long wait-ms) TimeUnit/MILLISECONDS)]
+            (compare-and-set! active task nil)
+            ports)
+          (catch ExecutionException error
+            (compare-and-set! active task nil)
+            (throw (.getCause error)))
+          (catch TimeoutException error
+            ;; Native drivers may ignore interruption. A retry joins the same scan.
+            (throw (ex-info "MIDI device discovery is still running. Refresh devices to check again."
+                            {:reason :midi/discovery-pending} error))))))))
+
+(def ^:private scan-midi-ports (port-scanner enumerate-midi-ports 1500))
+
+(defn midi-ports
+  "List current JVM MIDI ports without opening devices. Concurrent callers share one
+  daemon scan. A slow driver returns a retryable discovery-pending error in 1.5 s.
+  Refreshing can collect its result even if the original caller timed out."
+  []
+  (scan-midi-ports))
 
 (defn- midi-message [data]
   (let [bytes (mapv #(do (when-not (and (integer? %) (<= 0 % 255))
