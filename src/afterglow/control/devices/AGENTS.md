@@ -21,8 +21,9 @@ the explicit I/O boundary: domain/effect state remains in the pure control model
   device acknowledgements/timeouts. Never fabricate palette responses.
 - Wayang uses static native methods and supports one process-wide display lease.
   Refuse concurrent leases; injectable independent displays remain supported.
-- Push 3 currently accepts explicitly verified generic MIDI mappings only.
-  Do not send Push 2 SysEx or claim native display/standalone support.
+- Push 3 uses captured MIDI mappings. The optional tethered screen owns only the
+  verified display interface. Use the libusb recorder and physical qualification
+  guide for changes. Standalone hosting and pad LED output remain unqualified.
 - Run session/transports tests plus control model and codecs. Tests use real
   reducers with recording transports and headless images; no physical device
   support is established until captures and hardware checks are recorded.

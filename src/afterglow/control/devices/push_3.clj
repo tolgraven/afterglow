@@ -1,10 +1,11 @@
 (ns afterglow.control.devices.push-3
   "Push 3 User Mode controls over the shared semantic model. Addresses are
-  captured explicitly; no Push 2 protocol, native display or LED output is used."
+  captured explicitly. An optional tethered display consumes the shared Push view."
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.codecs.push-3 :as codec]
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
+            [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.display :as display]
             [afterglow.control.devices.target-picker :as targets]
@@ -17,14 +18,14 @@
          :controls #{:pad-cues :held-release :parameter-encoders :master-encoder
                      :parameter-pressure :parameter-touch-strip :page-scroll
                      :manual-handoff :reconnect :shift-fine}
-         :feedback :data-view-only))
+         :feedback :semantic-view :display-protocol :tethered-descriptor-replay))
 
 (defn- valid! [condition message data]
   (when-not condition (throw (ex-info message (assoc data :type ::invalid-options)))))
 
 (defn- reset-interactions [state]
   (assoc (targets/clear-selection state) :pads {} :holds {} :buttons #{} :touches #{}
-         :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil))
+         :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
 
 (defn- cue-at [state model [x y]]
   (let [[left bottom] (:origin state)
@@ -162,13 +163,16 @@
     :button (button options state event model)
     {:state state}))
 
+(defn- surface-state [state]
+  (if-let [controls (:controls state)]
+    (cond-> controls (get-in state [:mpe :selected-instance])
+      (assoc :selected-instance (get-in state [:mpe :selected-instance])))
+    state))
+
 (defn control-view
-  "Pure labels/values for an external UI. This does not drive Push 3's display."
+  "Pure grid and keyed parameter values for an external UI."
   [state model]
-  (let [state (if (:controls state)
-                (cond-> (:controls state)
-                  (get-in state [:mpe :selected-instance])
-                  (assoc :selected-instance (get-in state [:mpe :selected-instance]))) state)]
+  (let [state (surface-state state)]
    (merge (display/view-options state model)
           {:page (:page-id state) :origin (:origin state)
    :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
@@ -284,17 +288,40 @@
              (combine ((:stop controls) (:controls state) model envelope disconnected?)
                       ((:stop notes) (:mpe state) model envelope disconnected?)))}))
 
+(defn- display-feedback [options state model _]
+  (let [controls (surface-state state)
+        index (push-view/cue-index model)
+        instance (or (get-in model [:instances (:selected-instance controls)]) (last (:active index)))
+        touch (some (fn [id]
+                      (when-let [k (get-in options [:encoder-bindings id :param])]
+                        (when (get-in instance [:definition :params k])
+                          {:instance-id (:id instance) :param k :component 0})))
+                    (sort-by str (:touches controls)))
+        selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
+        view (push-view/view selected model index {:status :ready :touched-parameter touch})
+        selected (assoc selected :selected-instance (:id instance) :last-display view)
+        next-state (if (:controls state)
+                     (-> state (assoc :controls selected) (assoc-in [:mpe :selected-instance] (:id instance)))
+                     selected)]
+    (cond-> {:state next-state}
+      (not= view (:last-display controls)) (assoc :display view))))
+
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
   MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates."
   [options]
-  (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options)))
+  (cond-> (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options))
+    (:display options) (assoc :feedback (partial display-feedback options))))
 
 (defn connect!
   "Explicitly open an injected MIDI transport. Manual session/suspend! and
   session/resume! provide handoff; User itself cannot be mapped in User Mode.
-  Native Push 3 display transport is unsupported and rejected."
+  A display must be an explicitly tagged Push 3 semantic transport."
   [options]
-  (valid! (nil? (:display options)) "Push 3 native display protocol is not implemented" {})
-  (session/open! (session/create (assoc options :profile (profile options)))))
+  (when-let [display (:display options)]
+    (valid! (and (= :push-3 (:device display)) (= :view (:input display))
+                 (every? #(fn? (get display %)) [:open! :render! :close!]))
+            "Choose a tagged Push 3 display transport" {}))
+  (session/open! (session/create (cond-> (assoc options :profile (profile options))
+                                    (and (:transport options) (not (:midi options))) (assoc :midi (:transport options))))))

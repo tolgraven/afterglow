@@ -7,6 +7,7 @@
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.views :as views]
             [afterglow.control.display :as display]
+            [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.target-picker :as targets]))
 
@@ -55,17 +56,9 @@
           (assoc state :selected-instance nil :touches touches
                        :touch-order (filterv #(contains? touches %) (:touch-order state)))))))
 
-(defn- parameter-bank [state instance]
-  (let [ids (parameter-edit/ordered-parameters (:definition instance))
-        banks (max 1 (long (Math/ceil (/ (count ids) 8.0))))
-        index (int (bindings/clamp (get-in state [:parameter-banks (:id instance)] 0) [0 (dec banks)]))
-        offset (* 8 index)]
-    {:index index :count banks :total (count ids) :offset offset
-     :ids (subvec ids (min offset (count ids)) (min (+ offset 8) (count ids)))}))
-
 (defn- parameter-at [state model encoder-index]
   (let [instance (get-in model [:instances (:selected-instance state)])
-        id (nth (:ids (parameter-bank state instance)) encoder-index nil)]
+        id (nth (:ids (push-view/parameter-bank state instance)) encoder-index nil)]
     (when id
       {:instance-id (:id instance) :param id :encoder encoder-index
        :component (get-in state [:components [(:id instance) id]] 0)})))
@@ -124,7 +117,7 @@
 (defn- page-control [state model direction]
   (if (:shift? state)
     (let [instance (get-in model [:instances (:selected-instance state)])
-          bank (parameter-bank state instance)
+          bank (push-view/parameter-bank state instance)
           next-bank (int (bindings/clamp (+ (:index bank) direction) [0 (dec (:count bank))]))]
       {:state (-> state (assoc-in [:parameter-banks (:id instance)] next-bank)
                   (assoc :touches {} :touch-order []))})
@@ -317,60 +310,19 @@
         brightness (cond (:releasing? cue) 0.45 (:active? cue) 1.0 :else 0.25)]
     (mapv #(int (Math/round (* 255.0 brightness (bindings/clamp % [0 1])))) color)))
 
-(defn- cue-index [model]
-  (let [active (views/active-instances model)]
-    {:active active :by-cue (group-by :cue-id active)}))
-
-(defn- indexed-display [state model {:keys [active by-cue]}]
+(defn- indexed-display [state model index]
   (let [state (selected-state state model)
-        instance (get-in model [:instances (:selected-instance state)])
-        bank (parameter-bank state instance)
-        active-index (or (first (keep-indexed #(when (= (:id instance) (:id %2)) %1) active)) 0)
-        active-offset (* 8 (quot active-index 8))
-        cue (get-in model [:registry :cues (:selected-cue state)])
-        effect (or (:definition instance) (get-in model [:registry :effects (:effect-id cue)]))
-        defaults (merge (into {} (map (fn [[k schema]] [k (:default schema)]) (:params effect)))
-                        (:params cue) (:saved-params cue))
-        cue-view (when cue (views/cue-view model (:id cue) by-cue))]
-    (merge (display/view-options state model)
-           {:title "Tolglow" :page (:page-id state) :origin (:origin state)
-     :status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
-     :master (:master model) :blackout? (:blackout? model)
-     :bpm (get-in model [:transport :bpm])
-     :selected (:selected-cue state)
-     :target-picker (targets/view state)
-     :epoch (:epoch model) :frame-number (:frame-number model)
-     :instance-id (:id instance) :definition-version (:effect-version instance)
-     :parameter-bank (dissoc bank :ids)
-     :touched-parameter (touched state model)
-     :touched-control (when-let [target (system-touch state)]
-                        {:target target :editable? (or (= :master target) (manual-clock? model))})
-     :fine? (boolean (:shift? state))
-     :preset {:saved? (contains? cue :saved-params)
-              :changed? (boolean (and instance (not= defaults (:params instance))))
-              :record? (boolean (:record? state))
-              :action (if (:shift? state) :clear :save)}
-     :active-effect-navigation {:index active-index :count (count active) :offset active-offset}
-     :active-effects (mapv #(select-keys % [:id :cue-id :effect-id :order :phase])
-                           (take 8 (drop active-offset active)))
-     :cue (when cue (select-keys cue-view [:id :name :color :active? :releasing?]))
-     :effect (when effect (select-keys effect [:id :name :categories :modifiers :envelope]))
-     :swatch (:color cue-view)
-     :parameters (mapv (fn [k]
-                         (let [schema (get-in effect [:params k])
-                               component (get-in state [:components [(:id instance) k]] 0)]
-                           {:id k :param k :name (or (:name schema) (name k))
-                            :value (get-in instance [:params k]) :schema schema
-                            :component component :component-label (nth (parameter-edit/components schema) component)
-                            :preview-samples (:preview-samples schema)})) (:ids bank))
-     :cells (mapv (fn [x] (when-let [cue (cue-at state model (codec/pad-note x 0))]
-                            (views/cue-view model (:id cue) by-cue))) (range 8))
-     :labels (mapv (fn [x] (some-> (cue-at state model (codec/pad-note x 0)) :id str)) (range 8))})))
+        target (system-touch state)]
+    (push-view/view state model index
+                    {:status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
+                     :touched-parameter (touched state model)
+                     :touched-control (when target
+                                        {:target target :editable? (or (= :master target) (manual-clock? model))})})))
 
 (defn display-view
   "Device-independent labels/values. A display transport draws this map."
   [state model]
-  (indexed-display state model (cue-index model)))
+  (indexed-display state model (push-view/cue-index model)))
 
 (defn- strip-feedback [state model]
   (if-let [target (system-touch state)]
@@ -414,7 +366,7 @@
                 (assoc state :fault :led-timeout)
                 timed-out? (-> state (assoc :awaiting-led-ack? false :last-leds {}) (update :led-retries (fnil inc 0)))
                 :else state)
-        index (cue-index model)
+        index (push-view/cue-index model)
         display (indexed-display state model index)
         display-changed? (not= display (:last-display state))
         state (assoc state :last-display display)
@@ -516,4 +468,7 @@
   "REPL facade: options are session options plus :device-id/:page-id. Supply MIDI
   and optional display transports; no device is guessed or automatically bound."
   [options]
+  (when-let [device (get-in options [:display :device])]
+    (when-not (= :push-2 device)
+      (throw (ex-info "Select a Push 2 display transport" {:device device}))))
   (session/open! (session/create (assoc options :profile (profile options)))))
