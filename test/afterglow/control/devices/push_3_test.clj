@@ -228,3 +228,23 @@
         (is (empty? (:errors (session/snapshot device))))
         (finally (session/close! device)))
       (is (= [:acquire :release :acquire :release] @lifecycle)))))
+
+(deftest displayed-fallback-instance-receives-encoder-edits
+  (doseq [config [{} {:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1 2]}
+                      :mpe-note-cells {40 [0 0]}}]]
+    (let [opts (assoc-in options [:layout :encoders :level :channel] 6)
+          profile (push/profile (merge opts config {:display true}))
+          m (initial-model)
+          effect (get-in m [:registry :effects :wash])
+          instance {:id :current :cue-id :held :effect-id :wash :order 1 :phase :running
+                    :params {:level 0.5 :count 5} :definition effect}
+          m (assoc-in m [:instances :current] instance)
+          old-state (:initial-state profile)
+          stale (if (:mpe old-state) (assoc-in old-state [:mpe :selected-instance] :ended)
+                    (assoc old-state :selected-instance :ended))
+          feedback ((:feedback profile) stale m {})
+          raw [0xb6 19 1]
+          edit ((:input profile) (:state feedback) ((:decode profile) raw) m {})]
+      (is (= :current (get-in feedback [:display :instance-id])))
+      (is (= :current (get-in edit [:commands 0 :instance-id])))
+      (is (> (get-in edit [:commands 0 :value]) 0.5)))))

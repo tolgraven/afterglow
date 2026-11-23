@@ -284,11 +284,13 @@
                           {:instance-id (:id instance) :param k :component 0})))
                     (sort-by str (:touches controls)))
         selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
-        view (push-view/view selected model index {:status :ready :touched-parameter touch})]
-    (if (= view (:last-display controls))
-      {:state state}
-      {:state (if (:controls state) (assoc-in state [:controls :last-display] view) (assoc state :last-display view))
-       :display view})))
+        view (push-view/view selected model index {:status :ready :touched-parameter touch})
+        selected (assoc selected :selected-instance (:id instance) :last-display view)
+        next-state (if (:controls state)
+                     (-> state (assoc :controls selected) (assoc-in [:mpe :selected-instance] (:id instance)))
+                     selected)]
+    (cond-> {:state next-state}
+      (not= view (:last-display controls)) (assoc :display view))))
 
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
