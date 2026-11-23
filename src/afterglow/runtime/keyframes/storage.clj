@@ -37,7 +37,8 @@
                      (or (nil? options) (kf/validate! options))) (invalid!))
       (let [decode (fn [blocks]
                      (when-not (vector? blocks) (invalid!))
-                     (values/validate-blocks! (values/map-columns unpack blocks) (nth inputs 5)))
+                     (with-meta (values/validate-blocks! (values/map-columns unpack blocks) (nth inputs 5))
+                       {::values/restored true}))
             [origin target] (values/endpoints (decode (:origin saved)) (decode (:target saved)) fixtures (:curve options))]
         (assoc (select-keys saved window-keys)
                :epoch epoch :rig fixtures :origin origin :target target
