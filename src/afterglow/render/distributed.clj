@@ -7,6 +7,10 @@
            [java.util UUID]
            [java.util.concurrent CompletableFuture TimeUnit TimeoutException]))
 
+(def verification-policies
+  "Host capabilities for separately authenticated guest admission."
+  #{:full :redundant})
+
 (def ^:private max-heads 262144)
 (def ^:private max-floats 1048576)
 (def ^:private max-peers 16)
@@ -63,7 +67,7 @@
 (defn connect! [pool caps send!]
   (let [capacity (:max-result-floats caps)]
     (when-not (and (pos-int? capacity) (fn? send!)
-                   (contains? #{nil :full :redundant} (:verification caps))
+                   (or (nil? (:verification caps)) (contains? verification-policies (:verification caps)))
                    (or (not= :redundant (:verification caps))
                        (and (string? (:subject caps)) (<= 1 (count (:subject caps)) 128))))
       (throw (ex-info "Missing worker capability or transport" {})))
