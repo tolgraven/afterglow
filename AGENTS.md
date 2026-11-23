@@ -18,7 +18,8 @@ an intentional, tested contract changes it.
 - `control/` owns semantic commands, validated parameters, pure bindings/views
   and codecs. `control/devices/` owns composable sessions and optional transport
   shells. Push 2 source-derived tests do not establish hardware parity; Push 3
-  currently supports explicitly configured generic MIDI bindings only.
+  supports captured User Mode/MPE mappings and an explicitly selected tethered USB
+  display. See the controller qualification guide before reporting hardware results.
 - `render/` owns fixture calibration, blending, DMX packing, numeric expression
   compilation and native GPU execution. Package the moving-head GLSL and WebGL
   solver in `resources/gpu/`. Tolglow selects the backend in show configuration

@@ -81,6 +81,7 @@
   Requires the captured layout/expression settings documented by its profile."
   [options]
   (push-3/connect! (cond-> options
+                    (:display options) with-feedback
                     (not (:transport options)) (assoc :transport (transports/midi-transport options)))))
 
 (defn open-seaboard!

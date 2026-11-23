@@ -190,3 +190,41 @@
         (is (= first-instance (:instance-id (last (filter #(= :instance/end (:op %)) @log)))))
         (is (empty? (:errors (session/snapshot device)))))
       (finally (session/close! device)))))
+
+(deftest tethered-display-follows-captured-controls-and-mpe-selection
+  (doseq [[profile-options note] [[{} [0x93 12 100]]
+                                  [{:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1 2]}
+                                    :mpe-note-cells {40 [0 0]}} [0x91 40 100]]]]
+    (let [show (atom (initial-model)) receive (atom nil) views (atom []) lifecycle (atom [])
+          surface {:device :push-3 :input :view :open! #(do (swap! lifecycle conj :acquire) :usb)
+                   :render! (fn [_ view] (swap! views conj view))
+                   :close! (fn [_] (swap! lifecycle conj :release))}
+          device (push/connect!
+                   (merge options profile-options
+                          {:button-bindings {:blackout :display/simulator :right :display/camera}
+                           :display surface :session-id "tethered-push" :now-ms! (constantly 0)
+                           :model! #(deref show)
+                           :dispatch! (fn [command]
+                                        (let [ack (model/apply-command @show command)]
+                                          (reset! show (:model ack)) ack))
+                           :transport {:open! #(do (reset! receive %) :midi)
+                                       :send! (fn [_ _] (throw (ex-info "Unexpected MIDI output" {})))
+                                       :close! (fn [_])}}))]
+      (try
+        (is (= :ready (:status (last @views))))
+        (session/refresh! device)
+        (is (= 1 (count @views)))
+        (@receive note)
+        (is (= :held (get-in (last @views) [:cue :id])))
+        (is (= (:params (get-in @show [:instances (:instance-id (last @views))]))
+               (into {} (map (juxt :id :value)) (:parameters (last @views)))))
+        (@receive [0xb4 22 127])
+        (is (= :simulator (:display-mode (last @views))))
+        (@receive [0xb4 23 127])
+        (is (= :panorama (:camera (last @views))))
+        (session/suspend! device)
+        (session/resume! device)
+        (is (= [:acquire :release :acquire] @lifecycle))
+        (is (empty? (:errors (session/snapshot device))))
+        (finally (session/close! device)))
+      (is (= [:acquire :release :acquire :release] @lifecycle)))))
