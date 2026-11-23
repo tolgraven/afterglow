@@ -583,7 +583,9 @@
         used (shader-inputs (map val ordered))
         mapped? (contains? used :surface-uv)
         chart? (and mapped? surface-uv?)
-        inputs (cond-> used (not chart?) (dissoc :surface-uv))
+        inputs (if (and mapped? (not chart?))
+                 (-> used (dissoc :surface-uv) (assoc :position "v_position"))
+                 used)
         uniforms (shader-uniforms nodes)
         fields (mapv (fn [index [attribute _] {:keys [type]}]
                        {:attribute attribute :type type :components (width type)

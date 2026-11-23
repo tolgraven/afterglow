@@ -55,9 +55,10 @@ test('generated water, gel and fog agree on surface fragments, fixture batches a
       runner.compile(proof.uv.fragments.color);
       const mixed = await runner.run({...input, surfaceUVs: proof['surface-uvs']});
       const fallback = await runner.run(input);
+      const uncharted = await runner.run({...input, surfaceUVs: proof.positions.map(() => null)});
       runner.compile(proof.world.fragments.color);
       const ordinary = await runner.run(input);
-      return [mixed, fallback, ordinary].map(frame => Array.from(frame.values));
+      return [mixed, fallback, ordinary, uncharted].map(frame => Array.from(frame.values));
     } finally { runner.dispose(); }
   }, {runnerSource, proof});
   for (let i = 0; i < proof.positions.length; i++) {
@@ -66,6 +67,7 @@ test('generated water, gel and fog agree on surface fragments, fixture batches a
       assert.ok(Math.abs(values[2][4*i+c] - proof.world.samples[1].values[i].color[c]) <= tolerance);
     }
   }
+  assert.deepEqual(values[1], values[3]);
   assert.deepEqual(values[1].slice(0, 3), values[1].slice(16, 19));
   t.diagnostic(JSON.stringify(result));
 });

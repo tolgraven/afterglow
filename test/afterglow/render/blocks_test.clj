@@ -98,6 +98,8 @@
     (is (re-find #"in vec2 v_uv;" (:source fragment)))
     (is (= "v_uv" (get-in charted [:inputs :surface-uv])))
     (is (nil? (get-in ordinary [:inputs :surface-uv])))
+    (is (= {:position "v_position"}
+           (:inputs (ir/emit-glsl-batch {:focus {:op :surface-uv :axis :u}}))))
     (is (not (re-find #"location = 1" (:source ordinary))))
     (is (thrown? clojure.lang.ExceptionInfo (ir/evaluate-batch plan {} positions [[1.0 2.0]])))
     (doseq [bad [[:bad 0] false]]

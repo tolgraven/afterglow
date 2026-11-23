@@ -48,6 +48,7 @@ function chartCoordinates(uvs, positions) {
   const n = positions.length / 3;
   if (uvs instanceof Float32Array && uvs.length === 2 * n && uvs.every(Number.isFinite)) return uvs;
   if (Array.isArray(uvs) && uvs.length === n) {
+    if (uvs.every(pair => pair == null)) return null;
     const packed = new Float32Array(2 * n);
     for (let i = 0; i < n; i++) {
       const pair = uvs[i];
