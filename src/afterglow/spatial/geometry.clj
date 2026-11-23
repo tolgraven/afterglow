@@ -1,7 +1,8 @@
 (ns afterglow.spatial.geometry
   "Portable venue shapes in metres. The X index prunes sphere and box queries
   before testing the full shape. A rig's prepared index stays outside show files."
-  (:require [afterglow.time :as time]))
+  (:require [afterglow.spatial.shape :as field-shape]
+            [afterglow.time :as time]))
 
 (defn vec3? [v] (and (vector? v) (= 3 (count v)) (every? time/finite-number? v)))
 (defn nonnegative? [x] (and (time/finite-number? x) (not (neg? x))))
@@ -19,7 +20,12 @@
 
 (defn- shape-valid? [{:keys [shape position radius height parts planes] :as spec} depth]
   (and (< depth 16)
+       (or (not (contains? spec :translation)) (vec3? (:translation spec)))
+       (or (not (contains? spec :geometry))
+           (and (= shape :ball) (not= :ball (:shape (:geometry spec))) (shape-valid? (:geometry spec) (inc depth))))
        (case shape
+         :rounded-box (and (vec3? position) (vec3? (:size spec)) (every? pos? (:size spec))
+                           (time/finite-number? (:rounding spec 0.0)) (<= 0 (:rounding spec 0.0) 1))
          (:sphere :ball) (and (vec3? position) (nonnegative? radius))
          :box (box? spec)
          :cylinder (and (vec3? position) (nonnegative? radius) (nonnegative? height))
@@ -38,8 +44,10 @@
 (defn inside?
   "A point on a surface belongs to the volume. A convex polyhedron accepts the
   half-spaces dot(normal, point) <= distance; combine primitives with CSG."
-  [{:keys [shape position radius min max height parts planes]} point]
-  (case shape
+  [{:keys [shape position radius min max height parts planes translation geometry] :as spec} point]
+  (if (or translation geometry (= shape :rounded-box))
+    (<= ((:distance (field-shape/prepare spec)) point) 0.0)
+    (case shape
     (:ball :sphere) (<= (dist2 position point) (* (double radius) (double radius)))
     :box (every? true? (map <= min point max))
     :cylinder (let [[x y z] point [cx cy cz] position dx (- x cx) dz (- z cz)]
@@ -48,9 +56,9 @@
     :polyhedron (every? (fn [{:keys [normal distance]}] (<= (reduce + (map * normal point)) distance)) planes)
     :union (boolean (some #(inside? % point) parts))
     :intersection (every? #(inside? % point) parts)
-    :difference (and (inside? (first parts) point) (not-any? #(inside? % point) (next parts)))))
+    :difference (and (inside? (first parts) point) (not-any? #(inside? % point) (next parts))))))
 
-(defrecord Rig [ids rows xs])
+(defrecord Rig [ids rows xs directional])
 
 (defn prepare-rig [fixtures]
   (if (instance? Rig fixtures) fixtures
@@ -60,7 +68,10 @@
                              (invalid! "Spatial fixture needs an ID and a finite position" [id position]))
                            [id position]))
                     (sort-by (comp first second)) vec)]
-      (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))))))
+      (let [directional? (fn [{:keys [beam-angle channels direction]}]
+                           (or beam-angle direction (:pan channels) (:tilt channels)))]
+        (->Rig (set (map first rows)) rows (double-array (map (comp first second) rows))
+               (filterv directional? fixtures))))))
 
 (defn- lower-bound [^doubles xs x]
   (loop [lo 0 hi (alength xs)]
@@ -68,18 +79,19 @@
       (let [mid (unsigned-bit-shift-right (+ lo hi) 1)]
         (if (< (aget xs mid) x) (recur (inc mid) hi) (recur lo mid))))))
 
-(defn fixtures-in [rig {:keys [shape position radius min max] :as volume}]
-  (let [bounds (case shape
-                 (:sphere :ball :cylinder) [(- (first position) radius) (+ (first position) radius)]
-                 :box [(first min) (first max)]
-                 nil)
-        ^doubles xs (:xs rig)
-        end (double (if bounds (second bounds) Double/POSITIVE_INFINITY))]
-    (loop [i (int (if bounds (lower-bound xs (double (first bounds))) 0)) found (transient #{})]
-      (if (or (= i (alength xs)) (> (aget xs i) end))
-        (persistent! found)
-        (let [[id point] (nth (:rows rig) i)]
-          (recur (inc i) (if (inside? volume point) (conj! found id) found)))))))
+(defn candidates
+  "Wire-identified fixture positions within a field's X bounds. A nil box is unbounded."
+  [{:keys [rows xs]} bounds]
+  (if-not bounds
+    rows
+    (let [lo (first (:min bounds)) hi (first (:max bounds))]
+      (if (> lo hi) []
+        (subvec rows (lower-bound xs (double lo)) (lower-bound xs (Math/nextUp (double hi))))))))
+
+(defn fixtures-in [rig volume]
+  (let [{:keys [distance bounds]} (field-shape/prepare volume)]
+    (into #{} (keep (fn [[id point]] (when (<= (distance point) 0.0) id)))
+          (candidates rig bounds))))
 
 (defn sweep
   "Return [fixture-id entry exit still-inside?] for the segment swept by a
