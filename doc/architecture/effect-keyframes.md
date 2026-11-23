@@ -41,3 +41,11 @@ A changed leaf resamples both endpoints immediately. Other variable updates reta
 * The host can supply `:keyframe-intervals {instance-id {:ms 100}}`. The longer of the authored interval and the requested adaptive interval wins. An optional `:measure-effect` callback receives instance ID, eligibility and a zero-argument computation. It wraps expensive samples and ordinary effect evaluations, so interpolated frames do not bias the controller's cost estimates.
 * `keyframes/inspect` with an instance window, target ID and attribute returns both clocks, eased progress and that field's origin, target and result. Omit the field to inspect timing only. Native arrays remain read-only. Use `keyframes.storage/freeze` and `restore` for portable Transit snapshots. Dense numeric endpoints use binary doubles in network order.
 * A recoverable error evaluating a forecast falls back to real samples through that segment. The inspector marks the window with `:forecast-failed?`. If the error actually occurs on the live timeline the ordinary per-effect fault event and quarantine handle it. A direction chord crossing zero, or an aim chord crossing its own fixture, also uses real samples so the head can follow its curved path. Disabling HDR reevaluates the current endpoint under the new output limits. Worker cancellation and VM failures propagate to the owner.
+
+Geometry validation runs when a predictive interval builds its two endpoints.
+Aligned batch outputs retain their original arrays throughout this check. For
+each three-component aim target, the check subtracts the corresponding fixture
+position before comparing the two directions. A direction field already uses
+the emitter as its origin. A singular chord takes the live path, including
+parallel vectors of unequal length under an overshooting curve. If endpoint
+target order changes, alignment first recovers a common assignment order.
