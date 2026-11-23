@@ -61,13 +61,13 @@
         depth (dot delta axis)
         radial (along delta axis (- depth))
         radius (+ lens-radius-m (* spread depth))]
-    (when (and (>= depth 0) (<= (geometry/length3 radial) (+ radius 1.0e-10)))
+    (when (and (>= depth -1.0e-12) (<= (geometry/length3 radial) (+ radius 1.0e-10)))
       (along position radial (if (pos? radius) (/ lens-radius-m radius) 0.0)))))
 
 (defn- optical-level [{:keys [range-m extinction-per-m intensity-threshold raycast]} level origin point]
   (let [delta (mapv - point origin)
         length (geometry/length3 delta)]
-    (when (<= length range-m)
+    (when (<= length (+ range-m (* 8.0 (Math/ulp (double range-m)))))
       (let [received (* level (Math/exp (- (* (double extinction-per-m) length))))]
         (when (and (pos? received) (>= received intensity-threshold)
                    (or (nil? raycast) (zero? length)
@@ -160,9 +160,109 @@
                   (map #(along start direction %) [lo (* 0.5 (+ lo hi)) hi])))]
     (mapcat probe rays)))
 
-(defn- candidate-points [volume {:keys [center bounds]} beam reach aimable?]
+(def ^:private witness-limit 64)
+
+(defn- shape-seeds [volume]
+  ;; Prepared fields supply world-space transformed witnesses. Standalone
+  ;; callers can also use plain sphere/box/cylinder leaves directly.
+  (let [nodes (tree-seq #(#{:union :intersection :difference} (:shape %))
+                        #(if (= :difference (:shape %)) (take 1 (:parts %)) (:parts %))
+                        volume)]
+    (keep (fn [{:keys [shape position radius min max]}]
+            (case shape
+              (:ball :sphere) {:center position :radius radius}
+              (:cylinder :rounded-box) position
+              :box (when (and min max) (mapv #(* 0.5 (+ %1 %2)) min max))
+              nil))
+          (take 128 nodes))))
+
+(defn- square-distance [[z r] [cz cr]]
+  (let [dz (- (double z) (double cz)), dr (- (double r) (double cr))]
+    (+ (* dz dz) (* dr dr))))
+
+(defn- cap-contact
+  "For a finite aperture, the start of a ray depends on its angle. Locate
+  minima of squared distance on the resulting cap using its tangent."
+  [angle reach virtual-offset z radial]
+  (let [on-cap (fn [t] [(* reach (Math/cos t))
+                         (+ (* virtual-offset (Math/tan t)) (* reach (Math/sin t)))])
+        derivative (fn [t]
+                     (let [c (Math/cos t), s (Math/sin t)
+                           [depth offset] (on-cap t)]
+                       (+ (* (- z depth) reach s)
+                          (* (- offset radial) (+ (* reach c) (/ virtual-offset (* c c)))))))
+        minimum (fn [[left right]]
+                  (when (and (<= (derivative left) 0.0) (>= (derivative right) 0.0))
+                    (loop [lo (double left), hi (double right), n 0]
+                      (let [mid (* 0.5 (+ lo hi))]
+                        (cond (= n 45) (on-cap mid)
+                              (neg? (derivative mid)) (recur mid hi (inc n))
+                              :else (recur lo mid (inc n)))))))]
+    (if (zero? virtual-offset)
+      (on-cap (min angle (max 0.0 (Math/atan2 radial z))))
+      (let [knots (map #(* angle (/ % 8.0)) (range 9))
+            candidates (keep minimum (partition 2 1 knots))]
+        (apply min-key #(square-distance % [z radial]) (on-cap 0.0) (on-cap angle) candidates)))))
+
+(defn- nearest-boundary [beam reach [z radial :as target] radius]
+  (let [{:keys [spread lens-radius-m]} beam
+        angle (Math/atan spread), c (Math/cos angle), s (Math/sin angle)
+        ;; Project onto the side, whose length along the outermost ray is reach.
+        t (max 0.0 (min reach (+ (* z c) (* (- radial lens-radius-m) s))))
+        side [(* t c) (+ lens-radius-m (* t s))]
+        front [0.0 (min radial lens-radius-m)]
+        distance #(square-distance % target)
+        nearest (min-key distance side front)]
+    (if (and (> (distance nearest) (* radius radius)) (>= (+ z radius) (* reach c)))
+      (min-key distance nearest (cap-contact angle reach (/ lens-radius-m spread) z radial))
+      nearest)))
+
+(defn- touching-sphere-point [contact center radius]
+  (let [separation (geometry/length3 (mapv - contact center))]
+    (when (<= separation (+ radius 1.0e-10))
+      ;; Last-bit rounding must not lose a tangent point to strict membership.
+      (let [surface (if (and (pos? separation) (> separation radius))
+                      (along center (mapv - contact center) (/ radius separation))
+                      contact)]
+        (mapv #(Math/nextAfter (double %1) (double %2)) surface center)))))
+
+(defn- sphere-contact
+  "Solve the lens disk and sloping side in the radial plane containing the
+  centre. Only spheres approaching the far cap can require its refinement."
+  [{:keys [position axis spread lens-radius-m] :as beam} center radius reach]
+  (let [delta (mapv - center position)
+        z (dot delta axis)
+        transverse (along delta axis (- z))
+        radial (geometry/length3 transverse)
+        far (+ z radius)]
+    (when (and (<= (- z radius) reach) (>= far 0.0)
+               (<= (- radial radius) (+ lens-radius-m (* spread (min reach far)))))
+      (let [[depth offset] (nearest-boundary beam reach [z radial] radius)
+            contact (along (along position axis depth) transverse (if (pos? radial) (/ offset radial) 0.0))]
+        (touching-sphere-point contact center radius)))))
+
+(defn- near-sphere-point [origin center radius reach]
+  (let [toward (mapv - origin center)
+        length (geometry/length3 toward)]
+    (when (and (> length reach) (<= (- length radius) reach))
+      (along center toward (/ (Math/nextDown (double radius)) length)))))
+
+(defn- seed-points [beam reach aimable? seed]
+  (if (vector? seed)
+    [seed]
+    (let [{:keys [center radius]} seed]
+      (when (geometry/vec3? center)
+        (cons center
+              (when (and (geometry/nonnegative? radius) (pos? radius))
+                (lazy-seq
+                 (remove nil? [(sphere-contact beam center radius reach)
+                               (when aimable? (near-sphere-point (:position beam) center radius reach))]))))))))
+
+(defn- candidate-points [volume {:keys [center bounds witnesses]} beam reach aimable?]
   (let [{:keys [position axis]} beam]
     (concat (when center [center])
+            (when (or witnesses (#{:ball :sphere :union :intersection :difference} (:shape volume)))
+              (mapcat #(seed-points beam reach aimable? %) (take witness-limit (or witnesses (shape-seeds volume)))))
             (cond bounds (concat (axis-points beam center (box-depths position axis bounds reach))
                                  [(nearest-in-box bounds position)] (grid-points bounds))
                   (= :polyhedron (:shape volume)) (polyhedron-points beam (:planes volume) reach aimable?)
@@ -176,23 +276,23 @@
             (when (pos? weight) [point weight])))
         (distinct points)))
 
-(defn- best-hit [points strength]
+(defn- best-hit [points maximum strength]
   (reduce (fn [best [point weight]]
             (if-let [received (strength point)]
               (let [w (* weight received)]
-                (cond (== 1.0 w) (reduced {:weight w :point point})
+                (cond (>= w maximum) (reduced {:weight w :point point})
                       (> w (:weight best 0.0)) {:weight w :point point}
                       :else best))
               best))
           nil points))
 
 (defn- beam-selection [points beam opts level]
-  (best-hit points (fn [point]
+  (best-hit points level (fn [point]
                      (when-let [origin (light-origin beam point)]
                        (optical-level opts level origin point)))))
 
 (defn- aim-selection [points fixture opts origin]
-  (best-hit points (fn [point]
+  (best-hit points 1.0 (fn [point]
                      (when (frame/aim-reachable? fixture point)
                        (optical-level opts 1.0 origin point)))))
 

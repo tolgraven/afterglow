@@ -73,3 +73,65 @@
                :bounds {:min [0 0 3] :max [0 0 3]}}]
     (is (= {:weight 0.6 :aim [0 0 3]}
            (beam/contribution lamp lit {} point {:selection #{:aimable :beam}})))))
+
+(defn- tiny-union [spheres]
+  (let [corners (fn [sign] (map #(mapv (fn [axis] (+ axis (* sign (:radius %)))) (:position %)) spheres))
+        bounds {:min (apply mapv min (corners -1)) :max (apply mapv max (corners 1))}
+        volume {:shape :union :parts spheres}]
+    [volume {:bounds bounds :center (mapv #(* 0.5 (+ %1 %2)) (:min bounds) (:max bounds))
+             :weight-at #(if (geo/inside? volume %) 1.0 0.0)}]))
+
+(defn- hits-small-sphere [lamp center radius opts]
+  (let [[volume sampling] (tiny-union [{:shape :sphere :position center :radius radius}
+                                        {:shape :sphere :position [10 11 12] :radius 0.02}])]
+    (beam/contribution lamp lit volume sampling opts)))
+
+(deftest a-small-off-axis-island-survives-union-with-a-distant-island
+  (is (= {:weight 0.8} (hits-small-sphere lamp [0.71 0.28 5.17] 0.025 {})))
+  (is (nil? (hits-small-sphere lamp [2.1 1.1 4.17] 0.025 {}))))
+
+(deftest a-sphere-can-graze-a-cone-with-its-centre-outside
+  (let [source (assoc lamp :beam-angle 90 :lens-radius-m 0.1)
+        normal (/ 1.0 (Math/sqrt 2))
+        center (fn [gap] [(+ 3.1 (* normal gap)) 0.0 (- 3.0 (* normal gap))])]
+    (is (= {:weight 0.8} (hits-small-sphere source (center 0.25) 0.25 {:range-m 8})))
+    (is (nil? (hits-small-sphere source (center 0.251) 0.25 {:range-m 8})))
+    (is (nil? (hits-small-sphere source (center 0.25) 0.25 {:range-m 2})))))
+
+(deftest finite-optical-reach-clips-the-off-axis-cap-at-the-end-of-each-ray
+  (let [range-m 4.0, theta 0.4, lens 0.1
+        source (assoc lamp :beam-angle 90 :lens-radius-m lens)
+        cap-z (* range-m (Math/cos theta))
+        cap-r (+ (* range-m (Math/sin theta)) (* lens (Math/tan theta)))
+        radial-normal (* range-m (Math/sin theta))
+        axial-normal (+ cap-z (/ lens (Math/pow (Math/cos theta) 2)))
+        length (Math/hypot radial-normal axial-normal)
+        center (fn [gap] [(+ cap-r (* gap (/ radial-normal length))) 0.0
+                          (+ cap-z (* gap (/ axial-normal length)))])]
+    (is (= {:weight 0.8} (hits-small-sphere source (center 0.125) 0.125 {:range-m range-m})))
+    (is (nil? (hits-small-sphere source (center 0.126) 0.125 {:range-m range-m})))))
+
+(deftest prepared-world-witnesses-include-scaled-translated-body-geometry
+  (let [local {:shape :ball :position [0.35 0.28 5.17]
+               :geometry {:shape :sphere :position [0.20 0 0] :radius 0.025}}
+        scaled-world {:shape :sphere :position [0.75 0.28 5.17] :radius 0.05}
+        sampling {:center [4 2 5] :bounds {:min [-2 -1 3] :max [10 8 12]}
+                  :weight-at #(if (geo/inside? scaled-world %) 1.0 0.0)
+                  :witnesses [{:center (:position scaled-world) :radius (:radius scaled-world)}]}]
+    (is (= {:weight 0.8} (beam/contribution lamp lit local sampling {})))
+    (is (nil? (beam/contribution lamp lit local (assoc sampling :weight-at (constantly 0.0)) {}))
+        "The complete field can subtract an island even when a witness falls inside the cone")))
+
+(deftest shape-witness-work-is-bounded
+  (let [counted (atom 0)
+        seeds (repeatedly #(do (swap! counted inc) {:center [0.5 0.5 5] :radius 0.01}))]
+    (is (nil? (beam/contribution lamp lit {:shape :union}
+                                {:witnesses seeds :weight-at (constantly 0.0)} {})))
+    (is (<= 1 @counted 64))))
+
+(deftest a-sphere-may-touch-only-the-lens-or-the-moving-heads-range-limit
+  (is (= {:weight 0.8} (hits-small-sphere lamp [0.05 0 -0.25] 0.25 {})))
+  (is (nil? (hits-small-sphere lamp [0.05 0 -0.251] 0.25 {})))
+  (let [result (hits-small-sphere lamp [5.0625 0 0] 0.125 {:selection #{:aimable} :range-m 5})]
+    (is (= 1.0 (:weight result)))
+    (is (<= 4.9375 (first (:aim result)) 5.0))))
