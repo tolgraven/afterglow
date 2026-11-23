@@ -3,6 +3,7 @@
 Afterglow owns the rendering path from ordered effect contributions to physical
 fixture channels. Tolglow supplies show configuration and authored effects.
 
+* [Adaptive effect evaluation](adaptive-keyframes.md)
 * [Overdrive and spatial highlight spill](highlight-spill.md)
 * [Moving volumes and fixture contact events](spatial-fields.md)
 * [Native effect layers and typed transforms](native-layers.md)
@@ -10,6 +11,7 @@ fixture channels. Tolglow supplies show configuration and authored effects.
 * [Calibrated moving-head rotation after effect blending](moving-head-shaders.md#render-movement-after-effect-blending)
 * [Named fixture field expressions and their GLSL layout](numeric-shader-fields.md)
 * [Native execution and GPU readback for fixture fields](native-expression-shaders.md)
+* [Predictive musical effect keyframes](effect-keyframes.md)
 * [Physical output and RDM](physical-output.md)
 * [Architecture review and historical fixes, 22 November 2026](reviews/2026-11-22.md)
 * [Documentation index](../../../tolglow/docs/README.md)
@@ -35,3 +37,5 @@ Run `lein test` from the project root. CI runs on Java 17, 21 and 25.
 
 Run `lein run` to start Afterglow. Packaging with `npm ci` and `lein uberjar`
 builds the embedded Antora guide, API docs and Git version resources.
+
+[Numeric effect materials](effect-blocks.md) covers shader-backed prefab stages, musical generators, geometry coordinates and inspecting intermediate values.

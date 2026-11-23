@@ -144,3 +144,9 @@ Compute spatial spill from one untouched frame, including the shutter gate and
 original dimmer. Preserve gain and opacity as independent controls. Validate
 nonemission channels at their original ranges in both typed and rich output.
 [Gain and spatial highlight spill](../../../doc/architecture/highlight-spill.md)
+
+Effect blocks lower to numeric IR so CPU steps, native transform feedback and
+mesh materials use the same arithmetic. Dry inputs and shader varyings come from
+the captured frame. Return a pure observation in result metadata for a subscribed
+display. Keep material definitions data-only and avoid serializing live observers.
+Exercise authored GLSL through the scalar oracle and an actual shader readback.
