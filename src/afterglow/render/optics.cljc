@@ -86,6 +86,37 @@
                     nearest))
                 nil receivers)))))
 
+(defn- segment-blocker [surface]
+  (let [{[px py pz] :point [nx ny nz] :normal [ux uy uz] :u [vx vy vz] :v size :size} (plane surface)
+        plane-offset (+ (* nx px) (* ny py) (* nz pz))
+        half-width (when size (* 0.5 (first size)))
+        half-height (when size (* 0.5 (second size)))]
+    (fn [[ax ay az] [bx by bz] length]
+      (let [a (- (+ (* nx ax) (* ny ay) (* nz az)) plane-offset)
+            b (- (+ (* nx bx) (* ny by) (* nz bz)) plane-offset)]
+        ;; A room wall cannot occlude two points strictly on the same side.
+        ;; Only a crossing needs a rectangle hit or a division.
+        (when (or (and (pos? a) (neg? b)) (and (neg? a) (pos? b)))
+          (let [t (/ a (- a b))]
+            (when (and (> (* t length) 1.0e-10) (> (* (- 1.0 t) length) 1.0e-9))
+              (or (nil? size)
+                  (let [x (- (+ ax (* t (- bx ax))) px)
+                        y (- (+ ay (* t (- by ay))) py)
+                        z (- (+ az (* t (- bz az))) pz)]
+                    (and (<= (abs (+ (* ux x) (* uy y) (* uz z))) half-width)
+                         (<= (abs (+ (* vx x) (* vy y) (* vz z))) half-height)))))))))))
+
+(defn segment-occluder
+  "Prepare finite receivers for open line-of-sight tests. The result accepts
+  two world points and their separation in metres. Hitting an endpoint is clear."
+  [surfaces]
+  (let [blockers (mapv segment-blocker surfaces)]
+    (fn [origin target length]
+      (loop [i 0]
+        (cond (= i (count blockers)) false
+              ((nth blockers i) origin target length) true
+              :else (recur (inc i)))))))
+
 (defn- extent [major minor a b direction]
   (Math/hypot (* a (dot major direction)) (* b (dot minor direction))))
 

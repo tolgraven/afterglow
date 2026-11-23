@@ -135,3 +135,12 @@
   (let [result (hits-small-sphere lamp [5.0625 0 0] 0.125 {:selection #{:aimable} :range-m 5})]
     (is (= 1.0 (:weight result)))
     (is (<= 4.9375 (first (:aim result)) 5.0))))
+
+(deftest finite-segments-trace-the-open-space-between-emitter-and-volume
+  (let [surface {:id :panel :point [0 0 2] :normal [0 0 -1] :u-axis [1 0 0] :size [1 1]}
+        options {:selection #{:beam} :surfaces [surface]}]
+    (is (some? (at lamp lit [0 0 1] options)))
+    (is (some? (at lamp lit [0 0 2] options)))
+    (is (nil? (at lamp lit [0 0 3] options)))
+    (is (some? (at (assoc lamp :position [0 0 2]) lit [0 0 3] options)))
+    (is (some? (at (assoc lamp :position [1 0 0]) lit [1 0 4] options)))))

@@ -25,10 +25,16 @@
           width (+ inner-m outer-m)
           edge (fn [d] (cond (<= d (- inner-m)) 1.0 (>= d outer-m) 0.0
                              :else (fade curve (/ (- outer-m d) width))))
+          radial? (and (#{:sphere :ball} (:shape volume)) (nil? (:geometry volume))
+                       (or (nil? (:scale volume)) (apply == (:scale volume))))
+          radius (* (or (:radius volume) 0.0) (get (:scale volume) 0 1.0))
           expand (fn [corner sign] (mapv #(+ (double %) (* sign outer-m)) corner))]
       {:bounds (when bounds {:min (expand (:min bounds) -1) :max (expand (:max bounds) 1)})
        :center (shape/center bounds) :witnesses witnesses
-        :selection selection
+        :selection selection :max-weight (double strength)
+       :radial (when radial?
+                 {:center (shape/center bounds) :support (+ radius outer-m)
+                  :by-distance (fn [d] (* (double strength) (edge (- d radius))))})
        :weight-at (if (zero? width)
                     (fn [p] (if (inside? p) (double strength) 0.0))
                     (fn [p] (* (double strength) (edge (distance p)))))})))
@@ -48,6 +54,12 @@
   [volume fixtures]
   {:weights (position-weights (prepare volume) (geometry/prepare-rig fixtures)) :aims {}})
 
+(defn prepare-observations
+  "Prepare receiver planes and optical settings outside the per-volume loop.
+  Attach the committed :values map or id-to-row function when sampling."
+  [options]
+  (assoc options ::optics (beam/prepare-options (assoc options :selection #{}))))
+
 (defn sample
   "Sample the volume against a prepared patch and its last committed emitter
   values. Overlapping position and optical matches use the largest weight.
@@ -58,9 +70,11 @@
         result {:weights (position-weights sampling rig) :aims {}}
         optical (disj (:selection sampling) :position)]
     (if (empty? optical) result
-      (let [opts (beam/prepare-options (assoc observations :selection optical))
+      (let [prepared (or (::optics observations) (::optics (prepare-observations observations)))
+            opts (assoc prepared :selection optical)
+            read-row (or values {})
             collect (fn [result {:keys [id] :as fixture}]
-                      (if-let [{:keys [weight aim]} (beam/contribution fixture (get values id) volume sampling opts)]
+                      (if-let [{:keys [weight aim]} (beam/contribution fixture (read-row id) volume sampling opts)]
                         (cond-> (update-in result [:weights id] (fnil max 0.0) weight)
                           aim (assoc-in [:aims id] aim))
                         result))]

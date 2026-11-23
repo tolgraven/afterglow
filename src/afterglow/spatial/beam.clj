@@ -33,7 +33,7 @@
               (min (double range-m) (/ (- (Math/log (double min-transmission))) extinction-per-m))
               (double range-m))
    :intensity-threshold intensity-threshold
-   :raycast (when (seq surfaces) (optics/surface-raycaster surfaces))})
+   :occluded? (when (seq surfaces) (optics/segment-occluder surfaces))})
 
 (defn- light-level [output]
   (let [rgb (:emitted-color output)]
@@ -64,15 +64,13 @@
     (when (and (>= depth -1.0e-12) (<= (geometry/length3 radial) (+ radius 1.0e-10)))
       (along position radial (if (pos? radius) (/ lens-radius-m radius) 0.0)))))
 
-(defn- optical-level [{:keys [range-m extinction-per-m intensity-threshold raycast]} level origin point]
+(defn- optical-level [{:keys [range-m extinction-per-m intensity-threshold occluded?]} level origin point]
   (let [delta (mapv - point origin)
         length (geometry/length3 delta)]
     (when (<= length (+ range-m (* 8.0 (Math/ulp (double range-m)))))
       (let [received (* level (Math/exp (- (* (double extinction-per-m) length))))]
         (when (and (pos? received) (>= received intensity-threshold)
-                   (or (nil? raycast) (zero? length)
-                       (let [wall (raycast origin delta)]
-                         (or (nil? wall) (>= wall (- length 1.0e-9))))))
+                   (or (nil? occluded?) (not (occluded? origin point length))))
           received)))))
 
 (defn- grid-points [{low :min high :max}]
@@ -305,6 +303,42 @@
       (cond-> {:weight (max (:weight beam-hit 0.0) (:weight aim-hit 0.0))}
         aim-hit (assoc :aim (:point aim-hit))))))
 
+(defn- radial-beam
+  "In clear air a radial field is strongest at the nearest point of the beam.
+  If a receiver hides that point or the range clips it, use the general probes."
+  [{:keys [position axis spread lens-radius-m]} {:keys [center support by-distance]} opts level]
+  (let [[px py pz] position [cx cy cz] center [vx vy vz] axis
+        dx (- (double cx) (double px)) dy (- (double cy) (double py)) dz (- (double cz) (double pz))
+        vx (double vx) vy (double vy) vz (double vz)
+        z (+ (* dx vx) (* dy vy) (* dz vz))
+        rx (- dx (* z vx)) ry (- dy (* z vy)) rz (- dz (* z vz))
+        r (Math/sqrt (+ (* rx rx) (* ry ry) (* rz rz)))
+        k (double spread) lens (double lens-radius-m)
+        in? (and (>= z 0.0) (<= r (+ lens (* k z))))
+        ;; Closest point to the side of the infinite frustum in its meridian.
+        side-z (max 0.0 (/ (+ z (* k (- r lens))) (+ 1.0 (* k k))))
+        side-r (+ lens (* side-z k))
+        front-r (min r lens)
+        side-gap (Math/hypot (- side-z z) (- side-r r))
+        front-gap (Math/hypot z (- front-r r))
+        face? (< front-gap side-gap)
+        gap (cond in? 0.0 face? front-gap :else side-gap)]
+    (when (<= gap (Math/nextUp (double support)))
+      (let [axial (cond in? z face? 0.0 :else side-z)
+            radial (cond in? r face? front-r :else side-r)
+            factor (if (pos? r) (/ radial r) 0.0)
+            hit (if in? center [(+ px (* axial vx) (* factor rx))
+                                (+ py (* axial vy) (* factor ry))
+                                (+ pz (* axial vz) (* factor rz))])
+            aperture (* factor (/ lens (+ lens (* k axial) 1.0e-300)))
+            origin (if (zero? aperture) position [(+ px (* aperture rx)) (+ py (* aperture ry)) (+ pz (* aperture rz))])
+            distance (Math/hypot axial (- radial (* aperture r)))
+            value (by-distance (min gap (double support)))]
+        (cond (not (pos? value)) nil
+              (or (> distance (:range-m opts))
+                  (when-let [blocked? (:occluded? opts)] (blocked? origin hit distance))) ::probe
+              :else {:weight (* level value)})))))
+
 (defn contribution
   "Return nil or {:weight w, optional :aim [x y z]} for one fixture and volume.
   Sampling supplies :weight-at, optional world AABB :bounds and :center.
@@ -324,4 +358,7 @@
       (when-let [beam (current-beam fixture output)]
         (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
           (when (or beam? aimable?)
-            (select-points fixture beam volume sampling opts beam? aimable? level)))))))
+            (if (and beam? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
+              (let [result (radial-beam beam (:radial sampling) opts level)]
+                (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
+              (select-points fixture beam volume sampling opts beam? aimable? level))))))))

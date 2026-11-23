@@ -64,3 +64,25 @@
         prior {:values {:spot {:emitted-color [0.6 0 0] :direction [0 0 1]}}}]
     (is (= {:pixel 1.0 :spot 0.6} (:weights (field/sample volume [spot pixel] prior))))
     (is (= {:pixel 1.0} (:weights (field/sample volume [spot pixel] (assoc prior :extinction-per-m 3.0)))))))
+
+(deftest prepared-observations-read-only-needed-optical-rows
+  (let [spot {:id :spot :position [0 0 0] :direction [0 0 1] :beam-angle 12 :channels {:red 1}}
+        rig (spatial/prepare-rig [spot])
+        read-ids (atom [])
+        observations (assoc (field/prepare-observations {:range-m 9}) :values
+                            (fn [id] (swap! read-ids conj id) {:emitted-color [0.5 0 0]}))
+        volume {:shape :sphere :radius 0.1 :position [0 0 3]}]
+    (is (= {} (:weights (field/sample volume rig observations))))
+    (is (empty? @read-ids))
+    (is (= {:spot 0.5} (:weights (field/sample (assoc volume :selection #{:beam}) rig observations))))
+    (is (= [:spot] @read-ids))))
+
+(deftest clipped-and-occluded-radial-maxima-match-field-membership
+  (let [lamp {:id :lamp :position [0 0 0] :direction [0 0 1] :beam-angle 30 :lens-radius-m 0.05 :channels {:red 1}}
+        volume {:shape :sphere :position [1.4 0 4] :radius 0.7
+                :selection #{:beam} :falloff {:inner-m 0.2 :outer-m 0.2}}
+        lit {:values {:lamp {:emitted-color [1 0 0]}}}
+        weight #(get-in (field/sample volume [lamp] (merge lit %)) [:weights :lamp])]
+    (is (pos? (weight {})))
+    (is (nil? (weight {:range-m 1})))
+    (is (nil? (weight {:surfaces [{:id :wall :point [0 0 2] :normal [0 0 1]}]})))))
