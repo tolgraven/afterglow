@@ -800,6 +800,27 @@
 
        :else (pack-general-state patch (reduce-assignments patch assignments) options)))))
 
+(defn- compact-view! [compact]
+  (when-not (and (map? compact) (integer? (:count compact)) (not (neg? (:count compact)))
+                 (vector? (:target-order compact)) (map? (:fields compact)))
+    (fail! "Expected a compact frame projection" {}))
+  compact)
+
+(defn- compact-value [^doubles values n index]
+  (if (= n 1)
+    (aget values (int index))
+    (let [offset (int (* index n))]
+      (if (= n 3)
+        [(aget values offset) (aget values (inc offset)) (aget values (+ offset 2))]
+        (mapv #(aget values (+ offset %)) (range n))))))
+
+(defn- compact-row [order fields index]
+  (reduce-kv (fn [row attribute {:keys [components values valid]}]
+               (if (aget ^booleans valid (int index))
+                 (assoc row attribute (compact-value values components index))
+                 row))
+             {:id (nth order index)} fields))
+
 (defn project-compact
   "Project selected stable target indices from a completed compact frame.
   Returns ordinary maps for UI consumers without evaluating effects or packing
@@ -807,20 +828,33 @@
   selection or call at a lower UI rate; omit indices to project every target."
   ([compact] (project-compact compact (range (:count compact))))
   ([compact indices]
-   (when-not (and (map? compact) (integer? (:count compact)) (not (neg? (:count compact)))
-                  (vector? (:target-order compact)) (map? (:fields compact)))
-     (fail! "Expected a compact frame projection" {}))
+   (compact-view! compact)
    (mapv (fn [index]
            (when-not (and (integer? index) (<= 0 index) (< index (:count compact)))
              (fail! "Compact projection target index is out of range" {:index index}))
-           (reduce-kv
-            (fn [result attribute {:keys [components values valid]}]
-              (if (aget ^booleans valid (int index))
-                (assoc result attribute
-                       (if (= components 1) (aget ^doubles values (int index))
-                           (mapv #(aget ^doubles values (+ (* index components) %)) (range components))))
-                result))
-            {:id (nth (:target-order compact) index)} (:fields compact))) indices)))
+           (compact-row (:target-order compact) (:fields compact) index))
+         indices)))
+
+(defn compact-index
+  "Prepare a target-ID index once for frames with this target order."
+  [order]
+  {:order order :indices (zipmap order (range))})
+
+(defn compact-reader
+  "Create an ID -> row reader for attributes in one completed frame. A published
+  row is shared by subsequent lookups, including concurrent requests. Missing
+  targets return nil. Discard the reader when the frame is no longer needed."
+  [{:keys [order indices]} compact attributes]
+  (compact-view! compact)
+  (when-not (or (identical? order (:target-order compact)) (= order (:target-order compact)))
+    (fail! "Rebuild the compact index when the fixture order changes" {}))
+  (let [rows (java.util.concurrent.atomic.AtomicReferenceArray. (int (:count compact)))
+        fields (select-keys (:fields compact) attributes)]
+    (fn [id]
+      (when-some [index (get indices id)]
+        (or (.get rows (int index))
+            (let [row (compact-row order fields index)]
+              (if (.compareAndSet rows (int index) nil row) row (.get rows (int index)))))))))
 
 (def ^:private doubles-class (class (double-array 0)))
 

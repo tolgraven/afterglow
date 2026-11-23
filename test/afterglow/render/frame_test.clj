@@ -766,3 +766,22 @@
     (is (= (buffer-values expected) (buffer-values actual)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unknown batch target"
                          (frame/resolve-batches patch [(update batch :target-ids assoc 2 :missing)])))))
+
+
+(deftest compact-reader-shares-only-selected-current-frame-values
+  (let [fixtures [{:id :lamp :universe 1 :address 1 :channels {:red 1 :green 2 :blue 3}}
+                  {:id :dimmer :universe 1 :address 4 :channels {:dimmer 1}}]
+        frame (fn [color] (:compact (frame/resolve-frame fixtures [{:target-id :lamp :attribute :color :value color}]
+                                                        {:include-values? false :compact-values? true})))
+        first-frame (frame [1.0 0.0 0.0])
+        plan (frame/compact-index (:target-order first-frame))
+        read-first (frame/compact-reader plan first-frame [:emitted-color :aim])
+        read-next (frame/compact-reader plan (frame [0.0 0.0 1.0]) [:emitted-color :aim])
+        rows (frame/project-compact first-frame)]
+    (is (= (mapv #(select-keys % [:id :emitted-color :aim]) rows) (mapv read-first [:lamp :dimmer])))
+    (is (identical? (read-first :lamp) (read-first :lamp)))
+    (is (= {:id :lamp :emitted-color [0.0 0.0 1.0]} (read-next :lamp)))
+    (is (= [1.0 0.0 0.0] (:emitted-color (read-first :lamp))))
+    (is (nil? (read-first :missing)))
+    (is (thrown? clojure.lang.ExceptionInfo
+          (frame/compact-reader (frame/compact-index [:dimmer :lamp]) first-frame [:aim])))))
