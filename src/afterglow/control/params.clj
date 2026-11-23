@@ -60,7 +60,7 @@
   published. Archived and pinned cues keep their captured effect schema."
   [cues effect]
   (into [] (for [[id cue] cues
-                 :when (and (= (:id effect) (:effect-id cue)) (nil? (:effect-version cue)))
+                 :when (and (= (:id effect) (:effect-id cue)) (not (:effect-version cue)))
                  field [:params :saved-params]
                  :when (contains? cue field)
                  error (validate-values (:params effect {}) (get cue field))]

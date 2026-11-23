@@ -102,6 +102,7 @@
 
 (deftest narrowing-color-component-bounds-checks-the-cue-preset
   (let [show (apply! (configured) {:op :cue/put :cue {:id :accent :effect-id :wash
+                                                       :effect-version false
                                                        :saved-params {:color [0.7 0.2 0.1]}}})
         revised (-> effect (assoc :version 2)
                     (assoc-in [:params :color] {:type :color :bounds [0 0.5] :default [0.5 0 0]}))
