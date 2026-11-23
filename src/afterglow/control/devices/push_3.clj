@@ -253,7 +253,8 @@
                               (and (:target-picker control-state) press? cell)
                               {:state (assoc state :controls (targets/pad control-state key cell))}
                               :else
-                              (let [result ((:input notes) (:mpe state) bytes model envelope)
+                              (let [note-state (merge (:mpe state) (select-keys control-state [:page-id :origin]))
+                                    result ((:input notes) note-state bytes model envelope)
                                     routed (targets/launch control-state (assoc result :state control-state))]
                                 (assoc routed :state (assoc state :controls (:state routed) :mpe (:state result))))))
                   (and control-event (not (#{:pad :poly-pressure :mono-pressure} (:type control-event))))
