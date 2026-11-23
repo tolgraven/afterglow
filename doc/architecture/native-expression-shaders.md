@@ -84,6 +84,14 @@ eight). It compiles one prospective replacement before evicting the least
 recently used group, so a rejected shader preserves the prior program. Use
 `(gpu/evict! owner group)` to explicitly discard a retired rig or definition.
 
+For a resident uniform group, the session can retain its most recent validated
+native tuple and captured uniforms. Asking for the same inputs again expands
+that tuple into fresh arrays and avoids a second GPU draw, even for a field
+whose expanded values exceed the normal result-cache limit. Changing a captured
+clock or parameter triggers another evaluation. Evicting a group releases its
+sample as well as its compiled program. The direct program handle evaluates on
+every call.
+
 One worker serializes GPU calls. Multiple frame workers can call `evaluate!`
 or use `(gpu/submit! owner group env)` for a Java Future. Submission captures
 uniforms immediately. The queue has room for `:queue-capacity` waiting jobs
@@ -216,3 +224,13 @@ to 755 ms. Median coordinator and show-worker CPU rose from 202 to 216 ms.
 The diagnostic allowed 2 seconds for native compute so that both lanes reached
 the driver. Neither met the 25 ms output target. Physical GPU performance and
 the impact of other hosts sharing CPU time remain unmeasured.
+
+On a 20,000-head RGB/focus program with uniforms held for eight submissions,
+the resident tuple reduced 48 actual draws to six. Every widened double in
+each pair of returned arrays matched. Changing the uniforms every time or
+reading per-head positions required all 48 draws. A complete mixed-UV rig
+with 64 moving heads, four optical fields and eight washes submitted 464 native
+requests per lane, with 408 → 184 actual draws. Every ArtDMX byte, intent and
+model matched, as did the selected preview within 1e-9. Both lanes used CPU
+calibration for the moving heads so that solver precision stayed the same.
+The software driver and extended diagnostic deadlines limit timing conclusions.

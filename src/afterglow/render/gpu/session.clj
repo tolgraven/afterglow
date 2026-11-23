@@ -98,6 +98,19 @@
       (swap! stats #(-> % (update :evictions inc) (assoc :resident (.size cache))))
       true)))
 
+(defn- program-evaluator [owner stats program]
+  (let [heads (:count program)
+        uniform? (< (:vertices program) heads)
+        sampled (if uniform? (assoc program :count 1) program)
+        draw (fn [{:keys [uniforms]}]
+               (let [batch (expressions/run-program! owner sampled uniforms)]
+                 (when (pos? heads) (swap! stats update :draws inc))
+                 batch))
+        evaluate (reuse/evaluator {:pure? true :inputs [[:uniforms]]} draw)]
+    (if uniform?
+      (fn [inputs] (expressions/expand-uniform (evaluate inputs) heads))
+      evaluate)))
+
 (defn- resident! [{:keys [owner programs max-programs stats] :as session} group]
   (let [cache ^LinkedHashMap programs]
     (if-let [ready (.get cache group)]
@@ -106,13 +119,7 @@
         (swap! stats update :misses inc)
         ;; Compile the replacement before freeing the least-recently-used program.
         (let [program (context/prepare! owner #(expressions/compile-program! % group))
-              evaluate (reuse/evaluator
-                        {:pure? true :inputs [[:uniforms]]}
-                        (fn [{:keys [uniforms]}]
-                          (let [batch (expressions/run-program! owner program uniforms)]
-                            (when (pos? (:count program)) (swap! stats update :draws inc))
-                            batch)))
-              new-program (assoc program :evaluate evaluate)]
+              new-program (assoc program :evaluate (program-evaluator owner stats program))]
           (when (= max-programs (.size cache))
             (release! session (.next (.iterator (.keySet cache)))))
           (.put cache group new-program)
