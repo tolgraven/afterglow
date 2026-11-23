@@ -42,3 +42,43 @@ A sphere uses `:position` and `:radius`. A box uses inclusive `:min` and `:max` 
 Pass `:observe-hdr? true` as a frame option. The resulting `:hdr-contacts` maps each radiating fixture to the receiving fixtures and their positive incoming excess. The observation samples actual composed native light after the emitting dimmer and shutter and before whitening, optical spill gain, master and DMX packing. For 0.4 red excess and linear falloff at half the radius, the contact strength is 0.2. Set optical `:spill` to zero to leave the receiver's authored color intact while the logical contact can still start an effect. Explicit blackout, zero master and a closed emitting shutter clear contacts. A pan/tilt-only receiver can participate.
 
 Pass the last committed frame's `:hdr-contacts` to `spatial/advance`. A volume with `:shape :hdr` selects receivers above its `:threshold`. Supply `:source-id` to listen to a particular source, or omit it to accept any. Reading the previous committed frame decouples effects launched by a halo from the render that produced it. Optical gain and whitening follow the [HDR renderer](highlight-spill.md).
+
+## Paint a sculpted volume
+
+`afterglow.spatial.field/sample` takes a resolved volume, a fixture vector or
+prepared rig, and the last committed optical observation. It returns two maps
+keyed by head ID. `:weights` contains positive native-layer strengths and
+`:aims` contains reachable world targets when requested.
+
+```clojure
+{:shape :ball :position [2 1 -1] :radius 0.3 :restitution 0.9
+ :geometry {:shape :difference
+            :parts [{:shape :rounded-box :position [0 0 0]
+                     :size [3 1 2] :rounding 0.65}
+                    {:shape :sphere :position [0.6 0 0] :radius 0.4}]}
+ :selection #{:position :beam}
+ :strength 0.85 :falloff {:inner-m 0.2 :outer-m 0.4 :curve :smoothstep}}
+```
+
+Supply the body's current simulated position when sampling between throws.
+The ball's radius controls wall and body collisions. Its attached geometry
+controls the selection, including multiple passages through a cut-out in one
+physics step. Any primitive or compound can take a positive XYZ `:scale`
+followed by a world `:translation`. Stretch uses the shape position, centre of
+its finite bounds or world origin as pivot, in that order. Rounding runs from
+sharp corners at zero to the largest radius that fits the shortest side at one.
+The same CLJC geometry is usable by Studio.
+
+Distance is negative inside a primitive. The inner and outer distances set the
+widths over which strength reaches full and zero. Both default to zero for a
+hard edge. Nonuniform stretching scales distance by the shortest axis ratio.
+This preserves exact membership and makes the world-space feather conservative
+around anisotropically stretched and Boolean shapes.
+
+The caller passes the resulting map as `:target-weights` on a native group.
+Each member effect runs once. The compositor applies group strength once at each
+head over the existing native backdrop. A head outside the field keeps that
+backdrop. Supply `:beam` to include a lit cone or `:aimable` to include a
+reachable mover. Alpha uses the strongest qualifying contribution. The previous
+frame supplies emitted RGB, pose, fog attenuation and known receiver planes.
+[Optical selection and probe limits](spatial-beam-selection.md)
