@@ -36,7 +36,7 @@
       ;; The Address[32] field has one used entry and 31 unused slots.
       (into (header tod-request universe 0) (concat [0 1 address] (repeat 31 0))))))
 
-(defn- individual-uid [value]
+(defn individual-uid [value]
   (let [uid (rdm/uid value)]
     (when (or (= uid "0000:00000000") (str/ends-with? uid ":ffffffff") (str/starts-with? uid "ffff:"))
       (rdm/fail! "RDM requires an individual device UID" {:uid uid}))

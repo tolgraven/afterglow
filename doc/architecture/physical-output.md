@@ -18,7 +18,7 @@ RDM runs independently of DMX publication. The connection's `:request!` performs
 
 ## Direct RDM over Art-Net
 
-Choose `:transport :art-net` to use one known Art-Net 4 gateway. OLA remains the default and connects to olad over TCP. The direct driver sends unicast UDP to the configured IPv4 address. Both gateway and local UDP ports default to 6454. Use `:bind-host` to select an interface when multiple processes or networks share a computer. A physical gateway normally replies on port 6454. Set `:local-port 0` only for a simulator that replies to the sender’s port.
+Choose `:transport :art-net` to use one known Art-Net 4 gateway. OLA remains the default and connects to olad over TCP. The direct driver sends unicast UDP to the configured IPv4 address. Both gateway and local UDP ports default to 6454. Use `:bind-host` to select an interface when multiple processes or networks share a computer. Applications can validate form or EDN options without network I/O through `afterglow.rdm.artnet/configuration`. A physical gateway normally replies on port 6454. Set `:local-port 0` only for a simulator that replies to the sender’s port.
 
 ```clojure
 (require '[afterglow.rdm.transport :as rdm])

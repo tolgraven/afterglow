@@ -1,5 +1,6 @@
 (ns afterglow.rdm.artnet-test
-  (:require [afterglow.rdm.artnet.packets :as packet]
+  (:require [afterglow.rdm.artnet :as artnet]
+            [afterglow.rdm.artnet.packets :as packet]
             [afterglow.rdm.transport :as transport]
             [clojure.test :refer [deftest is]])
   (:import [java.net DatagramPacket DatagramSocket InetAddress SocketException SocketTimeoutException]))
@@ -176,10 +177,13 @@
           (is (= :closed (deref reader 1000 :blocked))))))))
 
 (deftest invalid-configurations-do-not-start-discovery-or-send-a-command
+  (is (= {:port 6454 :local-port 6454 :timeout-ms 3000 :bind-index 1 :physical-port 1
+          :host "127.0.0.1" :controller-uid controller}
+         (artnet/configuration {:host "127.0.0.1" :controller-uid "7A70:01020304"})))
   (doseq [config [{:host "not-an-address"} {:host "999.0.0.1"} {:host "0.0.0.0"}
                   {:host "239.0.0.1"} {:host "255.255.255.255"} {:port 0}
                   {:local-port -1} {:timeout-ms 0} {:physical-port 0}
-                  {:physical-port 5} {:bind-index 256} {:bind-host "::1"}]]
+                  {:physical-port 5} {:bind-index 256} {:bind-host "::1"} {:controller-uid "1234:ffffffff"}]]
     (is (thrown? clojure.lang.ExceptionInfo
                  (transport/open! (merge {:transport :art-net :host "127.0.0.1" :local-port 0} config)
                                   (+ (System/nanoTime) 1000000000) (fn [_]))))))

@@ -104,15 +104,24 @@
       (rdm/fail! "Art-Net RDM requires an IPv4 unicast gateway and UDP port" {:host host :port port}))
     (InetSocketAddress. ip (int port))))
 
-(defn open!
-  "Bind one job-owned UDP socket. Configure an individual controller UID for GET/SET.
-  The host selects the responding ArtTodData BindIndex and Port (each defaults to 1)."
-  [options deadline register!]
-  (let [{:keys [host port bind-host local-port timeout-ms bind-index physical-port] :as config}
+(defn configuration
+  "Check session settings without binding a socket or contacting a gateway."
+  [options]
+  (let [{:keys [host port bind-host local-port controller-uid timeout-ms bind-index physical-port] :as config}
         (merge {:port 6454 :local-port 6454 :timeout-ms 3000 :bind-index 1 :physical-port 1} options)]
     (when-not (and (rdm/uint? 16 local-port) (integer? timeout-ms) (<= 1 timeout-ms Integer/MAX_VALUE)
                    (rdm/uint? 8 bind-index) (integer? physical-port) (<= 1 physical-port 4))
       (rdm/fail! "Invalid Art-Net RDM local port, timeout or physical port selection" {}))
+    (endpoint host port)
+    (when bind-host (ipv4 bind-host))
+    (cond-> (select-keys config [:host :port :bind-host :local-port :timeout-ms :bind-index :physical-port])
+      controller-uid (assoc :controller-uid (packet/individual-uid controller-uid)))))
+
+(defn open!
+  "Bind one job-owned UDP socket. Configure an individual controller UID for GET/SET.
+  The host selects the responding ArtTodData BindIndex and Port (each defaults to 1)."
+  [options deadline register!]
+  (let [{:keys [host port bind-host local-port] :as config} (configuration options)]
     (let [socket (DatagramSocket. nil)]
       (try
         (register! #(.close socket))
