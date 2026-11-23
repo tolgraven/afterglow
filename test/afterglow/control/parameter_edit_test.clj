@@ -97,3 +97,9 @@
           (is (params/valid-value? schema rgb))
           (when (< lo hi)
             (is (< (abs (- v (edit/position schema rgb {:component 2}))) 1e-8))))))))
+
+(deftest explicitly-unbounded-colors-use-the-full-control-range
+  (let [schema {:type :color :bounds nil :default [1 0 0]}]
+    (is (= [0.5 0.0 0.0] (edit/edit schema [1 0 0] 0.5 {:mode :absolute :component 2})))
+    (is (== 1 (edit/position schema [1 0 0] {:component 2})))
+    (is (= (edit/color-grid-value 3 4) (edit/color-grid-value schema 3 4)))))

@@ -5,7 +5,7 @@
   (and (number? value) (Double/isFinite (double value))))
 
 (defn color-bounds [schema]
-  (let [[low high] (:bounds schema [0 1])]
+  (let [[low high] (or (:bounds schema) [0 1])]
     [(max 0 low) (min 1 high)]))
 
 (defn valid-value?
