@@ -917,15 +917,16 @@
    (merge-packed-batches! patch target-values target-present batches nil))
   ([patch ^doubles target-values ^booleans target-present batches ^booleans excluded]
    (let [stride (int (::stride patch))]
-     (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
+     (doseq [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} batches
              {:keys [attribute components values slot]} columns]
        (let [^doubles source values, row-count (count target-ids), components (int components)
              opacity (double opacity)
              high? (and (::hdr? patch) (hdr/light-attributes attribute))]
          (dotimes [row row-count]
            (let [index (long (if target-indices (aget ^ints target-indices row) row))
-                 base (* index stride)]
-             (when-not (and excluded (aget excluded (int index)))
+                 base (* index stride)
+                 opacity (if opacities (aget ^doubles opacities row) opacity)]
+             (when-not (or (and opacities (zero? opacity)) (and excluded (aget excluded (int index))))
                (dotimes [component components]
                  (let [value (aget source (+ (* row components) component))
                        permitted? (and high? (or (not= :dimmer attribute)
@@ -959,12 +960,13 @@
 
 (defn- expand-batch
   ([batch] (expand-batch batch nil))
-  ([{:keys [target-ids columns blend opacity]} selected]
+  ([{:keys [target-ids columns blend opacity ::layers/opacities]} selected]
    (for [row (range (count target-ids))
          :let [id (nth target-ids row)]
-         :when (or (nil? selected) (contains? selected id))
+         :when (and (or (nil? selected) (contains? selected id))
+                    (or (nil? opacities) (pos? (aget ^doubles opacities row))))
          {:keys [attribute components values]} columns]
-     {:target-id id :attribute attribute :blend blend :opacity opacity
+     {:target-id id :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
       :value (if (= 1 components) (aget ^doubles values row)
                  (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
 
@@ -987,7 +989,7 @@
                                (some #(geometric-attributes (:attribute %)) columns))
                          (into targets target-ids) targets)))) #{} blocks))
 
-(defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity]} ^booleans general]
+(defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} ^booleans general]
   ;; A large pixel batch may have only a few geometric targets. Scan the mask
   ;; with a primitive index, retaining only selected row indices. Assignment
   ;; maps remain streamed in row order, including repeated/reordered IDs.
@@ -995,11 +997,12 @@
         rows (loop [row 0, selected (transient [])]
                (if (< row row-count)
                  (recur (inc row)
-                        (if (aget general (int (if target-indices (aget ^ints target-indices row) row)))
+                        (if (and (aget general (int (if target-indices (aget ^ints target-indices row) row)))
+                                 (or (nil? opacities) (pos? (aget ^doubles opacities row))))
                           (conj! selected row) selected))
                  (persistent! selected)))]
     (for [row rows, {:keys [attribute components values]} columns]
-      {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity opacity
+      {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
        :value (if (= 1 components) (aget ^doubles values row)
                   (mapv #(aget ^doubles values (+ (* row components) %)) (range components)))})))
 

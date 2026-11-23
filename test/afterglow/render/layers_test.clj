@@ -178,3 +178,50 @@
                             [(assoc-in (weighted 0 [] batch) [:native-layer :target-weights :edge] 2)])))
     (is (thrown? Exception (frame/resolve-contributions rig
                             [(weighted 0 [] batch) (assoc-in modifier [:native-layer :target-weights] {})])))))
+
+(deftest dense-spatial-replacements-retain-their-typed-columns
+  (let [values (double-array [0.7 0.9 0.1])
+        ids [42 :moving/head "floor"]
+        column {:attribute :focus :components 1 :values values}
+        compiled {:target-ids ids :columns [column] :opacity 1.0 :blend :replace}
+        mask (assoc-in (layer 0 0.8 [] {:kind :batch :compiled compiled})
+                       [:native-layer :target-weights] {42 0.5 "floor" 1.0})
+        background (block (assoc (row :focus 0.3) :target-id 42))
+        no-fold (fn [& _] (throw (ex-info "Unexpected per-fixture backdrop fold" {})))
+        result-single (layers/compose [background mask] no-fold no-fold no-fold)]
+    (is (identical? values (get-in (last result-single) [:compiled :columns 0 :values])))
+    (is (= [0.4 0.0 0.8] (vec (get-in (last result-single) [:compiled ::layers/opacities]))))
+    (is (= background (first result-single)))))
+
+(deftest native-mask-direct-and-general-packing-agree
+  (let [ids [:moving/head 42 "floor"]
+        rig (frame/compile-patch (mapv (fn [i id]
+                                        {:id id :universe 0 :address (+ 1 (* i 8))
+                                         :channels {:red 1 :green 2 :blue 3 :pan 4 :tilt 5 :focus 6}})
+                                      (range) ids))
+        base (apply block (map #(hash-map :target-id % :attribute :color :value [0.1 0.3 0.8]) ids))
+        mask {:moving/head 0.0 42 0.375 "floor" 1.0}
+        sculpt (fn [member input] (assoc-in (layer member 0.5 [] input) [:native-layer :target-weights] mask))
+        batch (fn [ids field width values]
+                {:kind :batch :batch {:target-ids ids :outputs {field {:components width :type (if (= width 3) :vec3 :number)
+                                                                       :values (double-array values)}}}})
+        paint (sculpt 0 (batch (vec (reverse ids)) :color 3 [1.5 0.4 0.1  0.4 1.4 0.1  8 8 8]))
+        focus (sculpt 1 (batch ids :focus 1 [Double/NaN 0.5 1.0]))
+        aim (block {:target-id 42 :attribute :aim :value [1/2 1 3]})
+        scalar (sculpt 0 (block {:target-id 42 :attribute :color :value [0.4 1.4 0.1]}
+                                {:target-id "floor" :attribute :color :value [1.5 0.4 0.1]}))
+        repeated (sculpt 1 (batch [42 "floor" 42] :focus 1 [0.2 0.8 0.5]))
+        scalar-repeat (sculpt 1 (block {:target-id 42 :attribute :focus :value 0.2}
+                                       {:target-id 42 :attribute :focus :value 0.5}))]
+    (doseq [program [[paint focus] [scalar focus] [paint repeated] [scalar scalar-repeat]
+                     [scalar paint] [paint (assoc-in focus [:native-layer :id] :second)]]
+            compact? [false true]]
+      (let [slow (mapv #(assoc-in % [:native-layer :transforms] [{:attribute :beat-ratio :value 1/3}]) program)
+            opts {:hdr {} :include-values? (not compact?) :compact-values? compact?}
+            render #(frame/resolve-contributions rig (into [base aim] %) opts)
+            fast (render program)
+            reference (render slow)]
+        (is (= (:values reference) (:values fast)))
+        (is (= (vec (get-in reference [:universes 0])) (vec (get-in fast [:universes 0]))))
+        (when compact?
+          (is (= (frame/project-compact (:compact reference)) (frame/project-compact (:compact fast)))))))))
