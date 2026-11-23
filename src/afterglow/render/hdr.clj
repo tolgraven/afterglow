@@ -251,6 +251,21 @@
               (if (seq ids) (update by-owner (gain-owner block) (fnil into #{}) ids) by-owner)))
           {} blocks))
 
+(defn- scale-column [targets scale? scale {:keys [attribute components values source-stride] :as column}]
+  (if-not (light-attributes attribute)
+    column
+    (let [width (long components) stride (long (or source-stride width)) ^doubles source values
+          eligible? #(scale? attribute %)]
+      (if (and (zero? stride) (seq targets) (every? eligible? targets))
+        (assoc column :values (double-array (map scale source)))
+        (let [result (double-array (* (count targets) width))]
+          (dotimes [row (count targets)]
+            (let [gain? (eligible? (nth targets row))]
+              (dotimes [component width]
+                (let [value (aget source (+ (* row stride) component))]
+                  (aset result (+ (* row width) component) (if gain? (double (scale value)) value))))))
+          (assoc column :values result :source-stride width))))))
+
 (defn- scale-block [{:keys [kind compiled assignments source] :as block} dimmers selected emitting? g]
   (let [scale? (fn [attr id] (and (light-attributes attr) (emitting? id) (or (nil? selected) (contains? selected id))
                                   (or (= :dimmer attr) (not (contains? dimmers id)))))
@@ -269,17 +284,7 @@
                                                           (mapv scale [(:r c) (:g c) (:b c)])))
                                                       (scale value))) a)) assignments))
       :batch (update-in block [:compiled :columns]
-                        (fn [columns]
-                          (mapv (fn [{:keys [attribute components values] :as column}]
-                                  (if-not (light-attributes attribute) column
-                                    (let [^doubles scaled (aclone ^doubles values)
-                                          targets (:target-ids compiled)]
-                                      (dotimes [i (count targets)]
-                                        (when (scale? attribute (nth targets i))
-                                          (dotimes [c (int components)]
-                                            (let [at (+ (* i (int components)) c)]
-                                              (aset scaled at (double (scale (aget scaled at))))))))
-                                      (assoc column :values scaled)))) columns))))))
+                        #(mapv (partial scale-column (:target-ids compiled) scale? scale) %)))))
 
 (defn apply-contribution-gains
   "Scale an owner's dimmer or its emitters exactly once, ahead of composition.

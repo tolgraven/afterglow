@@ -869,3 +869,30 @@
                        (assoc-in compact (conj field-path :values) (double-array [0.1 0.2]))]]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid typed batch"
                               (frame/resolve-contributions rig [invalid])))))))
+
+(deftest scoped-emission-gains-scale-the-intended-uniform-field-rows
+  (let [ids [:a :b :c] rig (frame/compile-patch (mapv #(assoc rgb :id %1 :address %2) ids [1 4 7]))
+        rgb-tuple [0.25 0.125 0.0625]
+        compact (fields/->UniformField :vec3 3 (double-array rgb-tuple))
+        expanded (field :vec3 3 (mapcat identity (repeat 3 rgb-tuple)))
+        draw (fn [field targets gain-options intrinsic?]
+               (let [block (cond-> {:kind :batch :source source-a
+                                    :batch {:target-ids ids :outputs {:color field}}}
+                             intrinsic? (assoc :emission-gain 2.0))]
+                 (frame/resolve-contributions rig [block] {:compact-values? true
+                                                          :hdr (assoc gain-options :fixture-ids targets)})))]
+    (doseq [targets [ids [:a] [:b] [:a :c] []]
+            [settings intrinsic?] [[{:cue-gains {:left 2.0}} false]
+                                   [{:instance-gains {"a" 2.0}} false]
+                                   [{} true]]]
+      (let [after (draw compact targets settings intrinsic?)
+            before (draw expanded targets settings intrinsic?)]
+        (is (= (frame/portable-frame before) (frame/portable-frame after)))
+        (is (= (mapv #(if (some #{%} targets) 128 64) ids) (bytes-at after 1 1 4 7)))))
+    (let [dimmer {:kind :assignments :source source-a
+                  :assignments [(assignment :b :dimmer 0.5)]}
+          paint (fn [field] {:kind :batch :source source-a :batch {:target-ids ids :outputs {:color field}}})
+          render #(frame/resolve-contributions rig [dimmer (paint %)] {:hdr {:instance-gains {"a" 2.0}}})]
+      (is (= (frame/portable-frame (render expanded)) (frame/portable-frame (render compact))))
+      (is (= [128 64 128] (bytes-at (render compact) 1 1 4 7))))
+    (is (= rgb-tuple (vec (:values compact))))))
