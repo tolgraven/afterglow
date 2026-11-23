@@ -194,5 +194,5 @@
   (let [rig (rig-and-hosts 20000)]
     (try (dotimes [n 2] (capture-pair rig nil n))
          (spit out (pr-str {:rows (mapv #(sample-copy-traffic rig %) [2 3 4])
-                            :targets 20064 :washes 8 :movers 64}))
+                            :targets 20064 :washes (parse-long (or (System/getenv "VENUE_WASHES") "8")) :movers 64}))
          (finally (doseq [h (:hosts rig)] (show/stop! (:runtime h))) (shutdown-agents)))))
