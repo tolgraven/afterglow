@@ -58,6 +58,14 @@ poses, while retaining each volume's own shape, range and receiver checks.
 Position-only volumes leave the optical input unread. Create a fresh sampler
 for the next output or a different patch.
 
+A renderer using compact fixture output can attach it with
+`(field/compact-observations settings target-index compact)`. Build
+`target-index` with `afterglow.render.frame/compact-index` from the compact
+frame's `:target-order`. Several volumes then share the previous frame's light
+level. Fixed, ungated heads read the three emitted color components directly.
+Moving, shuttered and dynamically directed heads use the same resolved values
+as rich output. The fixture ID selects the row even if patch order changes.
+
 ```clojure
 {:shape :ball :position [2 1 -1] :radius 0.3 :restitution 0.9
  :geometry {:shape :difference
@@ -106,3 +114,11 @@ model, intents, selected previews and ArtDMX bytes agreed. The p95 wall times
 were 758 and 1,810 ms respectively on this shared machine. All 18 measured
 frames exceeded 25 ms. This profile uses Tolglow `2a6b8ce`, Afterglow
 `742d17b`, a 768 MiB heap and two effect workers with in-memory output.
+
+The sphere sampler prepares its radius, fade widths and response curve once
+per volume sample. For floating-point widths it can reuse the same unboxed
+response when evaluating fixture positions and when finding the strongest
+point reached by a beam. Sampling a fixture position keeps the nested `hypot`
+calculation used by the shape’s signed distance. Translated and scaled spheres
+retain their local-coordinate distance. Decimal or fractional widths and large
+integral world coordinates preserve the original arithmetic at the boundary.

@@ -18,7 +18,8 @@ an intentional, tested contract changes it.
 - `control/` owns semantic commands, validated parameters, pure bindings/views
   and codecs. `control/devices/` owns composable sessions and optional transport
   shells. Push 2 source-derived tests do not establish hardware parity; Push 3
-  currently supports explicitly configured generic MIDI bindings only.
+  supports captured User Mode/MPE mappings and an explicitly selected tethered USB
+  display. See the controller qualification guide before reporting hardware results.
 - `render/` owns fixture calibration, blending, DMX packing, numeric expression
   compilation and native GPU execution. Package the moving-head GLSL and WebGL
   solver in `resources/gpu/`. Tolglow selects the backend in show configuration
@@ -34,9 +35,12 @@ an intentional, tested contract changes it.
 - Channel packing, cross-universe addressing, RGBW, movement history and release
   are separate compatibility gates. A green pure lane cannot prove them alone;
   representative whole-show replay remains required.
-- Use the companion `docs/work-items.edn` for exact disjoint path claims,
-  dependencies, acceptance and evidence. Coordinate shared schema changes before
-  modifying consumers. Release claims after recording actual verification.
+- Track work in [Tolglow’s GitHub Issues](https://github.com/tolgraven/tolglow/issues).
+  Apply `project: afterglow` to core work. Add `project: tolglow` for work that
+  also spans the wrapper or Studio. Record the owner, claimed paths,
+  dependencies and acceptance checks on the issue.
+  Coordinate shared schema changes with the Tolglow owner before editing
+  consumers. Link the PR and its verification evidence from the issue.
 - The new Tolglow studio uses ClojureScript re-frame/Reagent and a Ring backend.
   Device/legacy web code must use common domain operations rather than recreate
   separate lifecycle semantics. Preserve upstream licensing when restructuring.

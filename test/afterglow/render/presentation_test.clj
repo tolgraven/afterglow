@@ -41,6 +41,23 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"frozen" (presentation/complete (presentation/new-state plan) output)))
     (is (thrown? clojure.lang.ExceptionInfo (presentation/freeze-frame {:epoch 0 :frame-id 1 :time-ms 20 :completed-at-ms 10} output)))))
 
+(deftest signed-unsigned-and-edited-packets-are-validated
+  (let [stamp {:epoch 0 :frame-id 1 :time-ms 0 :completed-at-ms 0}
+        state (presentation/new-state (presentation/compile-plan
+                                       [{:id :glow :universe 0 :address 1 :channels {:red 1}}]))
+        dark (vec (repeat 512 0))
+        supplied (into [(byte -128) (short -1) (int 0) (bigint 128) (biginteger 255)] (drop 5 dark))
+        frozen (presentation/freeze-frame stamp {:universes {0 supplied}})
+        packet (:packet (presentation/present (:state (presentation/complete state frozen)) 0))]
+    (is (= [128 255 0 128 255] (subvec (get-in packet [:universes 0]) 0 5)))
+    (is (= [-128 -1 0 -128 -1] (take 5 (get-in (presentation/materialize packet) [:universes 0]))))
+    (doseq [bad [-129 256 0.5 0.0 nil (inc (bigint Long/MAX_VALUE))]]
+      (let [edited (assoc-in frozen [:universes 0 511] bad)]
+        (is (thrown? clojure.lang.ExceptionInfo (presentation/complete state edited)) (pr-str bad))
+        (is (thrown? clojure.lang.ExceptionInfo (presentation/materialize edited)) (pr-str bad))))
+    (doseq [bad [(subvec dark 1) (byte-array 513) (int-array 512)]]
+      (is (thrown? clojure.lang.ExceptionInfo (presentation/materialize {:universes {0 bad}}))))))
+
 (deftest direct-default-holds-unmodified-completed-data
   (let [p (packet 1 0 25 assignments)
         state (admitted (presentation/new-state plan) p)]

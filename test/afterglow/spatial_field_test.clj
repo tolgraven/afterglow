@@ -100,6 +100,62 @@
       (is (pos? (get-in (sample field) [:weights :spot])))
       (is (empty? (:weights (dark field)))))))
 
+(deftest compact-observations-share-real-frame-emission-by-fixture-id
+  (let [fixed {:id :fixed :universe 1 :address 1 :channels {:red 1}
+               :direction [0 0 1] :position [0 0 0] :beam-angle 20}
+        moving (assoc fixed :id :moving :address 10 :channels {:red 1 :pan 2 :tilt 3})
+        gated (assoc fixed :id :gated :address 20 :channels {:red 1 :shutter 2})
+        fixtures [fixed moving gated]
+        rows (mapv (fn [id v] {:target-id id :attribute :red :value v})
+                   [:fixed :moving :gated] [0.25 0.5 0.75])
+        compact (:compact (frame/resolve-frame (vec (reverse fixtures)) rows {:compact-values? true}))
+        index (frame/compact-index (:target-order compact))
+        volume {:shape :sphere :position [0 0 3] :radius 0.5}
+        reads (atom [])
+        reader frame/compact-reader
+        tracked (fn [index compact attributes]
+                  (let [get-row (reader index compact attributes)]
+                    (fn [id] (swap! reads conj id) (get-row id))))
+        opts (with-redefs [frame/compact-reader tracked] (field/compact-observations {} index compact))
+        rig (field/prepare-rig fixtures)
+        sample (field/sampler rig opts)
+        full (field/sampler rig {:values (reader index compact (keys (:fields compact)))})]
+    (sample (assoc volume :selection #{:position}))
+    (is (empty? @reads))
+    (doseq [mode [#{:beam} #{:aimable} #{:beam :position :aimable}]]
+      (let [field (assoc volume :selection mode)]
+        (is (= (full field) (sample field)))))
+    (is (= [:moving :gated] @reads))
+    (is (= 0.25 (get-in (sample (assoc volume :selection #{:beam})) [:weights :fixed])))
+    ;; Replacing the source on the next frame must discard the previous compact reader.
+    (is (empty? (:weights ((field/sampler rig (assoc opts :values {}))
+                           (assoc volume :selection #{:beam})))))))
+
+(deftest compact-emission-falls-back-to-per-frame-direction-and-deferred-validation
+  (let [fixture {:id :lamp :universe 1 :address 1 :channels {:red 1}
+                 :position [0 0 0] :direction [0 0 1] :beam-angle 20}
+        compact (:compact (frame/resolve-frame [fixture] [{:target-id :lamp :attribute :red :value 1}]
+                                               {:compact-values? true}))
+        fields (:fields compact)
+        index (frame/compact-index (:target-order compact))
+        volume {:shape :sphere :position [0 0 1] :radius 0.2 :selection #{:beam}}
+        from (fn [patch compact] (field/sampler [patch] (field/compact-observations {:range-m 2} index compact)))
+        lamp (fn [compact] (get-in ((from fixture compact) volume) [:weights :lamp]))
+        bad (assoc fixture :beam-angle 180)
+        update-field (fn [key values] (assoc-in compact [:fields key :values] (double-array values)))
+        no-rgb (assoc-in compact [:fields :emitted-color :valid] (boolean-array [false]))]
+    (is (= 1.0 (lamp compact)))
+    (is (nil? (lamp no-rgb)))
+    (is (nil? (lamp (update-field :emitted-color [0.25 ##NaN 0.5]))))
+    (is (= 1.0 (lamp (update-field :emitted-color [2.0 -0.2 0.5]))))
+    (let [different (assoc-in (update-field :direction [1 0 0]) [:fields :direction :valid] (boolean-array [true]))
+          without-zoom (assoc compact :fields (dissoc fields :zoom))]
+      (is (nil? (lamp different)))
+      (is (= (lamp compact) (lamp without-zoom))))
+    (is (empty? (:weights ((from bad no-rgb) volume))))
+    (is (empty? (:weights ((from bad compact) (assoc volume :position [0 0 4])))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid beam angle" ((from bad compact) volume)))))
+
 (deftest observing-a-frame-keeps-invalid-unlit-or-distant-optics-lazy
   (let [fixture {:id :bad :position [0 0 0] :channels {:green 1} :beam-angle 180}
         volume {:shape :sphere :position [0 0 3] :selection #{:beam} :radius 0.25}
@@ -240,3 +296,36 @@
             local-point (inverse point)]
         (is (== ((:distance local) local-point) ((:distance world) point)))
         (is (= ((:inside? local) local-point) ((:inside? world) point)))))))
+
+(deftest spherical-samples-retain-distance-and-falloff-precision
+  (let [center [0.25 -0.5 1.75]
+        radius 2.25
+        distances [0.0 (Math/nextDown 1.75) 1.75 (Math/nextUp 1.75)
+                   2.1 2.25 (Math/nextDown 3.0) 3.0 (Math/nextUp 3.0)]
+        points (into [[1/3 1/7 2/9] [0.125M 1.25M 2.3M] [2 1 1]]
+                     (map (fn [d] [(+ 0.25 d) -0.5 1.75])) distances)]
+    (doseq [curve [:linear :smoothstep]
+            [inner outer] [[0.0 0.0] [0.5 0.75] [0.0 0.75] [1/2 3/4]]
+            strength [0.8 -0.0]
+            :let [spec {:shape :sphere :radius radius :strength strength :position center
+                        :falloff {:curve curve :inner-m inner :outer-m outer}}
+                  sphere (field/prepare spec)
+                  ;; A one-child union exercises the general signed-distance evaluator.
+                  generic (field/prepare (assoc spec :shape :union :parts [spec]))]]
+      (doseq [point points]
+        (is (= (Double/doubleToRawLongBits ((:weight-at generic) point))
+               (Double/doubleToRawLongBits ((:weight-at sphere) point)))
+            (str [curve inner outer strength point])))
+      (doseq [d distances
+              :let [delta (- d radius)
+                    phase (cond (<= delta (- inner)) 1.0 (>= delta outer) 0.0
+                                :else (/ (- outer delta) (+ outer inner)))
+                    expected (* strength (if (= :smoothstep curve) (* phase phase (- 3 (* 2 phase))) phase))]]
+        (is (= (Double/doubleToRawLongBits expected)
+               (Double/doubleToRawLongBits ((get-in sphere [:radial :by-distance]) d)))))))
+  ;; Exact subtraction before conversion to double matters at a large integral centre.
+  (let [b 9007199254740992N
+        spec {:shape :sphere :position [b 0 0] :radius 1.0}
+        weights (:weights (field/positions spec [{:id :edge :position [(inc b) 0 0]}
+                                                 {:id :outside :position [(+ b 2) 0 0]}]))]
+    (is (= {:edge 1.0} weights))))

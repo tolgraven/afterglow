@@ -416,6 +416,48 @@
   [fixture output]
   (->Emission (:id fixture) fixture (light-level fixture output) (beam-pose fixture output)))
 
+(defn- rgb-peak ^double [^double/1 rgb ^long row]
+  (let [base (* 3 row)
+        r (aget rgb base)
+        g (aget rgb (inc base))
+        b (aget rgb (+ base 2))]
+    (if (and (Double/isFinite r) (Double/isFinite g) (Double/isFinite b))
+      (Math/max 0.0 (Math/min 1.0 (Math/max r (Math/max g b))))
+      0.0)))
+
+(defn- compact-masks? [n masks]
+  (every? #(and (instance? boolean/1 %) (= n (alength ^boolean/1 %))) masks))
+
+(defn- fixed-light-reader [{:keys [fields count]}]
+  (let [color (:emitted-color fields)
+        ^double/1 rgb (:values color)
+        ^boolean/1 valid (:valid color)
+        ^boolean/1 direction (get-in fields [:direction :valid])
+        ^boolean/1 zoom (get-in fields [:zoom :valid])
+        ^boolean/1 pan (get-in fields [:pan :valid])
+        ^boolean/1 tilt (get-in fields [:tilt :valid])]
+    (when (and (= :vec3 (:type color)) (= 3 (:components color))
+               (instance? double/1 rgb) (= (* 3 count) (alength rgb))
+               (compact-masks? count [valid direction zoom pan tilt]))
+      (fn [row]
+        (let [i (int row)]
+          (when-not (or (aget direction i) (aget zoom i) (aget pan i) (aget tilt i))
+            (if (aget valid i) (rgb-peak rgb i) 0.0)))))))
+
+(defn compact-observer
+  "Observe fixed, ungated emitters directly from a completed compact frame.
+  Mechanical channels, a per-frame pose or an unsupported column use the row reader."
+  [compact indices read-row]
+  (let [read-fixture #(observe % (read-row (:id %)))]
+    (if-let [read-level (fixed-light-reader compact)]
+      (fn [{:keys [id channels] :as fixture}]
+        (let [mounted (::mounted fixture)
+              row (get indices id)
+              level (when (and row mounted (not (:shutter channels)) (not (:strobe channels)))
+                      (read-level row))]
+          (if (some? level) (->Emission id fixture level mounted) (read-fixture fixture))))
+      read-fixture)))
+
 (defn- select-emission [fixture level pose volume {:keys [bounds] :as sampling} options]
   (let [{:keys [selection range-m intensity-threshold] :as opts}
         (if (::prepared options) options (prepare-options options))

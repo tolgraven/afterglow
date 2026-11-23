@@ -11,7 +11,6 @@
 
 (def ^:private emitters (set (keys photometry/emitter-spectrum)))
 (def ^:private continuous (into emitters #{:dimmer :pan :tilt :focus :zoom}))
-(def ^:private byte-array-class (class (byte-array 0)))
 
 (defn- fail! [message data] (throw (ex-info message (assoc data :type ::invalid-presentation))))
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
@@ -61,31 +60,40 @@
                                         (long (if fine (get indices (first fine)) -1))
                                         (long (if fine (second fine) -1)) inverted? fade?)) channels)})))
 
+(defn- invalid-universe! [id]
+  (fail! "Each universe must contain exactly 512 byte values" {:universe id}))
+
+(defn- validate-size [id size]
+  (when-not (= 512 size) (invalid-universe! id)))
+
+(defn- freeze-bytes [id ^bytes values]
+  (validate-size id (alength values))
+  (loop [index 0 result (transient [])]
+    (if (= index 512)
+      (persistent! result)
+      (recur (inc index) (conj! result (bit-and (aget values index) 255))))))
+
+(defn- normalize-vector [id values]
+  (validate-size id (count values))
+  ;; Each comparison can run without boxing doubles in the per-slot scan.
+  (let [signed? (reduce (fn [seen-negative? value]
+                          (when-not (and (integer? value) (<= -128 value) (<= value 255))
+                            (invalid-universe! id))
+                          (or seen-negative? (neg? (long value))))
+                        false values)]
+    (if signed? (mapv #(bit-and (int %) 255) values) values)))
+
 (defn- immutable-universes [universes]
   (when-not (and (map? universes) (every? natural? (keys universes)))
     (fail! "Universes must be a map of nonnegative integer IDs" {}))
-  (into (sorted-map)
-        (for [[id bytes] universes]
-          [id (cond
-                (instance? byte-array-class bytes)
-                (let [^bytes data bytes]
-                  (when-not (= 512 (alength data))
-                    (fail! "Each universe must contain exactly 512 byte values" {:universe id}))
-                  (persistent! (loop [i 0 result (transient [])]
-                                 (if (= i 512) result
-                                     (recur (inc i) (conj! result (bit-and (int (aget data i)) 255)))))))
-                (vector? bytes)
-                (let [^clojure.lang.IPersistentVector values bytes]
-                  (when-not (= 512 (.count values))
-                    (fail! "Each universe must contain exactly 512 byte values" {:universe id}))
-                  (let [signed? (loop [i 0 signed? false]
-                                  (if (= i 512) signed?
-                                      (let [value (.nth values i)]
-                                        (when-not (and (integer? value) (<= -128.0 (double value) 255.0))
-                                          (fail! "Each universe must contain exactly 512 byte values" {:universe id}))
-                                        (recur (inc i) (or signed? (neg? (long value)))))))]
-                    (if signed? (mapv #(bit-and (int %) 255) bytes) bytes)))
-                :else (fail! "Packet bytes must be an owned byte array or immutable vector" {:universe id}))])))
+  (reduce-kv (fn [result id values]
+               (assoc result id
+                      (cond
+                        (bytes? values) (freeze-bytes id values)
+                        (vector? values) (normalize-vector id values)
+                        :else (fail! "Packet bytes must be an owned byte array or immutable vector"
+                                     {:universe id}))))
+             (sorted-map) universes))
 
 (defn freeze-frame
   "Copy completed renderer buffers into a portable immutable packet.
@@ -107,6 +115,12 @@
              :universes (immutable-universes (:universes rendered))}
       (some? started-at-ms) (assoc :started-at-ms started-at-ms))))
 
+(defn- transport-bytes [values]
+  (let [result (byte-array 512)]
+    (dotimes [index 512]
+      (aset result index (unchecked-byte (nth values index))))
+    result))
+
 (defn materialize
   "Return fresh transport-owned byte arrays. Never share returned arrays between
   a mutating transport and another consumer. The immutable packet is unchanged."
@@ -114,9 +128,7 @@
   (assoc packet :universes
          (into (sorted-map)
                (for [[id values] (immutable-universes (:universes packet))]
-                 (let [result (byte-array 512)]
-                   (dotimes [i 512] (aset-byte result i (unchecked-byte (long (.nth ^clojure.lang.IPersistentVector values i)))))
-                   [id result])))))
+                 [id (transport-bytes values)]))))
 
 (defn new-state
   "Create a policy with empty history. All timing here is physical milliseconds.
