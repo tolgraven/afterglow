@@ -2,6 +2,8 @@
   (:require [clojure.test :refer [deftest is]]
             [afterglow.control.model :as model]
             [afterglow.control.devices.push-3 :as push]
+            [afterglow.control.devices.repl :as devices]
+            [afterglow.control.devices.transports :as transports]
             [afterglow.control.devices.session :as session]))
 
 (def layout
@@ -248,3 +250,14 @@
       (is (= :current (get-in feedback [:display :instance-id])))
       (is (= :current (get-in edit [:commands 0 :instance-id])))
       (is (> (get-in edit [:commands 0 :value]) 0.5)))))
+
+(deftest explicit-midi-reaches-the-repl-facade-through-both-input-options
+  (doseq [port [:midi :transport]]
+    (let [opened (atom [])
+          capture {:open! (fn [_] (swap! opened conj :open) :midi)
+                   :close! (fn [_] (swap! opened conj :close))}
+          config (assoc options port capture :model! initial-model :now-ms! (constantly 0)
+                        :session-id "manual-midi" :dispatch! (constantly {:status :accepted}))]
+      (with-redefs [transports/midi-transport (fn [_] (throw (ex-info "Unexpected port enumeration" {})))]
+        (devices/close! (devices/open-push-3! config)))
+      (is (= [:open :close] @opened)))))

@@ -310,4 +310,4 @@
                  (every? #(fn? (get display %)) [:open! :render! :close!]))
             "Choose a tagged Push 3 display transport" {}))
   (session/open! (session/create (cond-> (assoc options :profile (profile options))
-                                    (:transport options) (assoc :midi (:transport options))))))
+                                    (and (:transport options) (not (:midi options))) (assoc :midi (:transport options))))))

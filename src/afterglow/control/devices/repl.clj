@@ -82,7 +82,7 @@
   [options]
   (push-3/connect! (cond-> options
                     (:display options) with-feedback
-                    (not (:transport options)) (assoc :transport (transports/midi-transport options)))))
+                    (not (or (:midi options) (:transport options))) (assoc :transport (transports/midi-transport options)))))
 
 (defn open-seaboard!
   "Open a Seaboard M with its configured MPE zone and cue/axis mappings."
