@@ -52,7 +52,9 @@
             (throw (ex-info "MIDI device discovery is still running. Refresh devices to check again."
                             {:reason :midi/discovery-pending} error))))))))
 
-(def ^:private scan-midi-ports (port-scanner enumerate-midi-ports 1500))
+;; The native MIDI system belongs to the process. A namespace reload may update
+;; enumeration, but must join a provider call that is already in progress.
+(defonce ^:private scan-midi-ports (port-scanner #'enumerate-midi-ports 1500))
 
 (defn midi-ports
   "List current JVM MIDI ports without opening devices. Concurrent callers share one

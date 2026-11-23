@@ -74,3 +74,19 @@
         list! (#'transports/port-scanner #(if (= 1 (swap! attempts inc)) (throw failure) []) 3000)]
     (is (identical? failure (try (list!) (catch Exception error error))))
     (is (= [] (list!)))))
+
+(deftest reloading-the-device-namespace-keeps-the-process-midi-scan
+  (let [owner @#'transports/scan-midi-ports
+        release (promise) started (promise)
+        slow (fn [] (deliver started true) @release [])
+        read-ports (fn [] (try (transports/midi-ports)
+                               (catch clojure.lang.ExceptionInfo error (:reason (ex-data error)))))
+        task (future (with-redefs-fn {#'transports/enumerate-midi-ports slow} read-ports))]
+    (try
+      (is (true? (deref started 3000 false)))
+      (require 'afterglow.control.devices.transports :reload)
+      (is (identical? owner @#'transports/scan-midi-ports))
+      (deliver release true)
+      (let [result (deref task 3000 ::timeout)]
+        (is (= [] (if (= result :midi/discovery-pending) (transports/midi-ports) result))))
+      (finally (deliver release true)))))
