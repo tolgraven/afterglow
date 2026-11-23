@@ -4,7 +4,9 @@
             [afterglow.control.devices.session-test :as fixture]
             [afterglow.control.devices.push-2 :as push]
             [afterglow.control.codecs.push-2 :as codec]
-            [afterglow.control.model :as model]))
+            [afterglow.control.model :as model]
+            [afterglow.render.frame :as frame]
+            [afterglow.render.frame-test :refer [assignment bytes-at]]))
 
 (def sine {:signal-id :sine :version 1})
 (def saw {:signal-id :saw :version 2})
@@ -334,13 +336,22 @@
         (is (= before @(:show h))))
       (finally (finish! h)))))
 
-(deftest shift-encoder-follows-the-fixtures-coarse-fine-pan
-  (let [h (harness)]
-    (try
-      (swap! (:show h) assoc :rig {:fixtures [{:id :light :channels {:pan [1 2]}}]})
-      (swap! (:show h) assoc-in [:registry :effects :wash :outputs] {:pan {:op :param :key :level}})
-      (let [id (launch! h 36) before (:level (values h id))]
-        (receive! h [0xb0 49 127])
-        (receive! h [0xb0 72 1])
-        (is (= (+ before (/ 1.0 65535)) (:level (values h id)))))
-      (finally (finish! h)))))
+(deftest shift-encoder-follows-the-selected-pan-channel
+  (let [coarse {:id :spot :universe 1 :address 1 :channels {:pan 1}}
+        fine {:id "spot" :universe 1 :address 2 :channels {:pan [1 2]}}]
+    (doseq [rig [[coarse fine] [fine coarse]]]
+      (let [h (harness (assoc-in schemas [:level :default] 0.0))]
+        (try
+          (swap! (:show h) assoc :rig {:fixtures rig})
+          (swap! (:show h) assoc-in [:registry :effects :wash :outputs] {:pan {:op :param :key :level}})
+          (doseq [[target expected] [[:spot [1 0 0]] ["spot" [0 0 1]]]]
+            (swap! (:show h) assoc-in [:registry :effects :wash :targets] [target])
+            (let [id (launch! h 36)]
+              (receive! h [0xb0 49 127])
+              (receive! h [0xb0 72 1])
+              (receive! h [0xb0 49 0])
+              (let [level (:level (values h id))
+                    output (frame/resolve-frame rig [(assignment target :pan level)])]
+                (is (= expected (bytes-at output 1 1 2 3))))
+              (receive! h [0x80 36 0])))
+          (finally (finish! h)))))))

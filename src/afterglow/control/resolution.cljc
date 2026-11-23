@@ -34,7 +34,7 @@
   "Build once per rig revision. Passing the result to parameter-bits avoids
   revisiting every LED head for each encoder or Studio widget."
   [fixtures]
-  (let [by-id (into {} (map (fn [fixture] [(id-key (field fixture :id)) (fixture-widths fixture)])) fixtures)]
+  (let [by-id (into {} (map (fn [fixture] [(field fixture :id) (fixture-widths fixture)])) fixtures)]
     (->PatchWidths (reduce (partial merge-with max) {} (vals by-id)) by-id)))
 
 (defn- output-entries [definition]
@@ -55,13 +55,14 @@
                        (references? bindings param binding (conj visited ref))))))))
          (tree-seq coll? seq expression))))
 
-(defn- targets [x] (when (coll? x) (into #{} (map id-key) x)))
+(defn- targets [ids] (when (coll? ids) (set ids)))
 (defn- intersection [a b] (cond (nil? a) b (nil? b) a :else (set/intersection a b)))
 
 (defn parameter-bits
   "Return the finest patched channel width reached by this parameter, or nil.
   Output, definition and optional instance target IDs intersect. Accepts a
-  fixture collection or patch-widths result, and string or keyword wire IDs."
+  fixture collection or patch-widths result. String and keyword fixture IDs
+  retain their original identity, including in Transit data."
   ([fixtures definition parameter] (parameter-bits fixtures definition parameter nil))
   ([fixtures definition parameter instance-targets]
    (let [patch (if (instance? PatchWidths fixtures) fixtures (patch-widths fixtures))

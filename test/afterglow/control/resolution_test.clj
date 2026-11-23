@@ -20,6 +20,22 @@
     (is (nil? (resolution/parameter-bits patch (definition :pan) :speed)))
     (is (= 8 (resolution/parameter-bits [(fixture {:red 1 :green 2 :blue 3})] (definition :dimmer) :width)))))
 
+(deftest identical-spellings-have-distinct-physical-targets
+  (let [coarse (assoc (fixture {:pan 1}) :id :spot)
+        fine (assoc (fixture {:pan [1 2]}) :id "spot" :address 2)
+        only-keyword (assoc (definition :pan) :targets [:spot])
+        only-string {:outputs [{:attribute :pan :value knob :targets ["spot"]}]}]
+    (doseq [fixtures [[coarse fine] [fine coarse]]]
+      (let [patch (resolution/patch-widths fixtures)]
+        (is (= 16 (resolution/parameter-bits patch (definition :pan) :width)))
+        (is (= 8 (resolution/parameter-bits patch only-keyword :width [:spot])))
+        (is (= 16 (resolution/parameter-bits patch only-string :width ["spot"])))
+        (is (nil? (resolution/parameter-bits patch only-keyword :width ["spot"])))
+        (is (nil? (resolution/parameter-bits patch only-string :width [:spot])))))
+    (is (= 16 (resolution/parameter-bits [{"id" "spot" "channels" {"pan" [1 2]}}]
+                                          {"outputs" {"pan" {"op" "param" "key" "width"}}}
+                                          "width" ["spot"])))))
+
 (deftest normalized-fine-tick-reaches-the-next-physical-code
   (doseq [attr [:pan :tilt :dimmer] bits [8 16]]
     (let [fixture (fixture {attr (if (= bits 8) 1 [1 2])})
