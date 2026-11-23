@@ -117,12 +117,28 @@
         read-row (frame/compact-reader index compact attributes)]
     (assoc options :values (with-meta read-row {::observe (beam/compact-observer compact (:indices index) read-row)}))))
 
+(defn- range-origins [emitters]
+  (when (seq emitters)
+    (reduce (fn [{lo :min hi :max} {:keys [position lens-radius-m]
+                                  :or {position [0 0 0] lens-radius-m 0.119}}]
+              ;; Read only standard numbers here. A suspect hint disables the
+              ;; certificate so the usual fixture selection decides when to validate it.
+              (if (and (or (float? lens-radius-m) (integer? lens-radius-m)
+                           (decimal? lens-radius-m) (ratio? lens-radius-m))
+                       (geometry/nonnegative? lens-radius-m) (geometry/vec3? position))
+                {:min (mapv #(min %1 (double %2)) lo position)
+                 :max (mapv #(max %1 (double %2)) hi position)}
+                (reduced nil)))
+            {:min [##Inf ##Inf ##Inf] :max [##-Inf ##-Inf ##-Inf]}
+            emitters)))
+
 (defn prepare-rig
   "Build spatial indices now and prepare optical fixtures on first beam use."
   [fixtures]
   (let [rig (geometry/prepare-rig fixtures)]
-    (if (::emitters rig) rig
-        (assoc rig ::emitters (delay (mapv beam/prepare-fixture (:directional rig)))))))
+    (if (::optical-rig rig) rig
+        (assoc rig ::optical-rig (delay (let [fixtures (mapv beam/prepare-fixture (:directional rig))]
+                                           {:fixtures fixtures :origins (range-origins fixtures)}))))))
 
 (defn- sample-volume [volume rig {:keys [values] :as observations} emissions]
   (let [sampling (prepare volume)
@@ -131,7 +147,8 @@
     (if (empty? optical)
       {:weights initial :aims {}}
       (let [prepared (or (::optics observations) (::optics (prepare-observations observations)))
-            opts (beam/volume-options prepared optical sampling)
+            {:keys [fixtures origins]} @(::optical-rig rig)
+            opts (beam/volume-options prepared optical sampling origins)
             read-row (or values {})
             receive (if emissions
                       #(beam/observed-contribution % volume sampling opts)
@@ -143,7 +160,7 @@
                            (when aim (vswap! aims assoc! id aim))
                            (assoc! weights id (max weight (get weights id 0.0))))
                          weights))]
-        {:weights (persistent! (reduce add-beam (transient initial) @(or emissions (::emitters rig))))
+        {:weights (persistent! (reduce add-beam (transient initial) (if emissions @emissions fixtures)))
          :aims (persistent! @aims)}))))
 
 (defn sample
@@ -161,5 +178,5 @@
   (let [rig (prepare-rig fixtures)
         read-row (or values {})
         observe (or (::observe (meta read-row)) #(beam/observe % (read-row (:id %))))
-        emissions (delay (mapv observe @(::emitters rig)))]
+        emissions (delay (mapv observe (:fixtures @(::optical-rig rig))))]
     (fn [volume] (sample-volume volume rig observations emissions))))
