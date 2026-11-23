@@ -23,7 +23,7 @@ definitions and portable model state.
 Defaults reserve 15% of the output period. Three consecutive frames of
 sustained pressure can double one predictive instance's interval, up to eight
 frames. The policy first considers the highest estimated cost per scheduled
-frame. Two consecutive real samples must exceed the cost floor before an
+frame. Two consecutive real samples must meet the cost floor before an
 instance can slow down. Two consecutive samples below the floor (0.75 ms
 by default) restore that instance to its authored cadence even in a busy
 scene. Interpolated frames do not count as samples. Twenty-four quiet frames
