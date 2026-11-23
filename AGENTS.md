@@ -36,8 +36,9 @@ an intentional, tested contract changes it.
   are separate compatibility gates. A green pure lane cannot prove them alone;
   representative whole-show replay remains required.
 - Track work in [Tolglow’s GitHub Issues](https://github.com/tolgraven/tolglow/issues).
-  Choose the project label for Afterglow or for both repositories. Record the
-  owner, claimed paths, dependencies and acceptance checks on the issue.
+  Apply `project: afterglow` to core work. Add `project: tolglow` for work that
+  also spans the wrapper or Studio. Record the owner, claimed paths,
+  dependencies and acceptance checks on the issue.
   Coordinate shared schema changes with the Tolglow owner before editing
   consumers. Link the PR and its verification evidence from the issue.
 - The new Tolglow studio uses ClojureScript re-frame/Reagent and a Ring backend.
