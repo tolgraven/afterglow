@@ -416,10 +416,10 @@
         ^bytes coarse (aget buffers (int (.-universe channel)))
         index (int (.-index channel))]
     (if (neg? (.-fineUniverse channel))
-      (aset-byte coarse index (unchecked-byte (Math/round value)))
+      (aset coarse index (unchecked-byte (Math/round value)))
       (let [^bytes fine (aget buffers (int (.-fineUniverse channel)))]
-        (aset-byte coarse index (unchecked-byte (int value)))
-        (aset-byte fine (int (.-fineIndex channel))
+        (aset coarse index (unchecked-byte (int value)))
+        (aset fine (int (.-fineIndex channel))
                    (unchecked-byte (Math/round (* 255.0 (- value (int value))))))))))
 
 (defn- create-compact [patch]
@@ -686,23 +686,23 @@
                 (if scatter (pack-scatter! indexed scatter level)
                     (pack-value! universes (.-fallback channel) level)))
               (when (and compact (>= compact-index 0))
-                (aset-double ^doubles (aget compact-arrays (int compact-index)) index level)
-                (aset-boolean ^booleans (aget compact-masks (int compact-index)) index true))))
+                (aset ^doubles (aget compact-arrays (int compact-index)) index level)
+                (aset ^booleans (aget compact-masks (int compact-index)) index true))))
           (when compact
-            (aset-double intensities index intensity)
+            (aset intensities index intensity)
             (let [color-base (* index 3)]
               (cond
                 (and (not (.-emitter fixture)) (.-dimmer fixture))
                 (let [emission (.-emission fixture)]
                   (dotimes [component 3]
-                    (aset-double colors (+ color-base component) (* intensity (double (nth emission component))))))
+                    (aset colors (+ color-base component) (* intensity (double (nth emission component))))))
                 (seq (.-tints fixture))
                 (write-emitter-tints! (.-tints fixture) nil values base colors color-base
                                       (+ red white) (+ green white) (+ blue white) intensity)
                 :else
-                (do (aset-double colors color-base (* intensity (min 1.0 (+ red white))))
-                    (aset-double colors (inc color-base) (* intensity (min 1.0 (+ green white))))
-                    (aset-double colors (+ color-base 2) (* intensity (min 1.0 (+ blue white)))))))))))
+                (do (aset colors color-base (* intensity (min 1.0 (+ red white))))
+                    (aset colors (inc color-base) (* intensity (min 1.0 (+ green white))))
+                    (aset colors (+ color-base 2) (* intensity (min 1.0 (+ blue white)))))))))))
     (cond-> {:values nil :universes universes :target-order (:target-order patch)}
       compact (assoc :compact (:view compact)))))
 
@@ -815,6 +815,29 @@
 
 (def ^:private doubles-class (class (double-array 0)))
 
+(defn- batch-target-indices
+  "A nil index means each batch row already addresses its patch row. This
+  includes ordered prefixes (e.g. all strip pixels before the moving heads)."
+  [{:keys [target-order by-id]} ids]
+  (when-not (identical? ids target-order)
+    (let [n (count ids)
+          prefix-limit (min n (count target-order))
+          prefix (loop [row 0]
+                   (if (and (< row prefix-limit) (= (nth ids row) (nth target-order row)))
+                     (recur (inc row))
+                     row))]
+      (when (< prefix n)
+        (let [indices (int-array n)]
+          (dotimes [row prefix] (aset indices row (int row)))
+          (loop [row prefix]
+            (when (< row n)
+              (let [id (nth ids row)
+                    fixture (get by-id id)]
+                (when-not fixture (fail! "Unknown batch target" {:target-id id}))
+                (aset indices row (int (::index fixture))))
+              (recur (inc row))))
+          indices)))))
+
 (defn- validate-batches [patch batches & [layer?]]
   (when-not (vector? batches) (fail! "Batches must be an ordered vector" {}))
   (mapv
@@ -822,11 +845,7 @@
      (when-not (and (map? batch) (vector? target-ids) (map? outputs) (seq outputs)
                     (#{:replace :max :add} blend) (unit? opacity) (or (nil? count) (= count (clojure.core/count target-ids))))
        (fail! "Invalid batch shape, count or blend" {}))
-     (let [same-order? (= target-ids (:target-order patch))
-           target-indices (if same-order? nil
-                              (int-array (map (fn [id]
-                                                (if-let [fixture (get (:by-id patch) id)] (::index fixture)
-                                                        (fail! "Unknown batch target" {:target-id id}))) target-ids)))
+     (let [target-indices (batch-target-indices patch target-ids)
            columns (mapv
                     (fn [[attribute {:keys [type components values]}]]
                       (let [vector? (or (= :color attribute) (geometric-attributes attribute))
@@ -856,6 +875,7 @@
      (doseq [{:keys [target-ids target-indices columns blend opacity]} batches
              {:keys [attribute components values slot]} columns]
        (let [^doubles source values, row-count (count target-ids), components (int components)
+             opacity (double opacity)
              high? (and (::hdr? patch) (hdr/light-attributes attribute))]
          (dotimes [row row-count]
            (let [index (long (if target-indices (aget ^ints target-indices row) row))
@@ -870,13 +890,13 @@
                    (let [destination (+ base (int slot) component)
                          before (aget target-values destination)
                          blended (case blend :replace value :add (+ before value) :max (max before value))
-                         level (if (== 1 opacity) blended (+ before (* opacity (- blended before))))]
+                         level (if (== 1.0 opacity) blended (+ before (* opacity (- blended before))))]
                      (when-not (and (Double/isFinite level) (<= 0.0 level) (or permitted? (<= level 1.0)))
                        (fail! "Blended assignment exceeds its finite attribute range"
                               {:target-id (nth target-ids row) :attribute attribute :value level}))
                      (when (pos? opacity)
-                       (aset-double target-values destination level)
-                       (aset-boolean target-present destination true)))))))))))))
+                       (aset target-values destination level)
+                       (aset target-present destination true)))))))))))))
 
 (defn- merge-packed-assignments!
   [patch ^doubles values ^booleans present assignments]
