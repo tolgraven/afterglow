@@ -1,7 +1,8 @@
 (ns afterglow.render.distributed
   "A bounded pool of paired remote numerical workers. Jobs return typed fields
   for one current frame. Only the caller owns fixture packing and output."
-  (:require [afterglow.render.ir :as ir])
+  (:require [afterglow.render.ir :as ir]
+            [afterglow.render.verified :as verified])
   (:import [java.nio ByteBuffer ByteOrder]
            [java.util UUID]
            [java.util.concurrent CompletableFuture TimeUnit TimeoutException]))
@@ -67,7 +68,8 @@
       (when (or (:closed? @(:state pool)) (>= (count @(:peers pool)) max-peers))
         (throw (ex-info "Render pool is closed or full" {})))
       (let [id (token)]
-        (swap! (:peers pool) assoc id {:send! send! :capacity (min max-floats capacity) :ready []})
+        (swap! (:peers pool) assoc id {:send! send! :capacity (min max-floats capacity) :ready []
+                                      :verified? (= :full (:verification caps))})
         id))))
 
 (defn disconnect! [pool id]
@@ -142,7 +144,7 @@
                            cnt (min remaining (capacities index) (max equally needed))]
                        (if (zero? cnt) (recur remaining offset (inc index) jobs)
                          (let [job {:id (token) :peer id :send! (:send! peer) :done (CompletableFuture.)
-                                    :start offset :count cnt :floats (* stride cnt)}]
+                                    :verified? (:verified? peer) :start offset :count cnt :floats (* stride cnt)}]
                            (swap! (:peers pool) assoc-in [id :job] job)
                            (recur (- remaining cnt) (+ offset cnt) (inc index) (conj jobs job))))))))}))))
 
@@ -165,15 +167,27 @@
                                 [attribute {:type type :components components :values (double-array (* n components))}]))
                       (:outputs plan))]
     (doseq [[{:keys [start count]} chunk] (map vector jobs chunks)]
-      (let [floats (.asFloatBuffer (buffer chunk))]
-        (dotimes [i count]
-          (doseq [{:keys [attribute components]} (:outputs plan)]
-            (let [^doubles target (:values (outputs attribute)) dest (* (+ start i) components)]
-              (dotimes [j components]
-                (let [v (.get floats)]
-                  (when-not (Float/isFinite v) (throw (ex-info "Nonfinite remote output" {:attribute attribute})))
-                  (aset-double target (+ dest j) (double v)))))))))
+      (if (map? chunk)
+        (doseq [[attribute {:keys [components values]}] (:outputs chunk)]
+          (System/arraycopy values 0 (get-in outputs [attribute :values]) (int (* start components)) (alength ^doubles values)))
+        (let [floats (.asFloatBuffer (buffer chunk))]
+          (dotimes [i count]
+            (doseq [{:keys [attribute components]} (:outputs plan)]
+              (let [^doubles target (:values (outputs attribute)) dest (* (+ start i) components)]
+                (dotimes [j components]
+                  (let [v (.get floats)]
+                    (when-not (Float/isFinite v) (throw (ex-info "Nonfinite remote output" {:attribute attribute})))
+                    (aset-double target (+ dest j) (double v))))))))))
     {:count n :outputs outputs}))
+
+(defn- checked-slices [pool group env jobs chunks]
+  (mapv (fn [job chunk]
+          (if-not (:verified? job) chunk
+            (or (verified/readback group env job chunk)
+                (do (swap! (:state pool) update :rejected inc)
+                    (disconnect! pool (:peer job))
+                    nil))))
+        jobs chunks))
 
 (defn evaluate!
   "Return the joined field batch within the frame deadline, or nil for local evaluation.
@@ -189,7 +203,8 @@
           (doseq [{:keys [peer send! start count] job :id} jobs]
             (send-packet! pool peer send! {:op :run :id id :job job :uniforms values :start start :count count}))
           (let [chunks (collect jobs deadline)
-                batch (when (every? some? chunks) (unpack plan (:count group) jobs chunks))]
+                checked (when (every? some? chunks) (checked-slices pool group env jobs chunks))
+                batch (when (and checked (every? some? checked)) (unpack plan (:count group) jobs checked))]
             (if (and batch (< (System/nanoTime) deadline))
               (do (swap! (:state pool) update :completed inc) batch)
               (do (swap! (:state pool) update :missed inc) nil)))
