@@ -1,0 +1,6 @@
+Fresh process / entropy source deferred    PASS
+Four-row job / every row verified    PASS
+Four-row job / no random state allocated    PASS
+8,192-row job / distinct witnesses    PASS
+8,192-row job / all witnesses in bounds    PASS
+Large job / process entropy initialized    PASS
