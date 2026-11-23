@@ -49,7 +49,8 @@
       :batch (let [{:keys [target-ids count outputs blend]} batch n (clojure.core/count target-ids)]
                (when-not (and (= #{:kind :batch} (set (keys block)))
                               (only-keys? #{:target-ids :outputs :count :blend :opacity} batch) (valid-opacity? (:opacity batch))
-                              (vector? target-ids) (every? target-id? target-ids)
+                              (vector? target-ids)
+                              (reduce (fn [_ id] (if (target-id? id) true (reduced false))) true target-ids)
                               (or (nil? count) (= count n)) (map? outputs) (seq outputs)
                               (or (nil? blend) (blends blend))
                               (every? (fn [[attr {:keys [components type values] :as field}]]

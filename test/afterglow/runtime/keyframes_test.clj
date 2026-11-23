@@ -160,6 +160,19 @@
     (is (true? (get-in result [:keyframes "0:1" :forecast-failed?])))
     (is (= [0.0] (:result (kf/inspect (get-in result [:keyframes "0:1"]) :one :dimmer))))))
 
+(deftest predictive-target-id-validation-checks-the-entire-vector
+  (let [ids (conj (vec (repeat 64 :one)) "two")
+        blocks (fn [targets]
+                 [{:kind :batch :batch {:target-ids targets
+                                        :outputs {:dimmer {:type :number :components 1
+                                                           :values (double-array (count targets))}}}}])]
+    (doseq [targets [ids (subvec ids 1) []]]
+      (let [valid (blocks targets)]
+        (is (identical? valid (values/validate-blocks! valid false)))))
+    (doseq [id [nil false 7]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid predictive endpoint"
+                            (values/validate-blocks! (blocks (assoc ids 64 id)) false))))))
+
 (deftest snapshot-checks-the-native-range-before-committing
   (let [result (advance (show {:interval {:beats 1}}) nil (constantly (kf/predictable typed-step)) 0)
         window (get-in result [:keyframes "0:1"])

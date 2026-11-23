@@ -1081,10 +1081,11 @@
   (let [row-count (count target-ids)
         rows (loop [row 0, selected (transient [])]
                (if (< row row-count)
-                 (recur (inc row)
-                        (if (and (aget general (int (if target-indices (aget ^ints target-indices row) row)))
-                                 (or (nil? opacities) (pos? (aget ^doubles opacities row))))
-                          (conj! selected row) selected))
+                 (let [index (if target-indices (aget ^ints target-indices row) (int row))]
+                   (recur (inc row)
+                          (if (and (aget general index)
+                                   (or (nil? opacities) (pos? (aget ^doubles opacities row))))
+                            (conj! selected row) selected)))
                  (persistent! selected)))]
     (for [row rows, {:keys [attribute] :as column} columns]
       {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
