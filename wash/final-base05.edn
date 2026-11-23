@@ -1,0 +1,1 @@
+{:targets 1023, :fields [:color], :warmup 450, :frames 360, :java "21.0.13+9-1-deb13u2-Debian", :processors 4, :output-hash -1948145933, :statistics {:wall-ms {:mean 1.0981399277777786, :p50 1.00207, :p95 1.533209, :p99 2.955143}, :cpu-ms {:mean 1.0556038833333334, :p50 0.989203, :p95 1.32339, :p99 2.000538}, :allocated-bytes {:mean 49160.0, :p50 49160, :p95 49160, :p99 49160}}}

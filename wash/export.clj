@@ -1,0 +1,10 @@
+(require '[tolglow.compiler :as compiler] '[tolglow.perf.admission-cost :as admission])
+(let [{:keys [model fixtures]} (admission/workload 1024 128)
+      wash (get-in model [:registry :effects :wash])
+      targets (set (:targets wash))
+      positions (mapv :position (filter (comp targets :id) fixtures))
+      outputs (into {} (map (juxt :attribute :expression)) (:outputs (compiler/compile-plan wash)))]
+  (assert (= 1023 (count positions)))
+  (assert (= #{:color} (set (keys outputs))))
+  (spit (first *command-line-args*) (pr-str {:outputs outputs :positions positions})))
+(shutdown-agents)
