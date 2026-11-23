@@ -67,13 +67,8 @@
     (if (::emitters rig) rig
         (assoc rig ::emitters (delay (mapv beam/prepare-fixture (:directional rig)))))))
 
-(defn sample
-  "Sample the volume against a prepared patch and its last committed emitter
-  values. Overlapping position and optical matches use the largest weight.
-  :aims contains reachable world-space targets when :aimable was requested."
-  [volume fixtures {:keys [values] :as observations}]
+(defn- sample-volume [volume rig {:keys [values] :as observations} emissions]
   (let [sampling (prepare volume)
-        rig (prepare-rig fixtures)
         initial (position-weights sampling rig)
         optical (disj (:selection sampling) :position)]
     (if (empty? optical)
@@ -81,11 +76,32 @@
       (let [prepared (or (::optics observations) (::optics (prepare-observations observations)))
             opts (assoc prepared :selection optical)
             read-row (or values {})
+            receive (if emissions
+                      #(beam/observed-contribution % volume sampling opts)
+                      #(beam/contribution % (read-row (:id %)) volume sampling opts))
             aims (volatile! (transient {}))
-            add-beam (fn [weights {:keys [id] :as fixture}]
-                       (if-let [{:keys [weight aim]} (beam/contribution fixture (read-row id) volume sampling opts)]
-                         (do (when aim (vswap! aims assoc! id aim))
-                             (assoc! weights id (max weight (get weights id 0.0))))
+            add-beam (fn [weights source]
+                       (if-let [{:keys [weight aim]} (receive source)]
+                         (let [id (:id source)]
+                           (when aim (vswap! aims assoc! id aim))
+                           (assoc! weights id (max weight (get weights id 0.0))))
                          weights))]
-        {:weights (persistent! (reduce add-beam (transient initial) @(::emitters rig)))
+        {:weights (persistent! (reduce add-beam (transient initial) @(or emissions (::emitters rig))))
          :aims (persistent! @aims)}))))
+
+(defn sample
+  "Sample the volume against a prepared patch and its last committed emitter
+  values. Overlapping position and optical matches use the largest weight.
+  :aims contains reachable world-space targets when :aimable was requested."
+  [volume fixtures observations]
+  (sample-volume volume (prepare-rig fixtures) observations nil))
+
+(defn sampler
+  "Create a sampler for several volumes against one immutable frame. Optical
+  queries share the committed light level and pose for each head. Position-only
+  queries do not read emission data. Discard the sampler on a new frame or patch."
+  [fixtures {:keys [values] :as observations}]
+  (let [rig (prepare-rig fixtures)
+        read-row (or values {})
+        emissions (delay (mapv #(beam/observe % (read-row (:id %))) @(::emitters rig)))]
+    (fn [volume] (sample-volume volume rig observations emissions))))
