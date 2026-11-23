@@ -296,6 +296,103 @@
           (is (<= (red) 40) "Unsent bright frames cannot become the held output"))
         (finally (scheduler/close! owner))))))
 
+(deftest a-safety-boundary-crossed-during-the-wire-copy-is-rechecked-within-the-slot
+  (let [clock (atom 0) sent (atom []) preparations (atom []) checks (atom [])
+        owner (scheduler/create
+               {:now-ms #(deref clock)
+                :send! (fn [buffers _] (swap! sent conj [@clock (get-in (bytes-copy buffers) [0 0])]))
+                :prepare-output (fn [buffers {:keys [safety-state]}]
+                                  (let [^bytes data (get buffers 0)]
+                                    (swap! preparations conj [@clock (bit-and 255 (aget data 0))])
+                                    (when (and safety-state (>= @clock (:until-ms safety-state)))
+                                      (aset-byte data 0 (unchecked-byte 196))))
+                                  buffers)
+                :prepare-safety-output (fn [_ _] nil)
+                :output-valid-until-ms (fn [{:keys [safety-state]} at]
+                                         (swap! checks conj at)
+                                         (when (< at (:until-ms safety-state)) (:until-ms safety-state)))})
+        copy @#'scheduler/wire-snapshot]
+    (try
+      (scheduler/complete! owner (scheduler/begin-frame! owner 0 @patch {} false)
+                           (assoc (frame 180 0 0) :safety-state {:until-ms 26}))
+      (reset! clock 25)
+      (with-redefs [scheduler/wire-snapshot (fn [source buffers]
+                                            (let [snapshot (copy source buffers)]
+                                              (when (= @clock 25) (reset! clock 27))
+                                              snapshot))]
+        (let [sent (scheduler/publish! owner 25)]
+          (is (= 27 (:sent-at-ms sent)))
+          (is (not (:expired-before-send? sent)))))
+      (is (= [25 27] @checks))
+      (is (= [[25 180] [27 180]] @preparations) "Retry starts from detached original bytes")
+      (is (= [[27 196]] @sent))
+      (is (= 196 (get-in (bytes-copy (get-in @(:wire owner) [:last-sent :universes])) [0 0])))
+      (scheduler/complete! owner (scheduler/begin-frame! owner 0 @patch {} false) (frame 92 0 0))
+      (reset! clock 50)
+      (scheduler/publish! owner 50)
+      (is (= [25 27] @checks) "A source without safety state takes the ordinary path")
+      (is (= [[27 196] [50 92]] @sent))
+      (finally (scheduler/close! owner)))))
+
+(deftest a-safety-correction-rechecks-the-remaining-boundaries-before-handoff
+  (let [clock (atom 0) sent (atom []) corrected-at (atom [])
+        owner (scheduler/create
+               {:now-ms #(deref clock)
+                :send! (fn [buffers _] (swap! sent conj [@clock (subvec (get (bytes-copy buffers) 0) 0 2)]))
+                :prepare-output (fn [buffers {:keys [frame-id]}]
+                                  (when (= frame-id 2) (reset! clock 76))
+                                  buffers)
+                :prepare-safety-output (fn [buffers {:keys [safety-state]}]
+                                         (swap! corrected-at conj @clock)
+                                         (let [^bytes data (get buffers 0)]
+                                           (doseq [[index until] (map-indexed vector safety-state) :when (>= @clock until)]
+                                             (aset-byte data index (byte 0))))
+                                         buffers)
+                :output-valid-until-ms (fn [{:keys [safety-state]} at] (first (drop-while #(<= % at) safety-state)))})
+        copy @#'scheduler/wire-snapshot]
+    (try
+      (scheduler/complete! owner (scheduler/begin-frame! owner 0 @patch {} false)
+                           (assoc (frame 180 170 0) :safety-state [50 77]))
+      (reset! clock 25)
+      (scheduler/publish! owner 25)
+      (scheduler/complete! owner (scheduler/begin-frame! owner 0 @patch {} false) (frame 255 255 0))
+      (reset! clock 50)
+      (with-redefs [scheduler/wire-snapshot (fn [{:keys [frame-id] :as source} buffers]
+                                            (let [snapshot (copy source buffers)]
+                                              (when (and (= frame-id 1) (= @clock 76)) (reset! clock 78))
+                                              snapshot))]
+        (is (= {:expired-before-send? true :safety-output? true :sent-at-ms 78}
+               (select-keys (scheduler/publish! owner 50) [:expired-before-send? :safety-output? :sent-at-ms]))))
+      (is (= [76 78] @corrected-at))
+      (is (= [[25 [180 170]] [78 [0 0]]] @sent))
+      (finally (scheduler/close! owner)))))
+
+(deftest preparation-uses-the-context-owned-by-the-publication-gate
+  (let [clock (atom 0) contexts (atom [])
+        owner (scheduler/create
+               {:now-ms #(deref clock)
+                :send! (fn [_ _])
+                :prepare-output (fn [buffers {:keys [output-context]}]
+                                  (swap! contexts conj output-context)
+                                  (when (= :next-patch output-context) (reset! clock 76))
+                                  buffers)
+                :prepare-safety-output (fn [buffers {:keys [output-context stale-source?]}]
+                                         (swap! contexts conj [output-context stale-source?])
+                                         buffers)})
+        begin (fn [epoch context] (scheduler/begin-frame! owner epoch @patch {} false {:output-context context}))]
+    (try
+      (let [first-gate (begin 0 :first-patch)
+            continuing (begin 0 :not-installed)]
+        (is (= (:generation first-gate) (:generation continuing)))
+        (scheduler/complete! owner continuing (frame 180 0 0)))
+      (reset! clock 25)
+      (scheduler/publish! owner 25)
+      (scheduler/complete! owner (begin 1 :next-patch) (frame 255 0 0))
+      (reset! clock 50)
+      (is (:safety-output? (scheduler/publish! owner 50)))
+      (is (= [:first-patch :next-patch [:next-patch true]] @contexts))
+      (finally (scheduler/close! owner)))))
+
 (deftest a-buffered-sample-can-survive-packet-packing-in-an-earlier-slot
   (let [clock (atom 0) sent (atom []) owner (capture clock sent)
         pack presentation/materialize
