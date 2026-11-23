@@ -60,22 +60,32 @@
   [options]
   (assoc options ::optics (beam/prepare-options (assoc options :selection #{}))))
 
+(defn prepare-rig
+  "Build spatial indices now and prepare optical fixtures on first beam use."
+  [fixtures]
+  (let [rig (geometry/prepare-rig fixtures)]
+    (if (::emitters rig) rig
+        (assoc rig ::emitters (delay (mapv beam/prepare-fixture (:directional rig)))))))
+
 (defn sample
   "Sample the volume against a prepared patch and its last committed emitter
   values. Overlapping position and optical matches use the largest weight.
   :aims contains reachable world-space targets when :aimable was requested."
   [volume fixtures {:keys [values] :as observations}]
   (let [sampling (prepare volume)
-        rig (geometry/prepare-rig fixtures)
-        result {:weights (position-weights sampling rig) :aims {}}
+        rig (prepare-rig fixtures)
+        initial (position-weights sampling rig)
         optical (disj (:selection sampling) :position)]
-    (if (empty? optical) result
+    (if (empty? optical)
+      {:weights initial :aims {}}
       (let [prepared (or (::optics observations) (::optics (prepare-observations observations)))
             opts (assoc prepared :selection optical)
             read-row (or values {})
-            collect (fn [result {:keys [id] :as fixture}]
-                      (if-let [{:keys [weight aim]} (beam/contribution fixture (read-row id) volume sampling opts)]
-                        (cond-> (update-in result [:weights id] (fnil max 0.0) weight)
-                          aim (assoc-in [:aims id] aim))
-                        result))]
-        (reduce collect result (:directional rig))))))
+            aims (volatile! (transient {}))
+            add-beam (fn [weights {:keys [id] :as fixture}]
+                       (if-let [{:keys [weight aim]} (beam/contribution fixture (read-row id) volume sampling opts)]
+                         (do (when aim (vswap! aims assoc! id aim))
+                             (assoc! weights id (max weight (get weights id 0.0))))
+                         weights))]
+        {:weights (persistent! (reduce add-beam (transient initial) @(::emitters rig)))
+         :aims (persistent! @aims)}))))
