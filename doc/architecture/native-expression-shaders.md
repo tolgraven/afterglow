@@ -234,3 +234,21 @@ requests per lane, with 408 → 184 actual draws. Every ArtDMX byte, intent and
 model matched, as did the selected preview within 1e-9. Both lanes used CPU
 calibration for the moving heads so that solver precision stayed the same.
 The software driver and extended diagnostic deadlines limit timing conclusions.
+
+## A material covered by a later wash
+
+A beat-driven material might compute white for every pixel. Four independently
+weighted color cues can sit above it in priority order, followed by a wash
+that replaces white at full opacity on every one of those pixels. The renderer
+can skip the material's shader submission and readback for that frame.
+Bringing down the wash opacity or releasing it immediately reveals the
+still-running material at its current beat.
+
+This applies to fully overwritten white, dimmer, focus and zoom. Each intervening
+mask must be a single member that writes only color. The two requests must
+select identical ordered targets. A transform that reads a previous field, a
+partial overwrite or an unproven numeric range keeps the original evaluation.
+The renderer checks captured parameters each frame and caches the layout and
+expression analysis for the show. Effect middleware has already returned its
+state and intents when the renderer makes this decision. The four spatial cues
+still emit fixture contact events.

@@ -145,3 +145,61 @@
     (is (= (oracle [spatial paint]) (render [spatial paint])))
     (is (not= (get-in (render [spatial paint final]) [:values :right :focus])
               (get-in (render [spatial paint]) [:values :right :focus])))))
+
+(deftest skip-the-covered-kernel-only-when-the-mask-cannot-read-its-field
+  (let [old (assoc-in (block {:focus {:op :surface-uv :axis :u}} :replace 1 default-env)
+                      [:batch :field-request :group :surface-uvs] [[0.2 0.3] [0.7 0.4]])
+        paint (masked-color :wash)
+        later (block {:focus (parameter :level)} :replace 1 default-env)
+        lower #(chain/fuse (chain/create-cache) prepare %)
+        result (lower [old paint later])]
+    (is (= 2 (count result)))
+    (is (identical? paint (first result)))
+    (is (identical? later (peek result)))
+    (is (not-any? #{[:surface-uv]} (mapcat ir/input-paths (vals (shader [(peek result)])))))
+    (doseq [barrier [(assoc-in paint [:native-layer :targets] :previous)
+                     (assoc-in paint [:native-layer :inherit-backdrop?] true)
+                     (assoc-in paint [:native-layer :transforms] [{:attribute :color :value {:read :previous :attribute :focus}}])
+                     (assoc (block {:focus (lit 0.5)} :replace 1 default-env) :native-layer (:native-layer paint))
+                     (assoc-in paint [:batch :field-request :group :cpu-plan :outputs 0 :attribute] :focus)]]
+      (is (= [old barrier later] (lower [old barrier later]))))
+    (doseq [replacement [(assoc-in later [:batch :opacity] 0.5)
+                         (assoc-in later [:batch :target-ids] [:right :left])
+                         (block {:color (lit [1 0 0])} :replace 1 default-env)]]
+      (is (= [old paint replacement] (lower [old paint replacement]))))
+    (let [members [old paint later (assoc-in paint [:native-layer :member] 1)]]
+      (is (= members (lower members))))
+    (let [invalid (block {:focus (lit 2.0)} :replace 1 default-env)
+          stages [invalid paint later]]
+      (is (= stages (lower stages)))
+      (is (thrown? clojure.lang.ExceptionInfo (oracle (lower stages)))))))
+
+(deftest covered-material-revalidates-captured-inputs-even-on-a-cached-plan
+  (let [draw (partial chain/fuse (chain/create-cache) prepare)
+        old (block {:focus (parameter :amount)} :replace 1 {:params {:amount 0.25}})
+        paint (masked-color :group)
+        final (block {:focus (lit 0.5)} :replace 1 default-env)
+        stages [old paint final]]
+    (is (= [paint final] (draw stages)))
+    (doseq [env [{} {:params {:amount 1.1}} {:params {:amount [0.2]}}]
+            :let [changed (assoc-in stages [0 :batch :field-request :env] env)]]
+      (is (identical? changed (draw changed)))
+      (is (thrown? clojure.lang.ExceptionInfo (oracle (draw changed)))))
+    (let [changed (assoc-in stages [0 :batch :field-request :env :params :amount] 0.75)]
+      (is (= [paint final] (draw changed)))
+      (is (= (oracle changed) (oracle (draw changed)))))))
+
+(deftest coverage-keeps-invalid-or-observable-surface-charts-on-the-original-path
+  (let [old (block {:focus {:op :surface-uv :axis :u}} :replace 1 default-env)
+        paint (masked-color :group)
+        final (block {:focus (lit 0.5)} :replace 1 default-env)
+        stages [old paint final]
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        chart-path [0 :batch :field-request :group :surface-uvs]]
+    (doseq [chart [[[0.3 0.4]] [[0.3 Double/NaN] [0.2 0.5]] [[0.3] [0.2 0.5]]]
+            :let [invalid (assoc-in stages chart-path chart)]]
+      (is (identical? invalid (draw invalid)))
+      (is (thrown? clojure.lang.ExceptionInfo (oracle invalid))))
+    (let [different-charts (-> (assoc-in stages chart-path [[0.3 0.4] [0.2 0.5]])
+                               (assoc 2 (block {:focus {:op :surface-uv :axis :v}} :replace 1 default-env)))]
+      (is (identical? different-charts (draw different-charts))))))
