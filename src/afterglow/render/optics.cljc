@@ -72,6 +72,20 @@
                            (<= (abs (dot offset v)) (* 0.5 (second size)))))
               {:hit hit :distance-m distance})))))))
 
+(defn surface-raycaster
+  "Prepare two-sided venue receiver planes once. The returned function takes a
+  world origin and nonzero direction and gives the nearest positive hit distance
+  in metres, or nil for a clear ray. Finite rectangles retain their orientation."
+  [surfaces]
+  (let [receivers (mapv plane surfaces)]
+    (fn [origin direction]
+      (let [ray {:origin (xyz origin :origin) :direction (axis direction :direction)}]
+        (reduce (fn [nearest receiver]
+                  (if-let [hit (:distance-m (ray-hit ray receiver))]
+                    (if nearest (min nearest hit) hit)
+                    nearest))
+                nil receivers)))))
+
 (defn- extent [major minor a b direction]
   (Math/hypot (* a (dot major direction)) (* b (dot minor direction))))
 

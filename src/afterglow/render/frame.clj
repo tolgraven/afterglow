@@ -377,6 +377,15 @@
                    :aim-reachable? (and (:reachable? pan) (:reachable? tilt)))))))
     assigned))
 
+(defn aim-reachable?
+  "Can the calibrated physical renderer point this head's centre ray at a world
+  point in metres? Fixed fixtures and a target at the lens have no aim solution."
+  [fixture point]
+  (let [origin (:position fixture [0 0 0])]
+    (boolean (and (contains? (:channels fixture) :pan) (contains? (:channels fixture) :tilt)
+                  (vec3? point) (not (every? zero? (map - point origin)))
+                  (:aim-reachable? (resolve-geometry (assoc fixture :position origin) {:aim point} nil nil))))))
+
 (defn- apply-solved-geometry [fixture assigned previous solution source]
   (check-movement-history! fixture previous)
   (with-effect-source source
