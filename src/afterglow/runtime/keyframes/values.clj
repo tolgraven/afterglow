@@ -2,8 +2,7 @@
   "Interpolate uncomposited effect outputs. Arrays are read-only endpoints.
   Each interpolated numeric column has its own storage."
   (:require [afterglow.render.photometry :as photometry]
-            [afterglow.runtime :as runtime]
-            [afterglow.time :as time]))
+            [afterglow.runtime :as runtime]))
 
 (def emitters (into #{:dimmer :color} (keys photometry/emitter-spectrum)))
 (def geometry #{:aim :direction})
@@ -110,10 +109,30 @@
         (do (when (some seq (vals index)) (invalid! "Predictive effect added targets"))
             (persistent! result))))))
 
+(defn- same-columns? [left right]
+  (and (= (set (keys left)) (set (keys right)))
+       (every? (fn [[attribute a]]
+                 (let [b (right attribute)]
+                   (and (= (dissoc a :values) (dissoc b :values))
+                        (= (alength ^doubles (:values a)) (alength ^doubles (:values b)))))) left)))
+
+(defn- same-layout? [a b]
+  (and (= (:kind a) (:kind b))
+       (case (:kind a)
+         :assignments (let [left (:assignments a) right (:assignments b)]
+                        (and (= (count left) (count right))
+                             (every? true? (map #(= (dissoc %1 :value) (dissoc %2 :value)) left right))))
+         :batch (let [left (:batch a) right (:batch b)]
+                  (and (= (dissoc left :outputs) (dissoc right :outputs))
+                       (same-columns? (:outputs left) (:outputs right)))))))
+
 (defn endpoints [origin target]
-  (if (= (mapv :kind origin) (mapv :kind target)) [origin target]
+  (if (and (= (count origin) (count target)) (every? true? (map same-layout? origin target)))
+    [origin target]
     (let [start (rows origin)
           end (align start (rows target))]
+      (when-not (every? true? (map #(= (dissoc %1 :value) (dissoc %2 :value)) start end))
+        (invalid! "Predictive effect changed its assignment properties"))
       [[{:kind :assignments :assignments start}] [{:kind :assignments :assignments end}]])))
 
 (defn read-values [blocks target attribute]

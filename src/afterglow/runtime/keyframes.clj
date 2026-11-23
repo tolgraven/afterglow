@@ -1,6 +1,7 @@
 (ns afterglow.runtime.keyframes
   "Predict continuous native effect outputs on their private musical clock."
   (:require [afterglow.render.easing :as easing]
+            [afterglow.runtime.faults :as faults]
             [afterglow.runtime.keyframes.values :as values]
             [afterglow.time :as time]))
 
@@ -81,6 +82,38 @@
     (measure (:effect-id ctx) eligible? f)
     (f)))
 
+(defn- signature [instance frame options clock]
+  [(:effect-version instance) (dissoc (:params instance) (get-in options [:progress :param]))
+   (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
+   (:targets instance) (:started-at-beat instance) (:keyframe-generation frame)])
+
+(defn- fresh-window [window prior reuse? sample ctx now]
+  (let [{:keys [options origin-clock target-clock]} window
+        source (delay (sample ctx))
+        origin (cond
+                 (and reuse? prior (not (:forecast-failed? prior)))
+                 (:result (sample-window prior ctx options now))
+
+                 (and prior (= (:epoch prior) (:epoch window)) (identical? (:rig prior) (:rig window))
+                      (= (first (:inputs prior)) (first (:inputs window)))
+                      (<= (get-in prior [:origin-clock :time-ms]) (:time-ms origin-clock))
+                      (<= (get-in prior [:origin-clock :beat]) (:beat origin-clock)))
+                 (:result prior)
+
+                 :else @source)
+        forecast (try
+                   (values/endpoints origin (sample (future-context ctx target-clock)))
+                   (catch Throwable error
+                     (when-not (faults/recoverable? error) (throw error))
+                     ;; A possible future error is not a current effect fault.
+                     nil))]
+    (if-let [[origin target] forecast]
+      (let [window (assoc window :target target :origin origin)]
+        (if (and prior (not (realized? source)))
+          (assoc window :progress 0.0 :result origin)
+          (sample-window window ctx options now)))
+      (assoc window :forecast-failed? true :result @source))))
+
 (defn- run-window [step ctx options prior adaptive]
   (let [{:keys [frame instance]} ctx
         clock (time/frame-clock frame)
@@ -88,30 +121,22 @@
         _ (when-not (and (time/finite-number? value) (pos? value))
             (throw (ex-info "Invalid predictive cadence" {:interval value})))
         now (time/coordinate clock unit)
-        data (dissoc (:params instance) (get-in options [:progress :param]))
-        inputs [(:effect-version instance) data (:phase instance) (:bpm clock) (:meter clock) (:hdr? frame)
-                (:targets instance) (:started-at-beat instance) (:keyframe-generation frame)]
-        same-rig? (and (= (:epoch frame) (:epoch prior)) (identical? (:rig prior) (:fixtures frame)))
-        valid? (and prior same-rig? (= inputs (:inputs prior)) (= options (:options prior))
-                    (= [unit value] [(:unit prior) (:span prior)]) (<= (:start prior) now))
-        sample #(call ctx true (fn [] (values/blocks % (step %))))]
+        inputs (signature instance frame options clock)
+        sample #(call ctx true (fn [] (values/blocks % (step %))))
+        valid? (and prior (= (:epoch frame) (:epoch prior)) (identical? (:rig prior) (:fixtures frame))
+                    (= inputs (:inputs prior)) (= options (:options prior))
+                    (= unit (:unit prior)) (== value (:span prior)) (<= (:start prior) now))]
     (if (and valid? (< now (:end prior)))
-      (sample-window prior ctx options now)
+      (if (:forecast-failed? prior)
+        (assoc prior :result (sample ctx))
+        (sample-window prior ctx options now))
       (let [end (started prior unit now value valid?)
-            origin (if (and valid? (<= (:end prior) now))
-                     (:result (sample-window prior ctx options now))
-                     (if (and prior same-rig? (= (first inputs) (first (:inputs prior))))
-                       (:result prior) (sample ctx)))
-            target-clock (clock-at clock unit end)
-            [origin target] (values/endpoints origin (sample (future-context ctx target-clock)))
             window {:unit unit :span value :start now :end end :epoch (:epoch frame) :inputs inputs
-                    :options options :rig (:fixtures frame) :origin-clock clock :target-clock target-clock
-                    :origin origin :target target}]
-        ;; The new segment starts at the displayed value even when an external
-        ;; progress signal carries a nonzero value across this boundary.
-        (if (and prior same-rig?)
-          (assoc window :progress 0.0 :result origin)
-          (sample-window window ctx options now))))))
+                    :options options :rig (:fixtures frame) :origin-clock clock :target-clock (clock-at clock unit end)}]
+        (when (and options (not= options (:options prior))) (validate! options))
+        ;; At the end of a failed forecast evaluate the *real* frame before
+        ;; attempting another prediction. This runs the normal fault boundary.
+        (fresh-window window (when-not (:forecast-failed? prior) prior) valid? sample ctx now)))))
 
 (defn evaluate
   "Run either a real step or a lightweight interpolation; all cached results
@@ -134,7 +159,7 @@
   Each endpoint is a vector of writes in the effect's native assignment order."
   [window target attribute]
   (when window
-    (cond-> (select-keys window [:unit :start :end :span :origin-clock :target-clock :progress])
+    (cond-> (select-keys window [:unit :start :end :span :origin-clock :target-clock :progress :forecast-failed?])
       (and target attribute)
       (merge (update-vals (select-keys window [:origin :target :result])
                           #(values/read-values % target attribute))))))

@@ -117,3 +117,19 @@
     (is (= 4250.0 (get-in slower [:keyframes "0:1" :target-clock :time-ms])))
     (is (= 0.0 (get-in slower [:assignments 0 :value])))
     (is (empty? (:keyframes (advance (assoc (:model first) :instances {}) first compile 1))))))
+
+(deftest speculative-errors-only-quarantine-on-the-real-failing-frame
+  (let [compile (constantly (kf/predictable
+                             (fn [{:keys [frame] :as ctx}]
+                               (when (>= (:beat frame) 1) (throw (ex-info "Bad at beat one" {})))
+                               (assoc ctx :assignments [{:target-id :lamp :attribute :dimmer :value (:beat frame)}]))))
+        model (show {:interval {:beats 1}})
+        first (advance model nil compile 0)
+        half (advance (:model first) first compile 1/2)
+        failed (advance (:model half) half compile 1)]
+    (is (true? (get-in first [:keyframes "0:1" :forecast-failed?])))
+    (is (nil? (storage/freeze (get-in first [:keyframes "0:1"]))))
+    (is (== 0.5 (get-in half [:assignments 0 :value])))
+    (is (empty? (get-in half [:model :variables :runtime :events])))
+    (is (some #(= "Bad at beat one" (:message %)) (get-in failed [:model :variables :runtime :events])))
+    (is (empty? (:assignments failed)))))

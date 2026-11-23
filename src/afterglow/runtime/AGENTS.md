@@ -43,3 +43,10 @@ Use `afterglow.runtime.reuse` for declared pure calculations. Fold only captured
 inputs and immutable bindings into their results. Preserve per-frame intent
 delivery and distinct caller-owned output arrays. See
 [the declaration and cache contract](../../../doc/architecture/pure-effect-reuse.md).
+
+Only certify stateless, continuous-output samplers for [predictive effect
+keyframes](../../../doc/architecture/effect-keyframes.md). Test future clock reads
+and resulting native state through `engine/advance`, including parallel workers,
+faults on a forecast and recovery on the real timeline. Keep read-only endpoint
+arrays under frame ownership. Persistence goes through
+`afterglow.runtime.keyframes.storage`.
