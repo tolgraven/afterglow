@@ -181,6 +181,20 @@
     (is (near? (/ 169.5 255) (get-in calibrated [:values :moving :pan])))
     (is (= [169 128] (bytes-at calibrated 1 1 2)))))
 
+(deftest calibrated-pan-prefers-reachability-and-preserves-wrap-ties
+  (doseq [[calibration direction previous expected reachable?]
+          [[{:min-deg -360 :max-deg 360} [0 0 -1] 0.5 0.75 true]
+           [[127.5 -63.75] [0 0 -1] 0.5 0.25 true]
+           [{:min-deg 0 :max-deg 270} [-1 0 0] 0.0 1.0 true]
+           [{:min-deg -90 :max-deg 90} [0 0 -1] 0.5 1 false]
+           [{:min-deg -90 :max-deg 90} [0 0 -1] 0.0 0 false]]]
+    (let [fixture (assoc-in moving [:calibration :pan] calibration)
+          result (frame/resolve-frame [fixture] [(assignment :moving :direction direction)]
+                                      {:previous-values {:moving {:pan previous}}})
+          head (get-in result [:values :moving])]
+      (is (= expected (:pan head)) [calibration direction previous])
+      (is (= reachable? (:aim-reachable? head))))))
+
 (deftest pan-continuity-and-unreachable-aim
   (let [wide (assoc moving :calibration {:pan {:min-deg -360 :max-deg 360}
                                         :tilt {:min-deg -30 :max-deg 30}})
