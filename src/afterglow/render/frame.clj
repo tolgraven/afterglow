@@ -889,6 +889,11 @@
             (aset indices row (int (if (< row prefix) row (fixture-index by-id (nth ids row))))))
           indices)))))
 
+(defn batch-field-type
+  "The native field type required for one fixture assignment column."
+  [attribute]
+  (if (or (= :color attribute) (geometric-attributes attribute)) :vec3 :number))
+
 (defn- validate-batches [patch batches & [layer?]]
   (when-not (vector? batches) (fail! "Batches must be an ordered vector" {}))
   (mapv
@@ -899,9 +904,9 @@
      (let [target-indices (batch-target-indices patch target-ids)
            columns (mapv
                     (fn [[attribute {:keys [type components values]}]]
-                      (let [vector? (or (= :color attribute) (geometric-attributes attribute))
-                            expected-width (if vector? 3 1)
-                            expected-type (if vector? :vec3 :number)]
+                      (let [expected-type (batch-field-type attribute)
+                            vector? (= :vec3 expected-type)
+                            expected-width (if vector? 3 1)]
                         (when-not (and (keyword? attribute) (= components expected-width) (= type expected-type)
                                        (instance? doubles-class values)
                                        (= (alength ^doubles values) (* expected-width (clojure.core/count target-ids))))
