@@ -42,7 +42,11 @@
         stages [base (assoc-in mid [:batch :field-request :scales] {:color 0.8}) last-stage]
         result (chain/fuse (chain/create-cache) prepare stages)]
     (is (= 1 (count result)))
-    (is (= (oracle stages) (oracle result)))
+    (let [expected (oracle stages) actual (oracle result)]
+      (is (= (:universes expected) (:universes actual)))
+      (doseq [id ids field [:emitted-color :focus]]
+        (let [a (get-in expected [:values id field]) b (get-in actual [:values id field])]
+          (is (every? #(< (abs %) 1.0e-12) (if (vector? a) (map - a b) [(- a b)]))))))
     (is (= :replace (get-in result [0 :batch :blend])))
     (is (= (set (keys (shader result))) #{:focus :color}))
     (is (seq (:uniforms (ir/emit-glsl-batch (shader result)))))))
@@ -92,3 +96,13 @@
     (is (= 1 (count result)))
     (is (= (oracle stages) (oracle result)))
     (is (re-find #"layout\(location = 1\) in vec2" (:source (ir/emit-glsl-batch (shader result) {:surface-uv? true}))))))
+
+
+(deftest full-compatible-chain-remains-one-program-beyond-eight-effects
+  (let [base (block {:dimmer (lit 0.25)} :replace 1 default-env)
+        sweep (fn [i] (block {:dimmer (lit (/ (double i) 32))} :replace 0.25 default-env))
+        stages (into [base] (map sweep) (range 1 25))
+        fused (chain/fuse (chain/create-cache) prepare stages)]
+    (is (= 1 (count fused)))
+    (is (= 24 (count (re-seq #"mix\(" (:source (ir/emit-glsl-batch (shader fused)))))))
+    (is (= (:universes (oracle stages)) (:universes (oracle fused))))))

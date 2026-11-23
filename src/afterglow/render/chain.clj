@@ -8,7 +8,6 @@
   "Bounded, per-show cache of compiled chain shapes. Values and clocks are frame-local."
   [] (atom {}))
 
-(def ^:private max-members 8)
 (def ^:private eligible-attributes #{:color :dimmer :focus :zoom :pan :tilt :aim :direction :red :green :blue :white})
 (def ^:private spatial-ops #{:position :surface-uv})
 (def ^:private capture-ops #{:param :time :beat :bar :phrase})
@@ -75,8 +74,11 @@
   (if (and (= blend :replace) (nil? alpha))
     incoming
     (when previous
-      (let [value (case blend :replace incoming :add (op :add previous incoming) :max (op :max previous incoming))]
-        (if alpha (op :add previous (op :multiply (param alpha) (op :subtract value previous))) value)))))
+      (case blend
+        :replace (op :mix previous incoming (param alpha))
+        :add (op :add previous (if alpha (op :multiply incoming (param alpha)) incoming))
+        :max (let [highest (op :max previous incoming)]
+               (if alpha (op :mix previous highest (param alpha)) highest))))))
 
 (defn- fold-stage [previous {:keys [fields blend alpha]}]
   (reduce-kv (fn [acc attr field]
@@ -204,6 +206,18 @@
       ;; requests so the show can attribute any failure to the right running effect.
       (catch RuntimeException _ nil))))
 
+(defn- append-runs
+  "Try the entire aligned interval first. Split only at semantic, range or IR
+  complexity limits. A failed trial never generates an exponential-size shader:
+  compile-batch caps each output at 4,096 nodes and 64 nested operations."
+  [cache prepare-group out blocks]
+  (if (= 1 (count blocks)) (conj! out (first blocks))
+    (if-let [fused (fuse-run cache prepare-group blocks)]
+      (conj! out fused)
+      (let [i (quot (count blocks) 2)
+            left (append-runs cache prepare-group out (subvec blocks 0 i))]
+        (append-runs cache prepare-group left (subvec blocks i))))))
+
 (defn fuse
   "Replace adjacent compatible requests over identical ordered target IDs with
   one prepared field request. Native layers, annotation-bearing blocks and
@@ -219,10 +233,13 @@
             (recur (inc start) consumed result)
             (let [ids (get-in block [:batch :target-ids])
                   end (loop [i (inc start)]
-                        (if (and (< i (count ordered)) (< (- i start) max-members)
-                                 (candidate? (nth ordered i)) (= ids (get-in ordered [i :batch :target-ids])))
-                          (recur (inc i)) i))
-                  run (subvec ordered start end)]
-              (if-let [fused (fuse-run cache prepare-group run)]
-                (recur end end (conj (into (or result []) (subvec ordered consumed start)) fused))
-                (recur (inc start) consumed result)))))))))
+                        (if (and (< i (count ordered)) (candidate? (nth ordered i))
+                                 (= ids (get-in ordered [i :batch :target-ids])))
+                          (recur (inc i)) i))]
+              (if (= (inc start) end)
+                (recur end consumed result)
+                (let [run (subvec ordered start end)
+                      lowered (persistent! (append-runs cache prepare-group (transient []) run))]
+                  (if (= (count run) (count lowered))
+                    (recur end consumed result)
+                    (recur end end (into (into (or result []) (subvec ordered consumed start)) lowered))))))))))))

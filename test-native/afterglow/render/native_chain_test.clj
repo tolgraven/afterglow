@@ -16,7 +16,9 @@
                                         :field-request {:group group :env {:params {:tint rgb}}}}}))
         base (layer [0.125 0.25 0.5] :replace 1)
         highest (layer [0.25 0.5 0.75] :max 0.5)
-        fused (chain/fuse cache compute/prepare-group [base highest])]
+        ;; Sixteen preceding full replacements are dead once the base arrives.
+        stages (into (vec (repeat 16 (layer [0.1 0.2 0.3] :replace 1))) [base highest])
+        fused (chain/fuse cache compute/prepare-group stages)]
     (is (= 1 (count fused)))
     (with-open [owner (session/open!)]
       (let [result ((fields/frame-evaluator (fn [group env] (session/evaluate! owner (:shader group) env))) fused)
