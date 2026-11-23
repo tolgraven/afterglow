@@ -1,9 +1,12 @@
 # Numeric lighting expressions on a JVM GPU context
 
 Afterglow can evaluate a map of lighting fields for a rig in one native draw.
-Each input point is a fixture or pixel position. A vertex invocation runs the
-expressions and writes one interleaved row of scalar/vector results. The host
-waits on that draw, reads the rows back and returns one owned array per field.
+A group that reads a position or a surface UV runs one vertex per fixture or
+pixel. When every expression reads only constants, clocks or parameters, every
+head receives the same result. Afterglow draws one vertex, reads one interleaved
+row and copies its components into the returned field arrays. An empty group
+produces empty arrays. Each evaluation owns its returned arrays, and clock and
+parameter changes are sampled on every submission.
 
 ```clojure
 (require '[afterglow.render.gpu.expressions :as shader]
@@ -193,3 +196,23 @@ still reads back fields for CPU blending and packing. Compare complete
 publication times, readback stalls and DMX bytes on the intended GPU when
 selecting that backend. These measurements used the float64 CPU renderer and
 a capture sink. [Moving-head shader calibration and precision](moving-head-shaders.md)
+
+## Readback for uniform groups
+
+On Mesa 25.0.7 llvmpipe, a 20,000-head group with changing RGB and focus
+parameters read 16 bytes per draw with broadcast, down from 320,000.
+The middle of 48 measured evaluations after 24 warmups fell from 7.99 to
+5.45 ms. Adding a fixture UV input kept all 20,000 vertices and 400,000 bytes
+in both paths. All returned double arrays matched the full-vertex reference
+exactly in both comparisons.
+
+A second replay ran the complete host with 20,000 mixed-UV pixels, 64 moving
+heads, eight overlapping washes and four optical fields. One instrumented
+frame drew 40,078 vertices and read 400,468 bytes, down from 300,960 vertices
+and 4,013,824 bytes. Each lane issued 16 draws. All 158 universes, projected
+fixtures, intents and model states matched across 18 warmups and 24 measured
+frame pairs. Median elapsed time fell from 499 to 456 ms and p95 from 1,199
+to 755 ms. Median coordinator and show-worker CPU rose from 202 to 216 ms.
+The diagnostic allowed 2 seconds for native compute so that both lanes reached
+the driver. Neither met the 25 ms output target. Physical GPU performance and
+the impact of other hosts sharing CPU time remain unmeasured.
