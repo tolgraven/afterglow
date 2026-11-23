@@ -99,7 +99,8 @@
     (cond-> {:id id :state (:state result) :assignments (:assignments result)
              :contributions (:contributions (append-contributions result []))
              :intents (:intents result) :done? (:done? result)}
-      (::observe (meta result)) (vary-meta assoc ::observe (::observe (meta result))))))
+      (::observe (meta result)) (vary-meta assoc ::observe (::observe (meta result)))
+      (:afterglow.runtime.keyframes/window result) (assoc :keyframe (:afterglow.runtime.keyframes/window result)))))
 
 (defn observable-instance
   "Keep a completed step's optional, pure query function outside portable show data."
