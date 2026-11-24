@@ -280,11 +280,32 @@
     ;; requests so the show can attribute any failure to the right running effect.
     (catch RuntimeException _ nil)))
 
-(defn- mixed-partial-blends? [blocks]
-  (let [modes (into #{} (keep (fn [{:keys [batch]}]
-                               (when-not (== 1 (:opacity batch 1))
-                                 (:blend batch :replace)))) blocks)]
-    (and (contains? modes :max) (some modes [:add :replace]))))
+(defn- partial-blend [{:keys [batch]}]
+  (when-not (== 1 (:opacity batch 1))
+    (:blend batch :replace)))
+
+(defn- partial-maximum? [block]
+  (= :max (partial-blend block)))
+
+(defn- disjoint-write? [targets {:keys [kind batch assignments native-layer]}]
+  (and (nil? native-layer)
+       (case kind
+         :batch (let [ids (:target-ids batch)]
+                  (and (vector? ids) (not-any? #(contains? targets %) ids)))
+         :assignments (and (vector? assignments)
+                           (every? #(and (map? %) (contains? % :target-id)
+                                         (not (contains? targets (:target-id %))))
+                                   assignments))
+         false)))
+
+(defn- safe-maximum-run? [ids run following]
+  ;; A partial add or replacement can already change the rounded result on
+  ;; the CPU. A later write can also observe a backdrop rounded by the GPU.
+  (or (not-any? partial-maximum? run)
+      (and (not-any? #{:add :replace} (map partial-blend run))
+           (or (empty? following)
+               (let [targets (set ids)]
+                 (every? #(disjoint-write? targets %) following))))))
 
 (defn- append-runs
   "Try the entire aligned interval first. Split only at semantic, range or IR
@@ -294,7 +315,8 @@
   (if (= 1 (count blocks)) (conj! out (first blocks))
     (if-let [fused (fuse-run cache prepare-group blocks false)]
       (conj! out fused)
-      (if (mixed-partial-blends? blocks)
+      (if (and (some partial-maximum? blocks)
+               (some #(= :add (get-in % [:batch :blend])) blocks))
         ;; A fused prefix could round its backdrop differently and hide
         ;; an invalid stage when the remaining requests run on the frame.
         (reduce conj! out blocks)
@@ -323,8 +345,9 @@
               (if (= (inc start) end)
                 (recur end consumed result)
                 (let [run (subvec ordered start end)
-                      lowered (persistent! (append-runs cache prepare-group (transient []) run))]
-                  (if (= (count run) (count lowered))
+                      lowered (when (safe-maximum-run? ids run (subvec ordered end))
+                                (persistent! (append-runs cache prepare-group (transient []) run)))]
+                  (if (or (nil? lowered) (= (count run) (count lowered)))
                     (recur end consumed result)
                     (recur end end (into (into (or result []) (subvec ordered consumed start)) lowered))))))))))))
 
