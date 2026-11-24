@@ -297,8 +297,11 @@
         original (configured)
         show (reduce (fn [show id] (apply! show {:op :page/put :page {:id id :cells {[0 0] :red}}}))
                      original [string-id keyword-id])]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generated recent page ID"
-                          (model/new-show {:pages {pages/recent-page-id {:id pages/recent-page-id}}})))
+    (doseq [[page-id embedded-id] [[pages/recent-page-id :main] [:main pages/recent-page-id]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generated recent page ID"
+                            (model/new-show {:pages {page-id {:id embedded-id}}}))))
+    (let [authored (sorted-map :main {:id :main :cells {}})]
+      (is (= authored (:pages (model/new-show {:pages authored})))))
     (is (= [keyword-id string-id pages/recent-page-id] (pages/page-ids show)))
     (doseq [[operation expected-error]
             [[{:op :page/put :page {:id pages/recent-page-id}} :invalid-page]
