@@ -300,8 +300,13 @@
     (doseq [[page-id embedded-id] [[pages/recent-page-id :main] [:main pages/recent-page-id]]]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generated recent page ID"
                             (model/new-show {:pages {page-id {:id embedded-id}}}))))
-    (let [authored (sorted-map :main {:id :main :cells {}})]
-      (is (= authored (:pages (model/new-show {:pages authored})))))
+    (let [authored (sorted-map :main {:id :main :cells {}})
+          sorted-show (model/new-show {:pages authored})
+          result (model/apply-command sorted-show
+                                     (command sorted-show {:op :page/delete :page-id pages/recent-page-id}))]
+      (is (= authored (:pages sorted-show)))
+      (is (= :unknown-page (get-in result [:ack :code])))
+      (is (identical? sorted-show (:model result))))
     (is (= [keyword-id string-id pages/recent-page-id] (pages/page-ids show)))
     (doseq [[operation expected-error]
             [[{:op :page/put :page {:id pages/recent-page-id}} :invalid-page]

@@ -355,9 +355,11 @@
       {:model (assoc-in model [:pages (:id page)] (assoc page :cells (get page :cells {})))
        :events [{:type :page/changed :page-id (:id page)}]})
     :page/delete
-    (do (require! (get-in model [:pages (:page-id command)]) :unknown-page "Page does not exist")
-        {:model (update model :pages dissoc (:page-id command))
-         :events [{:type :page/deleted :page-id (:page-id command)}]})
+    (let [id (:page-id command)]
+      (require! (and (not= id pages/recent-page-id) (get-in model [:pages id]))
+                :unknown-page "Page does not exist")
+      {:model (update model :pages dissoc id)
+       :events [{:type :page/deleted :page-id id}]})
     :show/restart
     (let [time (time! model command)]
       {:model (-> model (update :epoch inc) (assoc :instances {} :time-ms time)
