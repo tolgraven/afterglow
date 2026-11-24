@@ -3,6 +3,7 @@
             [afterglow.render.fields :as fields]
             [afterglow.render.frame :as frame]
             [afterglow.render.ir :as ir]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]))
 
 (defn- lit [n] {:op :const :value n})
@@ -15,6 +16,13 @@
                                    :channels {:focus 1 :red 2 :green 3 :blue 4}})
                     ids (range) positions))
 
+(defn- focus-zoom-patch
+  ([] (focus-zoom-patch ids))
+  ([fixture-ids]
+   (frame/compile-patch (mapv (fn [id index] {:id id :address (inc (* 2 index)) :universe 1
+                                             :channels {:focus 1 :zoom 2}})
+                             fixture-ids (range)))))
+
 (defn- prepare [outputs positions plan uvs]
   {:expressions outputs :positions positions :surface-uvs uvs :cpu-plan plan})
 
@@ -23,11 +31,13 @@
    :batch {:target-ids ids :blend blend :opacity opacity
            :field-request {:group (prepare outputs positions (ir/compile-batch outputs) nil) :env env}}})
 
-(defn- oracle [blocks]
-  (let [fields ((fields/frame-evaluator
-                 (fn [{:keys [cpu-plan positions surface-uvs]} env]
-                   (ir/evaluate-batch cpu-plan env positions surface-uvs))) blocks)]
-    (frame/portable-frame (frame/resolve-contributions (frame/compile-patch fixtures) fields))))
+(defn- oracle
+  ([blocks] (oracle (frame/compile-patch fixtures) blocks))
+  ([patch blocks]
+   (let [fields ((fields/frame-evaluator
+                  (fn [{:keys [cpu-plan positions surface-uvs]} env]
+                    (ir/evaluate-batch cpu-plan env positions surface-uvs))) blocks)]
+     (frame/portable-frame (frame/resolve-contributions patch fields)))))
 
 (defn- shader [blocks] (get-in (first blocks) [:batch :field-request :group :expressions]))
 
@@ -35,7 +45,7 @@
   (let [source {:op :position :axis :x}
         clock {:op :clamp :args [{:op :divide :args [{:op :beat} (lit 8)]} (lit 0) (lit 1)]}
         base (block {:focus (lit 0.1) :color (lit [0.2 0.45 0.55])} :replace 1 default-env)
-        mid (block {:focus (parameter :level) :color (lit [0.1 0.35 0.3])} :add 0.5 default-env)
+        mid (block {:focus (parameter :level) :color (lit [0.1 0.35 0.3])} :add 1 default-env)
         ;; Both clocks resolve from the supplying instance at this frame.
         last-stage (block {:focus clock :color {:op :vec3 :args [source (parameter :level) clock]}}
                           :max 0.2 (assoc default-env :elapsed-beats 6.0 :params {:level 0.65}))
@@ -107,6 +117,230 @@
     (is (= 24 (count (re-seq #"mix\(" (:source (ir/emit-glsl-batch (shader fused)))))))
     (is (= (:universes (oracle stages)) (:universes (oracle fused))))))
 
+(deftest many-live-partial-maxima-form-one-linear-shader
+  (let [base (block {:focus (lit 0.0625) :color (lit [0.0625 0.125 0.25])} :replace 1 default-env)
+        stage (fn [i]
+                (let [key (keyword (str "level-" i)), level (parameter key)]
+                  (assoc (block {:focus level :color {:op :vec3 :args [level (lit 0.5) {:op :position :axis :x}]}}
+                                :max 0.5 {:params {key (/ (double (+ i 2)) 32.0)}})
+                         :source {:instance-id i})))
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        group #(get-in % [0 :batch :field-request :group])]
+    (doseq [n [10 18 24]]
+      (let [stages (into [base] (map stage) (range n))
+            fused (draw stages)
+            {:keys [source inputs stride uniforms]} (ir/emit-glsl-batch (shader fused))
+            body (last (str/split source #"void main\(\)"))
+            expected (oracle stages)
+            revised (assoc-in stages [n :batch :field-request :env :params (keyword (str "level-" (dec n)))] 0.9375)
+            revised-fused (draw revised)
+            revised-output (:universes (oracle revised-fused))
+            reordered (into [base] (rseq (subvec stages 1)))
+            reordered-output (:universes (oracle (draw reordered)))]
+        (is (= 1 (count fused)))
+        (is (= (* 2 n) (count (re-seq #"afterglow_max_blend\(" body))))
+        (is (= (* 2 n) (count uniforms)))
+        (is (= {:position "v_position"} inputs))
+        (is (= 4 stride))
+        (is (= (:universes expected) (:universes (oracle fused))))
+        (is (identical? (group fused) (group revised-fused)))
+        (is (= (:universes (oracle revised)) revised-output))
+        (is (not= (:universes expected) revised-output))
+        (is (= (:universes (oracle reordered)) reordered-output))
+        (is (not= (:universes expected) reordered-output))))
+    (let [stages (into [base] (map stage) (range 24))
+          _ (draw stages)
+          broken (assoc-in stages [1 :batch :field-request :env :params :level-0] 1.25)
+          bad-stage (nth broken 1)
+          result (draw broken)]
+      (is (some #(identical? bad-stage %) result))
+      (try
+        (oracle result)
+        (is false "An invalid intermediate range must remain visible after a cached fusion")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= (:source bad-stage) (:effect-source (ex-data e)))))))))
+
+(deftest opaque-maxima-add-and-replace-keep-the-uniform-layout
+  (let [stages [(block {:focus (lit 0.125)} :replace 1 default-env)
+                (block {:focus (lit 0.25)} :max 1 default-env)
+                (block {:focus (lit 0.25)} :add 0.5 default-env)
+                (block {:focus (lit 0.125)} :replace 0.5 default-env)]
+        fused (chain/fuse (chain/create-cache) prepare stages)
+        {:keys [source inputs stride]} (ir/emit-glsl-batch (shader fused))]
+    (is (= 1 (count fused)))
+    (is (= (:universes (oracle stages)) (:universes (oracle fused))))
+    (is (empty? inputs))
+    (is (= 1 stride))
+    (is (str/includes? source "mix("))
+    (is (str/includes? source "max("))
+    (is (not (str/includes? source "afterglow_max_blend")))))
+
+(deftest no-op-partial-maxima-preserve-the-unfused-dmx-rounding-boundary
+  (let [base (block {:focus (lit 0.1)} :replace 1 default-env)
+        no-op (block {:focus (lit 0.05)} :max 0.5 default-env)
+        last-stage (assoc-in no-op [:batch :opacity] 0.3)
+        stages (into [base] (concat (repeat 9 no-op) [last-stage]))
+        fused (chain/fuse (chain/create-cache) prepare stages)
+        expected (oracle stages)
+        actual (oracle fused)]
+    (is (= 1 (count fused)))
+    (is (= 26 (get-in expected [:universes 1 0])))
+    (is (= expected actual))))
+
+(deftest following-add-validates-the-composited-range
+  (let [base (block {:focus (lit 0.5)} :replace 1 default-env)
+        partial-max (block {:focus (lit 0.75)} :max 0.5 default-env)
+        valid-add (block {:focus (lit 0.375)} :add 1 default-env)
+        invalid-add (assoc (block {:focus (lit 0.5)} :add 1 default-env) :source {:instance-id :invalid-add})
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        valid [base partial-max valid-add]
+        invalid [base partial-max invalid-add]]
+    (is (= 1 (count (draw valid))))
+    (is (= (oracle valid) (oracle (draw valid))))
+    (try
+      (oracle (draw invalid))
+      (is false "The add exceeds the normalized range")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= (:source invalid-add) (:effect-source (ex-data e))))))))
+
+(deftest interior-rounded-maximum-cannot-hide-an-invalid-add
+  (let [ulp (Math/scalb 1.0 (int -53))
+        middle (* 0.5 ulp)
+        positions [[0.0 0.0 0.0] [middle 0.0 0.0] [(Math/nextUp (double middle)) 0.0 0.0]]
+        ids [:low :middle :high]
+        block (fn [source outputs blend opacity]
+                {:kind :batch :source source
+                 :batch {:target-ids ids :blend blend :opacity opacity
+                         :field-request {:group (prepare outputs positions (ir/compile-batch outputs) nil)
+                                         :env default-env}}})
+        base (block :base {:focus {:op :position :axis :x} :zoom (lit 0.0)} :replace 1)
+        maxima (mapv (fn [i] (block i {:focus (lit 0.0) :zoom (lit (/ (double i) 16))} :max 0.5))
+                     (range 1 10))
+        round-up (block :round-up {:focus (lit 1.0) :zoom (lit 0.625)} :max (- 1.0 ulp))
+        invalid-add (block :invalid-add {:focus (lit (* 1.5 ulp))} :add 1)
+        cover (block :cover {:focus (lit 0.25)} :replace 1)
+        stages (into (into [base] maxima) [round-up invalid-add cover])
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        patch (frame/compile-patch (mapv (fn [id index] {:id id :address (inc (* 2 index)) :universe 1
+                                                        :channels {:focus 1 :zoom 2}})
+                                         ids (range)))
+        render #(frame/resolve-contributions patch
+                    ((fields/frame-evaluator
+                      (fn [{:keys [cpu-plan positions surface-uvs]} env]
+                        (ir/evaluate-batch cpu-plan env positions surface-uvs))) %))
+        fused (draw stages)]
+    ;; Zoom keeps the long chain live even though the final block covers focus.
+    (is (= 1 (count (draw (pop (pop stages))))))
+    (is (some #(identical? invalid-add %) fused))
+    (doseq [contributions [stages fused]]
+      (try
+        (render contributions)
+        (is false "The middle fixture's prior rounds to one before the additive overflow")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :invalid-add (:effect-source (ex-data e)))))))))
+
+(deftest failed-mixed-blend-proof-retains-the-original-backdrop
+  (let [u (Math/scalb 1.0 (int -53))
+        patch (focus-zoom-patch)
+        base (block {:focus (lit 1.0) :zoom (lit 0.0)} :replace 1 default-env)
+        maxima (mapv (fn [i] (block {:focus (lit 0.0) :zoom (lit (/ (double i) 16))} :max 0.5 default-env))
+                     (range 1 11))
+        partial-replace (block {:focus (lit (- 1.0 (* 3 u)))} :replace 0.4375 default-env)
+        raw-add (assoc (block {:focus (lit (Math/ulp 1.0))} :add 0.625 default-env) :source :raw-add)
+        full-add (assoc (block {:focus (lit (* 2.125 u))} :add 1 default-env) :source :after-replace)
+        cover (block {:focus (lit 0.25)} :replace 1 default-env)
+        draw (partial chain/fuse (chain/create-cache) prepare)]
+    ;; Keeping zoom live makes both runs exceed the old IR tree limit.
+    (doseq [[prefix invalid] [[[base] raw-add] [[base partial-replace] full-add]]]
+      (let [stages (into (into prefix maxima) [invalid cover])
+            fused (draw stages)]
+        (is (identical? stages fused) (str (:source invalid)))
+        (doseq [contributions [stages fused]]
+          (try
+            (oracle patch contributions)
+            (is false "The opaque cover must leave the earlier focus fault observable")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= (:source invalid) (:effect-source (ex-data e)))))))))))
+
+(deftest failed-maximum-and-full-add-retain-the-float64-backdrop
+  (let [patch (focus-zoom-patch)
+        incoming 0.800000011920929
+        add 0.3500000238418579
+        base (block {:focus (lit 0.5) :zoom (lit 0.0)} :replace 1 default-env)
+        maxima (mapv (fn [i]
+                       (block {:focus (lit (if (= i 10) incoming 0.0)) :zoom (lit (/ (double i) 16))}
+                              :max 0.5 default-env))
+                     (range 1 11))
+        prefix (into [base] maxima)
+        invalid (assoc (block {:focus (lit add)} :add 1 default-env) :source :full-add)
+        cover (block {:focus (lit 0.25)} :replace 1 default-env)
+        tail (into [invalid] (repeat 10 cover))
+        stages (into prefix tail)
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        fused (draw stages)
+        raw-focus (+ 0.5 (* 0.5 (- incoming 0.5)))
+        rounded-focus (double (float raw-focus))
+        rounded (block {:focus (lit rounded-focus)} :replace 1 default-env)]
+    ;; In the old split the 11-block maximum prefix became one GPU dispatch.
+    ;; Its inputs, subtraction and scale are exact at float32, but the last sum rounds.
+    (is (= (count prefix) (count tail)))
+    (is (= 1 (count (draw prefix))))
+    (is (> (+ raw-focus add) 1.0))
+    (is (= 1.0 (+ rounded-focus add)))
+    (is (= 0.25 (get-in (oracle patch (into [rounded] tail)) [:values :left :channels :focus])))
+    (is (true? (identical? stages fused)))
+    (doseq [contributions [stages fused]]
+      (try
+        (oracle patch contributions)
+        (is false "The full additive overflow must stay observable")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :full-add (:effect-source (ex-data e)))))))))
+
+(deftest a-final-partial-replacement-keeps-the-original-dmx-boundary
+  (let [patch (focus-zoom-patch)
+        base (block {:focus (lit 0.1) :zoom (lit 0.0)} :replace 1 default-env)
+        maxima (mapv (fn [i] (block {:focus (lit 0.0) :zoom (lit (/ (double i) 16))} :max 0.5 default-env))
+                     (range 1 11))
+        final (block {:focus (lit 0.1)} :replace 0.3 default-env)
+        stages (into (into [base] maxima) [final])
+        fused (chain/fuse (chain/create-cache) prepare stages)
+        expected (oracle patch stages)]
+    (is (= 26 (get-in expected [:universes 1 0])))
+    (is (true? (identical? stages fused)))
+    (is (= expected (oracle patch fused)))))
+
+(deftest later-overlapping-targets-retain-the-original-maximum-backdrop
+  (let [patch (focus-zoom-patch (conj ids :other))
+        u (Math/scalb 1.0 (int -53))
+        base (block {:focus (lit 1.0) :zoom (lit 0.0)} :replace 1 default-env)
+        maxima (mapv (fn [i] (block {:focus (lit 0.0) :zoom (lit (/ (double i) 16))} :max 0.5 default-env))
+                     (range 1 11))
+        prefix (into [base] maxima)
+        partial-replace (block {:focus (lit (- 1.0 (* 3 u)))} :replace 0.4375 default-env)
+        invalid (-> (block {:focus (lit (* 2.125 u))} :add 1 default-env)
+                    (assoc :source :single-target-add)
+                    (assoc-in [:batch :target-ids] [:left])
+                    (assoc-in [:batch :field-request :group :positions] [(first positions)]))
+        cross-target (conj prefix partial-replace invalid)
+        overlapping (conj prefix invalid)
+        disjoint (conj prefix (assoc-in invalid [:batch :target-ids] [:other]))
+        disjoint-assignment (conj prefix {:kind :assignments
+                                          :assignments [{:target-id :other :attribute :focus :value 0.25}]})
+        draw (partial chain/fuse (chain/create-cache) prepare)]
+    (is (= 1 (count (draw prefix))))
+    (doseq [stages [disjoint disjoint-assignment]]
+      (is (= 2 (count (draw stages))))
+      (is (= (oracle patch stages) (oracle patch (draw stages)))))
+    (doseq [stages [overlapping cross-target]]
+      (let [fused (draw stages)]
+        (is (true? (identical? stages fused)))
+        (doseq [contributions [stages fused]]
+          (try
+            (oracle patch contributions)
+            (is false "The later target must receive the original focus backdrop")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= :single-target-add (:effect-source (ex-data e)))))))))))
+
 (deftest repeated-fixture-rows-and-illegal-geometry-blends-retain-stage-order
   (let [cache (chain/create-cache)
         base (block {:focus (lit 0.2)} :replace 1 default-env)
@@ -157,6 +391,11 @@
     (is (identical? paint (first result)))
     (is (identical? later (peek result)))
     (is (not-any? #{[:surface-uv]} (mapcat ir/input-paths (vals (shader [(peek result)])))))
+    (let [base (block {:focus (lit 0.125)} :replace 1 default-env)
+          max-stage (block {:focus (lit 0.25)} :max 0.5 default-env)
+          stages [base max-stage paint later]]
+      (is (identical? stages (lower stages)))
+      (is (= (oracle stages) (oracle (lower stages)))))
     (doseq [barrier [(assoc-in paint [:native-layer :targets] :previous)
                      (assoc-in paint [:native-layer :inherit-backdrop?] true)
                      (assoc-in paint [:native-layer :transforms] [{:attribute :color :value {:read :previous :attribute :focus}}])
