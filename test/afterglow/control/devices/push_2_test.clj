@@ -43,6 +43,108 @@
   (is (= [] (:errors (session/snapshot (:session h)))))
   (session/close! (:session h)))
 
+(defn- gesture-harness [authority before-command!]
+  (let [{:keys [show log options] :as h} (fixture/harness)
+        device (session/create
+                 (assoc options :profile (push/profile {:operator-gestures? true})
+                                :dispatch! (fn [command]
+                                             (when before-command! (before-command! show command))
+                                             (swap! log conj [:command command])
+                                             (let [result (model/apply-command @show command authority)]
+                                               (reset! show (:model result))
+                                               result))))]
+    (fixture/ready! (assoc h :session device))))
+
+(def ^:private push-operator {:operator-id "push-2-test"})
+
+(defn- admitted-commands [h]
+  (mapv second (filter #(= :command (first %)) @(:log h))))
+
+(deftest scalar-encoder-touch-pins-the-target-through-selection-and-commits-once
+  (let [h (gesture-harness push-operator nil)]
+    (try
+      (let [id (launch! h 37) history #(get-in @(:show h) [:control :edit-history])]
+        (receive! h [0x90 0 127])
+        (receive! h [0x90 0 127])
+        (let [other-id (launch! h 36)]
+          (is (not= id other-id))
+          (dotimes [_ 12] (receive! h [0xb0 71 1]))
+          (is (zero? (:cursor (history))))
+          (is (> (:level (values h id)) 0.5))
+          (is (= 0.5 (:level (values h other-id))))
+          (receive! h [0x90 0 0])
+          (receive! h [0x80 0 0])
+          (receive! h [0xb0 71 1])
+          (is (= 0.5 (:level (values h other-id))))
+          (let [commands (filterv :gesture-id (filter #(= "gesture" (namespace (:op %))) (admitted-commands h)))
+                node (get-in (history) [:nodes (:cursor (history))])]
+            (is (= (into [:gesture/begin] (concat (repeat 12 :gesture/sample) [:gesture/end])) (mapv :op commands)))
+            (is (= (range 1 13) (keep :sequence commands)))
+            (is (= 12 (:last-sequence (peek commands))))
+            (is (= 1 (count (set (map :gesture-id commands)))))
+            (is (= 1 (:cursor (history))))
+            (is (= {:target [:instance-param id :level], :actor "push-2-test", :before 0.5
+                    :after (:level (values h id))}
+                   (select-keys node [:target :actor :before :after]))))
+          (reset! (:now h) 250)
+          (receive! h [0xb0 71 1])
+          (is (= 0.51 (:level (values h other-id))))
+          (is (= :param/set (:op (peek (admitted-commands h)))))))
+      (finally (finish! h)))))
+
+(deftest concurrent-automation-protects-the-canonical-value-and-accepted-sequence
+  (let [automation! (fn [show command]
+                      (when (and (= :gesture/sample (:op command)) (= 2 (:sequence command)))
+                        (let [write (assoc (select-keys command [:show-id :epoch :time-ms :instance-id :param])
+                                           :op :param/set :value 0.25 :command-id "automation" :source {:adapter :routing})]
+                          (reset! show (:model (model/apply-command @show write))))))
+        h (gesture-harness push-operator automation!)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (is (= 0.51 (:level (values h id))))
+        (receive! h [0xb0 71 1])
+        (is (= :history-conflict (:code (:last-ack (session/snapshot (:session h))))))
+        (receive! h [0x80 0 0])
+        (is (= 0.25 (:level (values h id))))
+        (is (= 1 (:last-sequence (peek (admitted-commands h)))))
+        (is (= :history-conflict (:discarded (:last-ack (session/snapshot (:session h))))))
+        (is (= 0 (get-in @(:show h) [:control :edit-history :cursor])))
+        (is (empty? (get-in @(:show h) [:control :edit-history :open]))))
+      (finally (finish! h)))))
+
+(deftest unadmitted-history-and-touchless-input-retain-ordinary-control
+  (let [h (gesture-harness nil nil)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 71 1])
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (is (= 0.52 (:level (values h id))))
+        (is (= [:cue/launch :param/set :gesture/begin :param/set]
+               (mapv :op (admitted-commands h))))
+        (is (nil? (get-in @(:show h) [:control :edit-history]))))
+      (finally (finish! h)))))
+
+(deftest suspend-finishes-only-the-accepted-encoder-edit
+  (let [h (gesture-harness push-operator nil) device (:session h)]
+    (try
+      (let [id (launch! h 36)]
+        (receive! h [0x90 0 127])
+        (receive! h [0x80 0 0])
+        (is (= 0 (get-in @(:show h) [:control :edit-history :cursor])))
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0xb0 59 127])
+        (is (= :suspended (:status (session/snapshot device))))
+        (is (= [:gesture/end :instance/end] (mapv :op (take-last 2 (admitted-commands h)))))
+        (is (= 0.51 (:level (values h id))))
+        (is (= 1 (get-in @(:show h) [:control :edit-history :cursor])))
+        (is (empty? (get-in @(:show h) [:control :edit-history :open]))))
+      (finally (finish! h)))))
+
 (deftest push-feedback-indexes-running-cues-once-for-the-display-and-pads
   (let [h (harness) calls (atom 0) active views/active-instances]
     (try
