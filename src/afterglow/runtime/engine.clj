@@ -386,13 +386,14 @@
                                   (when-not (:done? result)
                                     [(:id result) (runtime/observable-instance result)]))) evaluations)
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
-    {:model (faults/record-events (assoc model :instances instances) events)
-     :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
-     :keyframes (keyframes/committed-windows snapshot evaluations)
-     :fault-events events
-     ;; Private evaluation records never enter the model or a saved show. A
-     ;; renderer can reject one malformed output without running healthy code twice.
-     ::evaluation {:model model :snapshot snapshot :descriptors descriptors :results evaluations}}))
+    (cond-> {:model (faults/record-events (assoc model :instances instances) events)
+             :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
+             :keyframes (keyframes/committed-windows snapshot evaluations)
+             :fault-events events
+             ;; Private evaluation records never enter the model or a saved show. A
+             ;; renderer can reject one malformed output without running healthy code twice.
+             ::evaluation {:model model :snapshot snapshot :descriptors descriptors :results evaluations}}
+      (seq (:intent-emissions evaluated)) (assoc :intent-emissions (:intent-emissions evaluated)))))
 
 (defn reject-output
   "Reject one renderer-attributed output, preserving all other evaluated results.
@@ -452,6 +453,8 @@
   and cancellation still fail the frame. :contributions retains ordered typed and
   ordinary blocks; :assignments is nil if any batch is present. Consumers of a
   batch compiler must resolve the contribution stream, never just assignments.
+  Nonempty :intents have a same-order :intent-emissions companion containing
+  their source instance, definition identity and launch adapter when present.
   No hardware output or external work happens here.
 
   Command :revision is preserved; :frame-number advances. Asynchronous shells

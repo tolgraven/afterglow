@@ -134,9 +134,20 @@
                  :missing-ids (vec (remove #(contains? indexed %) (map :id instances)))}))
     indexed))
 
+(defn- intent-emissions [descriptor result]
+  (when-let [intents (seq (:intents result))]
+    (let [instance (or (:instance result) (:instance descriptor) descriptor)
+          adapter (get-in instance [:source :adapter])
+          source (cond-> (assoc (select-keys instance [:effect-id :effect-version :cue-id])
+                                :instance-id (:id descriptor))
+                   (some? adapter) (assoc :adapter adapter))]
+      (map (fn [intent] {:intent intent :source source}) intents))))
+
 (defn merge-results
   "Validate and deterministically merge already evaluated results. Used by the
-  show coordinator to isolate effect faults without evaluating healthy work twice."
+  show coordinator to isolate effect faults without evaluating healthy work twice.
+  For nonempty :intents, :intent-emissions carries their originating instance
+  identities in the same order, even for steps that finish in this frame."
   [context evaluated]
   (validate-context context)
   (let [instances (:effects context)
@@ -146,14 +157,21 @@
                          (map-indexed vector instances))
         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
         blocks (into [] (mapcat :contributions) contributions)
-        structured? (some #(or (:native-layer %) (= :batch (:kind %))) blocks)]
-    (assoc context
-           :effects (into [] (keep (fn [instance]
-                                    (let [result (get results (:id instance))]
-                                      (when-not (:done? result) (assoc instance :state (:state result)))))) instances)
-           :contributions blocks
-           :assignments (when-not structured? (into [] (mapcat :assignments) blocks))
-           :intents (into [] (mapcat :intents) contributions))))
+        structured? (some #(or (:native-layer %) (= :batch (:kind %))) blocks)
+        intents (into [] (mapcat :intents) contributions)
+        merged (assoc context
+                      :effects (into [] (keep (fn [instance]
+                                               (let [result (get results (:id instance))]
+                                                 (when-not (:done? result) (assoc instance :state (:state result)))))) instances)
+                      :contributions blocks
+                      :assignments (when-not structured? (into [] (mapcat :assignments) blocks))
+                      :intents intents)]
+    (if (seq intents)
+      (assoc merged :intent-emissions
+             (into [] (mapcat (fn [[_ descriptor]]
+                                (intent-emissions descriptor (get results (:id descriptor)))))
+                   ordered))
+      (dissoc merged :intent-emissions))))
 
 (defn render-frame
   "Evaluate independent effects and return the next immutable context.
@@ -183,6 +201,7 @@
 
   Assignment and intent vectors are concatenated by ascending priority, then
   launch order, then original vector position. Per-effect vector order is kept.
+  When intents exist, :intent-emissions pairs each value with its source instance.
   The returned :contributions stream preserves mixed block ordering. Aggregate
   :assignments remains a vector for ordinary-only results and is nil when typed
   batches are present, preventing accidental partial rendering by old consumers.
