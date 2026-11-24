@@ -242,8 +242,9 @@
           action (display-action state model controller)]
       (cond
         held? {:state (if down? state (update state :display-buttons disj controller))}
-        (and action down?) {:state (-> state (update :display-buttons (fnil conj #{}) controller)
-                                       (display/apply-action model action))}))))
+        (and down? (display/action-supported? state action))
+        {:state (-> state (update :display-buttons (fnil conj #{}) controller)
+                    (display/apply-action model action))}))))
 
 (defn- input [device-id state event model envelope]
   (let [state (selected-state state model)
@@ -420,16 +421,21 @@
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
   Sequential palette acquisition precedes writes; LEDs use acknowledged batches.
   Missing responses are reported on refresh!, never guessed."
-  [{:keys [device-id page-id timeout-ms led-batch-size target-search]
+  [{:keys [device-id page-id timeout-ms led-batch-size target-search display]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8}}]
   (codec/palette-request device-id 0)
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
-  (let [initial {:page-id page-id :origin [0 0] :palettes {} :next-palette 0
-                 :ready? false :pads {} :holds {} :last-leds {} :led-retries 0 :display-buttons #{}
-                 :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
-                 :pressed-pads #{} :pad-instances {}}]
+  (let [{:keys [modes actions] :as display-capabilities} (:display-capabilities display)
+        _ (when-not (and (or (nil? modes) (and (set? modes) (seq modes) (every? display/modes modes)))
+                         (or (nil? actions) (set? actions)))
+            (throw (ex-info "Invalid Push 2 display capabilities" {:display-capabilities display-capabilities})))
+        initial (cond-> {:page-id page-id :origin [0 0] :palettes {} :next-palette 0
+                         :ready? false :pads {} :holds {} :last-leds {} :led-retries 0 :display-buttons #{}
+                         :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
+                         :pressed-pads #{} :pad-instances {}}
+                  display-capabilities (assoc :display-capabilities display-capabilities))]
     {:id :push-2 :capabilities capabilities :initial-state initial
      :decode (partial decode device-id)
      :start (fn [state _model envelope]
@@ -466,7 +472,9 @@
 
 (defn connect!
   "REPL facade: options are session options plus :device-id/:page-id. Supply MIDI
-  and optional display transports; no device is guessed or automatically bound."
+  and optional display transports; no device is guessed or automatically bound.
+  A display can declare :display-capabilities with a nonempty set of :modes and
+  a set of supported display :actions. Omitted keys allow all modes or actions."
   [options]
   (when-let [device (get-in options [:display :device])]
     (when-not (= :push-2 device)
