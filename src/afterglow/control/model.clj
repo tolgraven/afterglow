@@ -57,6 +57,8 @@
      (require! (instance? Boolean (:blackout? model)) :invalid-model "Blackout must be boolean")
      (doseq [k [:registry :instances :pages :variables :transport]]
        (require! (map? (get model k)) :invalid-model "Expected map" {:field k}))
+     (require! (not (contains? (:pages model) pages/recent-page-id))
+               :invalid-model "The generated recent page ID cannot be authored")
      (assoc model
             :registry (merge {:effects {} :cues {} :fixtures {} :versions {}} (:registry model))
             :transport (merge {:bpm 120 :playing? true :beat 0.0
