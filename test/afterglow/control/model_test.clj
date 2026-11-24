@@ -1,6 +1,7 @@
 (ns afterglow.control.model-test
   (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.model :as model]
+            [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.views :as views]
             [afterglow.runtime.events :as events]))
@@ -225,6 +226,84 @@
     (let [restored (apply! deleted {:op :cue/put :cue {:id :red :effect-id :wash :params {:level 0.2}}})]
       (is (= 2 (get-in restored [:registry :cues :red :version])))
       (is (= 0.6 (get-in restored [:registry :versions [:cues :red 1] :params :level]))))))
+
+(defn- recent-cue-ids [show]
+  (mapv (comp :id :cue) (:cells (views/page-view show pages/recent-page-id))))
+
+(deftest recent-page-holds-the-last-64-distinct-launches-in-grid-order
+  (let [ids (mapv #(str "cue-" %) (range 66))
+        launch (fn [show id] (apply! show {:op :cue/launch :cue-id id}))
+        authored (configured {:history-limit 2})
+        published (reduce (fn [show id] (apply! show {:op :cue/put :cue {:id id :effect-id :wash}}))
+                          authored ids)
+        show (reduce launch published ids)
+        page (views/page-view show pages/recent-page-id)
+        expected (vec (reverse (drop 2 ids)))
+        revisited (launch show (peek expected))]
+    (is (empty? (recent-cue-ids published)))
+    (is (= {:id pages/recent-page-id :name "Recent cues" :columns 8 :rows 8}
+           (dissoc page :cells)))
+    (is (= (for [y (range 7 -1 -1) x (range 8)] [x y])
+           (map (juxt :x :y) (:cells page))))
+    (is (= expected (recent-cue-ids show)))
+    (is (= expected
+           (mapv (fn [{:keys [x y]}] (pages/cue-id-at show pages/recent-page-id [x y])) (:cells page))))
+    (is (= (into [(peek expected)] (pop expected)) (recent-cue-ids revisited)))
+    (is (= (recent-cue-ids revisited) (recent-cue-ids (launch revisited (peek expected)))))
+    (is (identical? (:pages authored) (:pages revisited)))
+    (is (= page (peek (:pages (views/snapshot show)))))))
+
+(deftest recent-page-records-only-new-successful-cue-launches
+  (let [show (-> (configured)
+                 (apply! {:op :cue/put :cue {:id :blue :effect-id :wash}}))
+        red (command show {:op :cue/launch :cue-id :red})
+        launched (:model (model/apply-command show red))
+        latest (apply! launched {:op :cue/launch :cue-id :blue})]
+    (doseq [[operation error] [[{:op :cue/launch :cue-id :missing} :unknown-cue]
+                               [{:op :cue/launch :cue-id :red :launch {:params {:level 10}}} :invalid-params]]]
+      (let [result (model/apply-command latest (command latest operation))]
+        (is (= error (get-in result [:ack :code])))
+        (is (identical? latest (:model result)))))
+    (let [retry (model/apply-command latest red)]
+      (is (identical? latest (:model retry)))
+      (is (empty? (:events retry))))
+    (is (= [:blue :red] (recent-cue-ids latest)
+           (recent-cue-ids (apply! latest {:op :effect/launch :effect-id :wash}))
+           (recent-cue-ids (apply! latest {:op :show/restart}))))))
+
+(deftest recent-page-resolves-live-cue-edits-and-forgets-deleted-cues
+  (let [launch {:op :cue/launch :cue-id :red}
+        original (-> (configured)
+                     (apply! {:op :cue/put :cue {:id :blue :effect-id :wash}})
+                     (apply! {:op :cue/launch :cue-id :blue})
+                     (apply! launch))
+        replace {:op :cue/put :cue {:id :red :effect-id :wash :name "Updated red"}}
+        updated (apply! original replace)
+        stale (update-in updated [:registry :cues] dissoc :red)
+        deleted (apply! updated {:op :cue/delete :cue-id :red})
+        restored (apply! deleted replace)]
+    (is (= "Updated red" (get-in (views/page-view updated pages/recent-page-id) [:cells 0 :cue :name])))
+    (is (nil? (pages/cue-id-at stale pages/recent-page-id [0 7])))
+    (is (= [:blue] (recent-cue-ids stale) (recent-cue-ids (apply! stale replace))
+           (recent-cue-ids deleted) (recent-cue-ids restored)))
+    (is (= :blue (pages/cue-id-at deleted pages/recent-page-id [0 7])))
+    (is (= [:red :blue] (recent-cue-ids (apply! restored launch))))))
+
+(deftest recent-page-id-cannot-conflict-with-an-authored-page
+  (let [string-id (first pages/recent-page-id)
+        keyword-id (keyword string-id)
+        original (configured)
+        show (reduce (fn [show id] (apply! show {:op :page/put :page {:id id :cells {[0 0] :red}}}))
+                     original [string-id keyword-id])]
+    (is (= [keyword-id string-id pages/recent-page-id] (pages/page-ids show)))
+    (doseq [[operation expected-error]
+            [[{:op :page/put :page {:id pages/recent-page-id}} :invalid-page]
+             [{:op :page/delete :page-id pages/recent-page-id} :unknown-page]]]
+      (let [result (model/apply-command show (command show operation))]
+        (is (= expected-error (get-in result [:ack :code])))
+        (is (identical? show (:model result)))))
+    (doseq [id [string-id keyword-id]]
+      (is (= :red (pages/cue-id-at show id [0 0]))))))
 
 (deftest restored-instances-do-not-collide-with-new-ids-or-launch-order
   (let [show (apply! (configured) {:op :cue/launch :cue-id :red})

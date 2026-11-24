@@ -1,7 +1,8 @@
 (ns afterglow.control.views
   "Pure device-independent projections. Local focus, menus and raw protocol
   buffers belong to adapters; these views describe committed show state."
-  (:require [afterglow.control.categories :as categories]))
+  (:require [afterglow.control.categories :as categories]
+            [afterglow.control.pages :as pages]))
 
 (defn active-instances [model]
   (->> (:instances model) vals (sort-by (juxt :priority :order :id)) vec))
@@ -43,10 +44,14 @@
        (assoc view :color rgb)))))
 
 (defn page-view [model page-id]
-  (when-let [page (get-in model [:pages page-id])]
-    {:id page-id :name (or (:name page) (str page-id))
-     :cells (mapv (fn [[[x y] cue-id]] {:x x :y y :cue (cue-view model cue-id)})
-                  (sort-by (fn [[[x y] _]] [(- y) x]) (:cells page)))}))
+  (when-let [page (pages/page model page-id)]
+    (let [cells (:cells page)
+          instances-by-cue (when (seq cells) (group-by :cue-id (active-instances model)))]
+      (cond-> {:id page-id :name (or (:name page) (str page-id))
+               :cells (mapv (fn [[[x y] cue-id]]
+                              {:x x :y y :cue (cue-view model cue-id instances-by-cue)})
+                            (sort-by (fn [[[x y] _]] [(- y) x]) cells))}
+        (= page-id pages/recent-page-id) (merge (select-keys page [:columns :rows]))))))
 
 (defn snapshot
   "Public committed control projection. Does not expose resource handles,
@@ -54,7 +59,7 @@
   [model]
   (merge (select-keys model [:show-id :epoch :revision :time-ms :master :blackout? :transport])
          {:cues (mapv #(cue-view model %) (sort-by str (keys (get-in model [:registry :cues]))))
-          :pages (mapv #(page-view model %) (sort-by str (keys (:pages model))))
+          :pages (mapv #(page-view model %) (pages/page-ids model))
           :groups (categories/group-view model)
           :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
                                                    :started-at-ms :release-at-ms :duration-ms

@@ -2,6 +2,7 @@
   "Immutable show commands. Time and identity enter through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
+            [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.targets :as targets]
             [afterglow.time :as musical-time]
@@ -132,7 +133,8 @@
     {:model (cond-> (-> model
                        (assoc-in [:registry kind id] definition)
                        (assoc-in [:registry :versions [kind id (:version definition)]] definition))
-              (not= definition previous) (update-in [:registry :revision] (fnil inc 0)))
+              (not= definition previous) (update-in [:registry :revision] (fnil inc 0))
+              (and (= :cues kind) (nil? previous)) (pages/forget-cue id))
      :events [{:type :registry/published :kind kind :id id :version (:version definition)}]
      :result {:id id :version (:version definition)}}))
 
@@ -247,6 +249,7 @@
       {:model (-> model
                   (update-in [:registry :cues] dissoc id)
                   (update-in [:registry :revision] (fnil inc 0))
+                  (pages/forget-cue id)
                   (update :pages (fn [pages]
                                    (into {} (map (fn [[k page]]
                                                    [k (update page :cells
@@ -258,7 +261,8 @@
                     (reject! :unknown-cue "Cue does not exist" {:cue-id (:cue-id command)})))
           effect (if cue (effect-definition model cue) (get-in model [:registry :effects (:effect-id command)]))]
       (require! effect :unknown-effect "Effect is not published")
-      (launch-instance model command cue effect))
+      (cond-> (launch-instance model command cue effect)
+        cue (update :model pages/record-launch (:cue-id command))))
     :instance/end
     (let [id (:instance-id command)
           instance (instance! model id)

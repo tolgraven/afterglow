@@ -5,6 +5,7 @@
             [afterglow.control.parameter-edit :as parameter-edit]
             [afterglow.control.codecs.midi :as midi]
             [afterglow.control.codecs.push-2 :as codec]
+            [afterglow.control.pages :as pages]
             [afterglow.control.views :as views]
             [afterglow.control.display :as display]
             [afterglow.control.devices.push-view :as push-view]
@@ -37,7 +38,7 @@
 (defn- cue-at [state model note]
   (when-let [[x y] (codec/pad-coordinates note)]
     (let [[left bottom] (:origin state)
-          cue-id (get-in model [:pages (:page-id state) :cells [(+ left x) (+ bottom y)]])]
+          cue-id (pages/cue-id-at model (:page-id state) [(+ left x) (+ bottom y)])]
       (get-in model [:registry :cues cue-id]))))
 
 (defn- active-for-cue [model cue-id]
