@@ -1,0 +1,7 @@
+{
+  "name": "afterglow-partial-max-hardware-replay",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "replay": "node replay.cjs" },
+  "devDependencies": { "playwright-core": "1.65.1" }
+}

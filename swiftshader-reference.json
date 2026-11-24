@@ -1,0 +1,93 @@
+{
+  "device": {
+    "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+    "webgl": "WebGL 2.0 (OpenGL ES 3.0 Chromium)"
+  },
+  "chromium": "156.0.8078.79",
+  "platform": "linux",
+  "architecture": "x64",
+  "software": true,
+  "mergedAfterglow": "1f31801e61951201fc581c7515cecbc63e405ba1",
+  "reviewedAfterglow": "a1443334ec7791a8a268012680c12ef12dfad4b7",
+  "afterglowTree": "a1ddb449a56551d7db37e1bea2e928a8d53599a6",
+  "tolglow": "e4b654a8e16b4327d6bcacb87b0a68ca3366f128",
+  "fixtureSha256": "a045972b74e78dc2ef12acbff7cae6f465133fd3f6ae148477c1217bc6e459ee",
+  "guestSha256": "0a3c767db3759704f1d25b7f26d13e8a8497e1f0955c997076d031ab8aec113e",
+  "cases": [
+    {
+      "layers": 10,
+      "heads": 64,
+      "stride": 4,
+      "uniforms": 20,
+      "shaderBytes": 2466,
+      "programId": "82a99a1b-db5c-4be3-849e-dd2f88a33d4d",
+      "prepareRoundTripMs": 9.800000000745058,
+      "readbacks": [
+        {
+          "jobId": "10-first",
+          "roundTripMs": 32.099999997764826,
+          "bytes": 1024,
+          "sha256": "c99d38bcbafa1352fb2ff2aaa9be762a595b53951145b876200cb3b7073842af",
+          "maxError": 0
+        },
+        {
+          "jobId": "10-revised",
+          "roundTripMs": 9.5,
+          "bytes": 1024,
+          "sha256": "9390da8fadcd3cac1bfc04f7d2100c9d656a57c784b077128bf493dee7800e3d",
+          "maxError": 0
+        }
+      ]
+    },
+    {
+      "layers": 18,
+      "heads": 64,
+      "stride": 4,
+      "uniforms": 36,
+      "shaderBytes": 3826,
+      "programId": "27df1f2d-6bce-4b27-a7a9-705ee76077db",
+      "prepareRoundTripMs": 8.600000001490116,
+      "readbacks": [
+        {
+          "jobId": "18-first",
+          "roundTripMs": 36.69999999925494,
+          "bytes": 1024,
+          "sha256": "1f627e9f5d1af1039c3e70719e4daa3da54654945048755061f7b9f5be69d859",
+          "maxError": 0
+        },
+        {
+          "jobId": "18-revised",
+          "roundTripMs": 7.199999999254942,
+          "bytes": 1024,
+          "sha256": "fbe988dde34be9cbc4c39ab7b8a4c99dd298d8f3e50f3756a772dc1e3f1325ea",
+          "maxError": 0
+        }
+      ]
+    },
+    {
+      "layers": 24,
+      "heads": 64,
+      "stride": 4,
+      "uniforms": 48,
+      "shaderBytes": 4846,
+      "programId": "b54edd34-c2bb-4695-aa53-7bb333b4ff28",
+      "prepareRoundTripMs": 7.700000002980232,
+      "readbacks": [
+        {
+          "jobId": "24-first",
+          "roundTripMs": 48.399999998509884,
+          "bytes": 1024,
+          "sha256": "cfc7700f969469b21f7e486e8a693f3eba0dcecdc843569f97dc4431b4de5eaf",
+          "maxError": 3.91155481338501e-8
+        },
+        {
+          "jobId": "24-revised",
+          "roundTripMs": 10.300000000745058,
+          "bytes": 1024,
+          "sha256": "f0f01f179cb6cd0a876ec300672445596695033613927752405490377e6e1831",
+          "maxError": 3.91155481338501e-8
+        }
+      ]
+    }
+  ]
+}
