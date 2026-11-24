@@ -96,6 +96,22 @@
 
 (defn- hull [ranges] [(reduce min (map first ranges)) (reduce max (map second ranges))])
 
+(defn- partial-max-range [[lo hi :as prior] [incoming-lo incoming-hi] [alpha-lo alpha-hi]]
+  (when (<= 0 alpha-lo alpha-hi 1)
+    (if (<= incoming-hi lo)
+      prior
+      ;; Rounded subtraction breaks monotonicity in the prior when it appears
+      ;; in both the sum and the difference. Bound those operations separately.
+      (let [delta-lo (max 0.0 (- incoming-lo hi))
+            delta-hi (max 0.0 (- incoming-hi lo))
+            upper (+ hi (* alpha-hi delta-hi))
+            ;; With nonnegative inputs, subtraction can round up by at most
+            ;; one ULP at the input ceiling. Scaling cannot increase the delta.
+            upper (if (and (<= 0 lo) (<= 0 incoming-lo))
+                    (min upper (Math/nextUp (double (max hi incoming-hi))))
+                    upper)]
+        (range-of [(+ lo (* alpha-lo delta-lo)) upper])))))
+
 (defn- operation-range [operation ranges]
   (let [[[al ah] [bl bh] [cl ch]] ranges]
     (case operation
@@ -110,7 +126,7 @@
       :max [(reduce max (map first ranges)) (reduce max (map second ranges))]
       :clamp (when (<= bh cl) [(min cl (max bl al)) (min ch (max bh ah))])
       :mix (when (<= 0 cl ch 1) (hull (take 2 ranges)))
-      ::ir/partial-max-blend (when (<= 0 cl ch 1) [al (max ah bh)])
+      ::ir/partial-max-blend (apply partial-max-range ranges)
       :subtract (if bl (endpoints - (first ranges) (second ranges)) [(- ah) (- al)])
       :divide (when-not (<= bl 0 bh) (endpoints / (first ranges) (second ranges)))
       (:add :multiply) (reduce (fn [a b] (or (endpoints (if (= operation :add) + *) a b) (reduced nil))) ranges)
@@ -162,9 +178,7 @@
                amount (if alpha (get env alpha) 1)
                final (cond (nil? blended) nil
                            (== 1 amount) blended
-                           (= :max blend) (let [[lo hi] prior, [lower upper] blended]
-                                            (range-of [(+ lo (* amount (- lower lo)))
-                                                       (+ hi (* amount (- upper hi)))]))
+                           (= :max blend) (partial-max-range prior incoming [amount amount])
                            prior (range-of [(+ (* (- 1.0 amount) (first prior)) (* amount (first blended)))
                                             (+ (* (- 1.0 amount) (second prior)) (* amount (second blended)))]))]
            (if (valid-output? attr final) (assoc ranges attr final) (reduced nil))))))

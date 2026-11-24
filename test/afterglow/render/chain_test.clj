@@ -196,6 +196,42 @@
       (catch clojure.lang.ExceptionInfo e
         (is (= (:source invalid-add) (:effect-source (ex-data e))))))))
 
+(deftest interior-rounded-maximum-cannot-hide-an-invalid-add
+  (let [ulp (Math/scalb 1.0 (int -53))
+        middle (* 0.5 ulp)
+        positions [[0.0 0.0 0.0] [middle 0.0 0.0] [(Math/nextUp (double middle)) 0.0 0.0]]
+        ids [:low :middle :high]
+        block (fn [source outputs blend opacity]
+                {:kind :batch :source source
+                 :batch {:target-ids ids :blend blend :opacity opacity
+                         :field-request {:group (prepare outputs positions (ir/compile-batch outputs) nil)
+                                         :env default-env}}})
+        base (block :base {:focus {:op :position :axis :x} :zoom (lit 0.0)} :replace 1)
+        maxima (mapv (fn [i] (block i {:focus (lit 0.0) :zoom (lit (/ (double i) 16))} :max 0.5))
+                     (range 1 10))
+        round-up (block :round-up {:focus (lit 1.0) :zoom (lit 0.625)} :max (- 1.0 ulp))
+        invalid-add (block :invalid-add {:focus (lit (* 1.5 ulp))} :add 1)
+        cover (block :cover {:focus (lit 0.25)} :replace 1)
+        stages (into (into [base] maxima) [round-up invalid-add cover])
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        patch (frame/compile-patch (mapv (fn [id index] {:id id :address (inc (* 2 index)) :universe 1
+                                                        :channels {:focus 1 :zoom 2}})
+                                         ids (range)))
+        render #(frame/resolve-contributions patch
+                    ((fields/frame-evaluator
+                      (fn [{:keys [cpu-plan positions surface-uvs]} env]
+                        (ir/evaluate-batch cpu-plan env positions surface-uvs))) %))
+        fused (draw stages)]
+    ;; Zoom keeps the long chain live even though the final block covers focus.
+    (is (= 1 (count (draw (pop (pop stages))))))
+    (is (some #(identical? invalid-add %) fused))
+    (doseq [contributions [stages fused]]
+      (try
+        (render contributions)
+        (is false "The middle fixture's prior rounds to one before the additive overflow")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :invalid-add (:effect-source (ex-data e)))))))))
+
 (deftest repeated-fixture-rows-and-illegal-geometry-blends-retain-stage-order
   (let [cache (chain/create-cache)
         base (block {:focus (lit 0.2)} :replace 1 default-env)
