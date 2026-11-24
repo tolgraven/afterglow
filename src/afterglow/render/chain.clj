@@ -76,8 +76,9 @@
       (case blend
         :replace (op :mix previous incoming (param alpha))
         :add (op :add previous (if alpha (op :multiply incoming (param alpha)) incoming))
-        :max (let [highest (op :max previous incoming)]
-               (if alpha (op :mix previous highest (param alpha)) highest))))))
+        :max (if alpha
+               (ir/partial-max-blend previous incoming (param alpha))
+               (op :max previous incoming))))))
 
 (defn- fold-stage [previous {:keys [fields blend alpha]}]
   (reduce-kv (fn [acc attr field]
@@ -109,6 +110,7 @@
       :max [(reduce max (map first ranges)) (reduce max (map second ranges))]
       :clamp (when (<= bh cl) [(min cl (max bl al)) (min ch (max bh ah))])
       :mix (when (<= 0 cl ch 1) (hull (take 2 ranges)))
+      ::ir/partial-max-blend (when (<= 0 cl ch 1) [al (max ah bh)])
       :subtract (if bl (endpoints - (first ranges) (second ranges)) [(- ah) (- al)])
       :divide (when-not (<= bl 0 bh) (endpoints / (first ranges) (second ranges)))
       (:add :multiply) (reduce (fn [a b] (or (endpoints (if (= operation :add) + *) a b) (reduced nil))) ranges)

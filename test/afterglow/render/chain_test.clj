@@ -3,6 +3,7 @@
             [afterglow.render.fields :as fields]
             [afterglow.render.frame :as frame]
             [afterglow.render.ir :as ir]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]))
 
 (defn- lit [n] {:op :const :value n})
@@ -107,6 +108,64 @@
     (is (= 24 (count (re-seq #"mix\(" (:source (ir/emit-glsl-batch (shader fused)))))))
     (is (= (:universes (oracle stages)) (:universes (oracle fused))))))
 
+(deftest many-live-partial-maxima-form-one-linear-shader
+  (let [base (block {:focus (lit 0.0625) :color (lit [0.0625 0.125 0.25])} :replace 1 default-env)
+        stage (fn [i]
+                (let [key (keyword (str "level-" i)), level (parameter key)]
+                  (assoc (block {:focus level :color {:op :vec3 :args [level (lit 0.5) {:op :position :axis :x}]}}
+                                :max 0.5 {:params {key (/ (double (+ i 2)) 32.0)}})
+                         :source {:instance-id i})))
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        group #(get-in % [0 :batch :field-request :group])]
+    (doseq [n [10 18 24]]
+      (let [stages (into [base] (map stage) (range n))
+            fused (draw stages)
+            {:keys [source inputs stride uniforms]} (ir/emit-glsl-batch (shader fused))
+            body (last (str/split source #"void main\(\)"))
+            expected (oracle stages)
+            revised (assoc-in stages [n :batch :field-request :env :params (keyword (str "level-" (dec n)))] 0.9375)
+            revised-fused (draw revised)
+            revised-output (:universes (oracle revised-fused))
+            reordered (into [base] (rseq (subvec stages 1)))
+            reordered-output (:universes (oracle (draw reordered)))]
+        (is (= 1 (count fused)))
+        (is (= (* 2 n) (count (re-seq #"afterglow_max_blend\(" body))))
+        (is (= (* 2 n) (count uniforms)))
+        (is (= {:position "v_position"} inputs))
+        (is (= 4 stride))
+        (is (= (:universes expected) (:universes (oracle fused))))
+        (is (identical? (group fused) (group revised-fused)))
+        (is (= (:universes (oracle revised)) revised-output))
+        (is (not= (:universes expected) revised-output))
+        (is (= (:universes (oracle reordered)) reordered-output))
+        (is (not= (:universes expected) reordered-output))))
+    (let [stages (into [base] (map stage) (range 24))
+          _ (draw stages)
+          broken (assoc-in stages [1 :batch :field-request :env :params :level-0] 1.25)
+          bad-stage (nth broken 1)
+          result (draw broken)]
+      (is (some #(identical? bad-stage %) result))
+      (try
+        (oracle result)
+        (is false "An invalid intermediate range must remain visible after a cached fusion")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= (:source bad-stage) (:effect-source (ex-data e)))))))))
+
+(deftest opaque-maxima-add-and-replace-keep-the-uniform-layout
+  (let [stages [(block {:focus (lit 0.125)} :replace 1 default-env)
+                (block {:focus (lit 0.25)} :max 1 default-env)
+                (block {:focus (lit 0.25)} :add 0.5 default-env)
+                (block {:focus (lit 0.125)} :replace 0.5 default-env)]
+        fused (chain/fuse (chain/create-cache) prepare stages)
+        {:keys [source inputs stride]} (ir/emit-glsl-batch (shader fused))]
+    (is (= 1 (count fused)))
+    (is (= (:universes (oracle stages)) (:universes (oracle fused))))
+    (is (empty? inputs))
+    (is (= 1 stride))
+    (is (str/includes? source "mix("))
+    (is (str/includes? source "max("))
+    (is (not (str/includes? source "afterglow_max_blend")))))
+
 (deftest repeated-fixture-rows-and-illegal-geometry-blends-retain-stage-order
   (let [cache (chain/create-cache)
         base (block {:focus (lit 0.2)} :replace 1 default-env)
@@ -157,6 +216,9 @@
     (is (identical? paint (first result)))
     (is (identical? later (peek result)))
     (is (not-any? #{[:surface-uv]} (mapcat ir/input-paths (vals (shader [(peek result)])))))
+    (let [base (block {:focus (lit 0.125)} :replace 1 default-env)
+          max-stage (block {:focus (lit 0.25)} :max 0.5 default-env)]
+      (is (= [paint later] (lower [base max-stage paint later]))))
     (doseq [barrier [(assoc-in paint [:native-layer :targets] :previous)
                      (assoc-in paint [:native-layer :inherit-backdrop?] true)
                      (assoc-in paint [:native-layer :transforms] [{:attribute :color :value {:read :previous :attribute :focus}}])
