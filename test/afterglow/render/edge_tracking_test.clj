@@ -89,3 +89,47 @@
     (is (false? (get-in result [:values :one :aim-reachable?])))
     (is (> (abs (- 2.0 (first (:hit a)))) 1))
     (is (near (second (x-extents a)) (first (x-extents b))))))
+
+(def collision-rig
+  (mapv (fn [i id]
+          {:id id :position [i 3 0] :beam-angle 20 :lens-radius-m 0.1
+           :universe 1 :address (+ 1 (* i 11)) :channels (:channels (first rig))})
+        (range 4) [:one :two :three :four]))
+
+(defn- collision-assignments [third-x]
+  (into [(assign :one :aim [0 0 0]) (assign :three :aim [third-x 0 0])]
+        (map #(assign (:id %) :color [1.0 0.4 0.2]))
+        collision-rig))
+
+(deftest later-followers-yield-when-their-spots-overlap
+  (let [leader (first links)
+        sibling (assoc leader :follower :three)
+        dependent (assoc leader :leader :three :follower :four)
+        parallel-plane (assoc floor :id :platform :point [0 0.5 0])]
+    (doseq [rich? [true false]]
+      (let [options {:include-values? rich? :compact-values? (not rich?)}
+            run (fn [links] (frame/resolve-frame collision-rig (collision-assignments 2)
+                                               (assoc options :edge-tracking links)))
+            conflict (run [leader sibling dependent])
+            reversed (run [sibling leader])
+            separate (run [leader (assoc sibling :surface parallel-plane)])
+            red (fn [frame] (mapv #(bit-and 255 (aget ^bytes (get-in frame [:universes 1]) %))
+                                  [4 15 26 37]))]
+        (is (= [nil :overlap :leader-suppressed] (mapv :reason (:edge-tracking conflict))))
+        (is (= [255 255 0 0] (red conflict)))
+        (is (= [nil :overlap] (mapv :reason (:edge-tracking reversed))))
+        (is (= [255 0 255 255] (red reversed)))
+        (is (every? :contact (:edge-tracking separate)))
+        (is (= [255 255 255 255] (red separate)))))))
+
+(deftest a-moving-leader-can-clear-space-for-a-suppressed-follower
+  (let [link (first links)
+        other (assoc link :leader :three :follower :four)
+        options {:edge-tracking [link other] :compact-values? true}
+        blocked (frame/resolve-frame collision-rig (collision-assignments 1.45) options)
+        clear (frame/resolve-frame collision-rig (collision-assignments 4)
+                                  (assoc options :previous-compact (:compact blocked)))]
+    (is (= [:overlap nil] (mapv :reason (:edge-tracking blocked))))
+    (is (= [0.0 0.0 0.0] (get-in blocked [:values :two :emitted-color])))
+    (is (every? :contact (:edge-tracking clear)))
+    (is (= [1.0 0.4 0.2] (get-in clear [:values :two :emitted-color])))))

@@ -184,6 +184,50 @@
                        nil surfaces)]
       (ellipse ray surface hit))))
 
+(defn footprints-overlap?
+  "Do two footprints on one receiver share interior area? A common tangent is
+  allowed. The caller supplies the ellipses returned by beam-footprint."
+  [a b]
+  (let [offset (sub (:center b) (:center a))
+        a-major (:major-radius-m a) b-major (:major-radius-m b)
+        distance (magnitude offset)]
+    (and (= (:surface-id a) (:surface-id b))
+         (< distance (+ a-major b-major))
+         (let [radius (max a-major b-major)
+               square (fn [x] (* x x))
+               [u v] ((juxt :major-axis :minor-axis) a)
+               [p q] ((juxt :major-axis :minor-axis) b)
+               ax (square (/ a-major radius))
+               ay (square (/ (:minor-radius-m a) radius))
+               bx (square (/ b-major radius))
+               by (square (/ (:minor-radius-m b) radius))
+               offset (mapv #(/ % radius) offset)
+               a-num (+ (* ay (square (dot offset u))) (* ax (square (dot offset v))))
+               b-num (+ (* by (square (dot offset p))) (* bx (square (dot offset q))))
+               a-det (* ax ay)
+               b-det (* bx by)
+               ;; Expand the determinant of the mixed shape matrices into
+               ;; nonnegative terms for nearly parallel, eccentric ellipses.
+               cross-det (+ (* ax (+ (* bx (square (dot v p))) (* by (square (dot v q)))))
+                            (* ay (+ (* bx (square (dot u p))) (* by (square (dot u q))))))
+               contact (fn [t]
+                         (let [s (- 1.0 t)]
+                           (/ (* s t (+ (* s a-num) (* t b-num)))
+                              (+ (* s s a-det) (* s t cross-det) (* t t b-det)))))
+               tangent (- 1.0 1.0e-9)]
+           ;; This contact function is concave. Its maximum is the minimum
+           ;; common squared dilation of the ellipses needed for contact.
+           (loop [lo 0.0, hi 1.0, iterations 0]
+             (if (= iterations 48)
+               (< (contact (* 0.5 (+ lo hi))) tangent)
+               (let [step (/ (- hi lo) 3.0)
+                     l (+ lo step) r (- hi step)
+                     left (contact l) right (contact r)]
+                 (cond
+                   (or (>= left tangent) (>= right tangent)) false
+                   (< left right) (recur l hi (inc iterations))
+                   :else (recur lo r (inc iterations))))))))))
+
 (defn- support-point [{:keys [center major-axis minor-axis major-radius-m minor-radius-m]} direction]
   (let [x (* major-radius-m (dot major-axis direction))
         y (* minor-radius-m (dot minor-axis direction))

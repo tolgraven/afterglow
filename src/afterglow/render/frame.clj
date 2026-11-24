@@ -1105,7 +1105,29 @@
 (defn- tracking-ids [links]
   (into #{} (mapcat (juxt :leader :follower)) links))
 
-(defn- track-edge [patch ^objects assigned options {:keys [leader follower surface along]}]
+(defn- tracking-footprint [head ^objects assigned options surface]
+  (let [index (int (::index head))
+        attrs (aget assigned index)
+        sources (::geometry-sources options)
+        source (when sources (get (aget ^objects sources index) (if (:aim attrs) :aim :direction)))
+        resolved (resolve-geometry head attrs (previous-for-target options head) source)
+        ;; Absent direct axes pack channel value zero, exactly as in the
+        ;; completed frame. Reconstruct travel limits from the command.
+        pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))]
+    (optics/beam-footprint (optics/fixture-beam head (assoc resolved :pose pose)) surface)))
+
+(defn- tracking-anchors [patch ^objects assigned options links]
+  (let [followers (set (map :follower links))]
+    (into {}
+          (for [[id group] (group-by (comp :id :surface) links)
+                :when (and id (next group))]
+            [id (into {}
+                      (keep (fn [leader]
+                              (when-let [head (get (:by-id patch) leader)]
+                                [leader (tracking-footprint head assigned options (:surface (first group)))])))
+                      (remove followers (distinct (map :leader group))))]))))
+
+(defn- track-edge [patch ^objects assigned options occupied {:keys [leader follower surface along]}]
   (let [head (get (:by-id patch) leader)
         next-head (get (:by-id patch) follower)]
     (cond
@@ -1113,36 +1135,38 @@
       (nil? next-head) {:reason :missing-follower}
       (not (contains? (::supported next-head) :aim)) {:reason :fixed-follower}
       :else
-      (let [index (int (::index head))
-            attrs (aget assigned index)
-            sources (::geometry-sources options)
-            source (when sources (get (aget ^objects sources index) (if (:aim attrs) :aim :direction)))
-            resolved (resolve-geometry head attrs (previous-for-target options head) source)
-            ;; Absent direct axes pack channel value zero, exactly as in the
-            ;; completed frame. Reconstruct travel limits from the command.
-            pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))
-            spot (optics/beam-footprint (optics/fixture-beam head (assoc resolved :pose pose)) surface)
+      (let [spot (tracking-footprint head assigned options surface)
             next-attrs (aget assigned (int (::index next-head)))
             follower-beam (optics/fixture-beam next-head next-attrs)]
         (if-let [solution (when spot (optics/edge-aim spot follower-beam surface along))]
           (let [target (assoc next-attrs :aim (:aim solution))
                 calibrated (resolve-geometry next-head target (previous-for-target options next-head) nil)]
-            (if (:aim-reachable? calibrated)
-              (select-keys solution [:aim :contact])
-              {:reason :unreachable}))
+            (cond
+              (not (:aim-reachable? calibrated)) {:reason :unreachable}
+              (and (seq occupied)
+                   (some (fn [[id other]]
+                           (and (not= id leader) other
+                                (optics/footprints-overlap? (:footprint solution) other)))
+                         occupied)) {:reason :overlap}
+              :else solution))
           {:reason (if spot :no-tangent :missed-receiver)})))))
 
 (defn- apply-tracking! [patch ^objects assigned options]
   (let [links (:edge-tracking options)]
     (when-not (vector? links) (fail! "Edge tracking must be an ordered vector" {}))
-    (loop [pending (seq links), seen #{}, suppressed #{}, reports []]
+    ;; Seed independently aimed leaders first. Earlier successful followers
+    ;; reserve space in link order. A single link already has a common tangent.
+    (loop [pending (seq links), seen #{}, suppressed #{}, reports []
+           occupied (when (next links) (tracking-anchors patch assigned options links))]
       (if (seq pending)
-        (let [{:keys [leader follower] :as link} (first pending)]
+        (let [{:keys [leader follower surface] :as link} (first pending)]
           (when (or (nil? leader) (nil? follower) (= leader follower) (contains? seen follower))
             (fail! "Each follower must be new and distinct from its leader" {:link link}))
-          (let [result (if (contains? suppressed leader)
+          (let [surface-id (:id surface)
+                footprints (get occupied surface-id)
+                result (if (contains? suppressed leader)
                          {:reason :leader-suppressed}
-                         (track-edge patch assigned options link))
+                         (track-edge patch assigned options footprints link))
                 failed? (contains? result :reason)]
             (when-let [fixture (get (:by-id patch) follower)]
               (let [index (int (::index fixture))
@@ -1150,7 +1174,10 @@
                 (aset assigned index (if failed? (assoc attrs :dimmer 0.0) (assoc attrs :aim (:aim result))))))
             (recur (next pending) (conj seen leader follower)
                    (cond-> suppressed failed? (conj follower))
-                   (conj reports (merge {:leader leader :follower follower} result)))))
+                   (conj reports (merge {:leader leader :follower follower}
+                                        (select-keys result [:aim :contact :reason])))
+                   (cond-> occupied
+                     (and footprints (not failed?)) (assoc-in [surface-id follower] (:footprint result))))))
         reports))))
 
 (defn- finish-contributions [patch ^objects assigned options values present pack]
@@ -1296,8 +1323,10 @@
   stays per block and sparse geometric target; no source maps are copied per pixel.
   Optional :edge-tracking links run after blending. Each {:leader id :follower id
   :surface receiver :along xyz} places the next beam tangent to its leader on the
-  receiver. A missed or unreachable spot suppresses that follower's light for
-  the frame and the returned :edge-tracking reports its reason.
+  receiver. Independently aimed leaders and earlier followers take precedence
+  when multiple links place light on the same receiver. A missed, unreachable,
+  or overlapping spot suppresses that follower's light for the frame and the
+  returned :edge-tracking reports its reason.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))
