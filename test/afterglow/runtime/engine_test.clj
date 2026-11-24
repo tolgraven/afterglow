@@ -118,6 +118,31 @@
     (is (= 3 (:epoch snapshot)))
     (is (= "test-show" (:show-id snapshot)))))
 
+(deftest opaque-intents-keep-their-captured-origin-in-merge-order
+  (let [done (instance "finished" :priority -1 :cue-id :one-shot :effect-id :flash :effect-version 2
+                       :definition (assoc definition :id :flash :version 2) :source {:adapter :push})
+        live (instance "running" :source {:adapter :studio})
+        show (model live done)
+        values [:spark {:type :echo}]
+        finish-intent {:type :instance/finished :instance-id "finished" :reason :effect-complete}
+        compile-step (fn [{:keys [id]}]
+                       #(assoc % :intents values :done? (= :flash id)))
+        frame {:time-ms 20}
+        result (engine/advance show frame compile-step)
+        reverse-order (fn [evaluate prepared] (reverse (mapv evaluate prepared)))
+        flash-source {:instance-id "finished" :effect-id :flash :effect-version 2
+                      :cue-id :one-shot :adapter :push}
+        pulse-source {:instance-id "running" :effect-id :pulse :effect-version 1
+                      :cue-id :pulse :adapter :studio}]
+    (is (= #{"running"} (set (keys (get-in result [:model :instances])))))
+    (is (= (into (conj values finish-intent) values) (:intents result)))
+    (is (= [{:intent :spark :source flash-source} {:intent {:type :echo} :source flash-source}
+            {:intent finish-intent :source flash-source}
+            {:intent :spark :source pulse-source} {:intent {:type :echo} :source pulse-source}]
+           (:intent-emissions result)))
+    (is (= (:intent-emissions result)
+           (:intent-emissions (engine/advance show frame compile-step reverse-order))))))
+
 (deftest timed-one-shot-and-release-tail
   (let [show (model (instance "shot" :mode :one-shot :duration-ms 100
                               :release-duration-ms 50))

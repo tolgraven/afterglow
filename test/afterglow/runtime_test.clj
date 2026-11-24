@@ -64,12 +64,16 @@
 (deftest final-frame-contributions-and-removal
   (let [finish #(-> % contribution (assoc :done? true))
         context (frame (instance :ending finish) (instance :running identity))
-        result (runtime/render-frame context)]
+        result (runtime/render-frame context)
+        next-result (runtime/render-frame result)]
     (is (= [[:ending {}]] (:assignments result)))
     (is (= [{:source :ending :event :observed}] (:intents result)))
+    (is (= [{:intent {:source :ending :event :observed} :source {:instance-id :ending}}]
+           (:intent-emissions result)))
     (is (= [:running] (mapv :id (:effects result))))
-    (is (= [] (:assignments (runtime/render-frame result))))
-    (is (= [] (:intents (runtime/render-frame result))))))
+    (is (= [] (:assignments next-result)))
+    (is (= [] (:intents next-result)))
+    (is (not (contains? next-result :intent-emissions)))))
 
 (deftest effect-cannot-replace-shared-frame-or-instance-identity
   (let [context (frame (instance :original #(assoc % :frame {:number -1}
