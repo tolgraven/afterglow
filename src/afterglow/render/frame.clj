@@ -1105,29 +1105,43 @@
 (defn- tracking-ids [links]
   (into #{} (mapcat (juxt :leader :follower)) links))
 
+(defn- tracking-beam [head resolved]
+  ;; Missing direct axes pack as zero. Use the calibrated direction, which
+  ;; also accounts for a leader's mechanical stops.
+  (let [pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))]
+    (optics/fixture-beam head (assoc resolved :pose pose))))
+
 (defn- tracking-footprint [head ^objects assigned options surface]
   (let [index (int (::index head))
         attrs (aget assigned index)
         sources (::geometry-sources options)
         source (when sources (get (aget ^objects sources index) (if (:aim attrs) :aim :direction)))
-        resolved (resolve-geometry head attrs (previous-for-target options head) source)
-        ;; Absent direct axes pack channel value zero, exactly as in the
-        ;; completed frame. Reconstruct travel limits from the command.
-        pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))]
-    (optics/beam-footprint (optics/fixture-beam head (assoc resolved :pose pose)) surface)))
+        resolved (resolve-geometry head attrs (previous-for-target options head) source)]
+    (optics/beam-footprint (tracking-beam head resolved) surface)))
 
-(defn- tracking-anchors [patch ^objects assigned options links]
-  (let [followers (set (map :follower links))]
-    (into {}
-          (for [[id group] (group-by (comp :id :surface) links)
-                :when (and id (next group))]
-            [id (into {}
-                      (keep (fn [leader]
-                              (when-let [head (get (:by-id patch) leader)]
-                                [leader (tracking-footprint head assigned options (:surface (first group)))])))
-                      (remove followers (distinct (map :leader group))))]))))
+(defn- tracking-anchors [patch ^objects assigned options shared followers]
+  (into {}
+        (for [[id group] shared]
+          [id (into {}
+                    (keep (fn [leader]
+                            (when-let [head (get (:by-id patch) leader)]
+                              (when-let [spot (tracking-footprint head assigned options (:surface (first group)))]
+                                [leader spot]))))
+                    (remove followers (distinct (map :leader group))))])))
 
-(defn- track-edge [patch ^objects assigned options occupied {:keys [leader follower surface along]}]
+(defn- follower-footprints [head calibrated placement occupied outgoing]
+  (let [placement-id (:surface-id placement)
+        footprints (if (contains? occupied placement-id) {placement-id placement} {})]
+    (if (seq outgoing)
+      (let [beam (tracking-beam head calibrated)]
+        (reduce-kv (fn [spots id surface]
+                     (if (= id placement-id) spots
+                       (if-let [spot (optics/beam-footprint beam surface)]
+                         (assoc spots id spot) spots)))
+                   footprints outgoing))
+      footprints)))
+
+(defn- track-edge [patch ^objects assigned options occupied outgoing {:keys [leader follower surface along]}]
   (let [head (get (:by-id patch) leader)
         next-head (get (:by-id patch) follower)]
     (cond
@@ -1141,44 +1155,52 @@
         (if-let [solution (when spot (optics/edge-aim spot follower-beam surface along))]
           (let [target (assoc next-attrs :aim (:aim solution))
                 calibrated (resolve-geometry next-head target (previous-for-target options next-head) nil)]
-            (cond
-              (not (:aim-reachable? calibrated)) {:reason :unreachable}
-              (and (seq occupied)
-                   (some (fn [[id other]]
-                           (and (not= id leader) other
-                                (optics/footprints-overlap? (:footprint solution) other)))
-                         occupied)) {:reason :overlap}
-              :else solution))
+            (if-not (:aim-reachable? calibrated)
+              {:reason :unreachable}
+              (let [footprints (follower-footprints next-head calibrated (:footprint solution) occupied (get outgoing follower))
+                    overlap? (some (fn [[receiver spot]]
+                                     (some (fn [[id other]]
+                                             (and (or (not= receiver (:id surface)) (not= id leader))
+                                                  (optics/footprints-overlap? spot other)))
+                                           (get occupied receiver)))
+                                   footprints)]
+                (if overlap? {:reason :overlap}
+                  (assoc solution :footprints footprints)))))
           {:reason (if spot :no-tangent :missed-receiver)})))))
 
 (defn- apply-tracking! [patch ^objects assigned options]
   (let [links (:edge-tracking options)]
     (when-not (vector? links) (fail! "Edge tracking must be an ordered vector" {}))
-    ;; Seed independently aimed leaders first. Earlier successful followers
-    ;; reserve space in link order. A single link already has a common tangent.
-    (loop [pending (seq links), seen #{}, suppressed #{}, reports []
-           occupied (when (next links) (tracking-anchors patch assigned options links))]
-      (if (seq pending)
-        (let [{:keys [leader follower surface] :as link} (first pending)]
-          (when (or (nil? leader) (nil? follower) (= leader follower) (contains? seen follower))
-            (fail! "Each follower must be new and distinct from its leader" {:link link}))
-          (let [surface-id (:id surface)
-                footprints (get occupied surface-id)
-                result (if (contains? suppressed leader)
-                         {:reason :leader-suppressed}
-                         (track-edge patch assigned options footprints link))
-                failed? (contains? result :reason)]
-            (when-let [fixture (get (:by-id patch) follower)]
-              (let [index (int (::index fixture))
-                    attrs (aget assigned index)]
-                (aset assigned index (if failed? (assoc attrs :dimmer 0.0) (assoc attrs :aim (:aim result))))))
-            (recur (next pending) (conj seen leader follower)
-                   (cond-> suppressed failed? (conj follower))
-                   (conj reports (merge {:leader leader :follower follower}
-                                        (select-keys result [:aim :contact :reason])))
-                   (cond-> occupied
-                     (and footprints (not failed?)) (assoc-in [surface-id follower] (:footprint result))))))
-        reports))))
+    (let [shared (into {} (filter (fn [[id group]] (and (some? id) (next group))))
+                       (group-by (comp :id :surface) links))
+          followers (set (map :follower links))
+          outgoing (reduce (fn [out {:keys [leader surface]}]
+                             (if (and (contains? followers leader) (contains? shared (:id surface)))
+                               (assoc-in out [leader (:id surface)] surface) out))
+                           {} links)]
+      ;; Seed independently aimed leaders first. Earlier successful followers
+      ;; reserve space both where placed and where they lead another link.
+      (loop [pending (seq links), seen #{}, suppressed #{}, reports []
+             occupied (tracking-anchors patch assigned options shared followers)]
+        (if (seq pending)
+          (let [{:keys [leader follower] :as link} (first pending)]
+            (when (or (nil? leader) (nil? follower) (= leader follower) (contains? seen follower))
+              (fail! "Each follower must be new and distinct from its leader" {:link link}))
+            (let [result (if (contains? suppressed leader)
+                           {:reason :leader-suppressed}
+                           (track-edge patch assigned options occupied outgoing link))
+                  failed? (contains? result :reason)]
+              (when-let [fixture (get (:by-id patch) follower)]
+                (let [index (int (::index fixture))
+                      attrs (aget assigned index)]
+                  (aset assigned index (if failed? (assoc attrs :dimmer 0.0) (assoc attrs :aim (:aim result))))))
+              (recur (next pending) (conj seen leader follower)
+                     (cond-> suppressed failed? (conj follower))
+                     (conj reports (merge {:leader leader :follower follower}
+                                          (select-keys result [:aim :contact :reason])))
+                     (reduce-kv (fn [spots id footprint] (assoc-in spots [id follower] footprint))
+                                occupied (:footprints result)))))
+          reports)))))
 
 (defn- finish-contributions [patch ^objects assigned options values present pack]
   (let [links (:edge-tracking options)
@@ -1324,9 +1346,9 @@
   Optional :edge-tracking links run after blending. Each {:leader id :follower id
   :surface receiver :along xyz} places the next beam tangent to its leader on the
   receiver. Independently aimed leaders and earlier followers take precedence
-  when multiple links place light on the same receiver. A missed, unreachable,
-  or overlapping spot suppresses that follower's light for the frame and the
-  returned :edge-tracking reports its reason.
+  on shared receivers, including where a follower leads another link. A missed,
+  unreachable, or overlapping spot suppresses that follower's light for the
+  frame and the returned :edge-tracking reports its reason.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))

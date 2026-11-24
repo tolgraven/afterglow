@@ -90,11 +90,11 @@
     (is (> (abs (- 2.0 (first (:hit a)))) 1))
     (is (near (second (x-extents a)) (first (x-extents b))))))
 
-(def collision-rig
-  (mapv (fn [i id]
-          {:id id :position [i 3 0] :beam-angle 20 :lens-radius-m 0.1
-           :universe 1 :address (+ 1 (* i 11)) :channels (:channels (first rig))})
-        (range 4) [:one :two :three :four]))
+(defn- collision-head [i id]
+  {:id id :position [i 3 0] :beam-angle 20 :lens-radius-m 0.1
+   :universe 1 :address (+ 1 (* i 11)) :channels (:channels (first rig))})
+
+(def collision-rig (mapv collision-head (range) [:one :two :three :four]))
 
 (defn- collision-assignments [third-x]
   (into [(assign :one :aim [0 0 0]) (assign :three :aim [third-x 0 0])]
@@ -133,3 +133,32 @@
     (is (= [0.0 0.0 0.0] (get-in blocked [:values :two :emitted-color])))
     (is (every? :contact (:edge-tracking clear)))
     (is (= [1.0 0.4 0.2] (get-in clear [:values :two :emitted-color])))))
+
+(deftest a-floor-follower-reserves-space-where-it-also-leads-on-a-wall
+  (let [heads (mapv #(assoc-in % [:position 2] -2)
+                    (conj collision-rig (collision-head 4 :five)))
+        patch (frame/compile-patch heads)
+        wall {:id :wall :point [0 0 0] :normal [0 0 1] :size [40 40]}
+        floor-link (first links)
+        wall-link {:leader :two :follower :three :surface wall :along [-1 0 0]}
+        independent {:leader :four :follower :five :surface wall :along [-1 0 0]}
+        red (fn [out]
+              (mapv #(bit-and 255 (aget ^bytes (get-in out [:universes 1]) (+ (:address %) 3))) heads))]
+    (doseq [rich? [true false]]
+      (let [render (fn [x tracking]
+                     (let [input (into [(assign :one :aim [0 0 3]) (assign :four :aim [x 2 0])]
+                                       (map #(assign (:id %) :red 1.0)) heads)]
+                       (frame/resolve-frame patch input {:edge-tracking tracking :include-values? rich?
+                                                        :compact-values? (not rich?)})))
+            follower-first (render 3 [floor-link independent wall-link])
+            follower-last (render 3 [independent floor-link wall-link])
+            hits-anchor (render 2 [floor-link independent wall-link])
+            cleared (render 4 [floor-link independent wall-link])]
+        (is (= [nil :overlap nil] (mapv :reason (:edge-tracking follower-first))))
+        (is (= [255 255 255 255 0] (red follower-first)))
+        (is (= [nil :overlap :leader-suppressed] (mapv :reason (:edge-tracking follower-last))))
+        (is (= [255 0 0 255 255] (red follower-last)))
+        (is (= [:overlap nil :leader-suppressed] (mapv :reason (:edge-tracking hits-anchor))))
+        (is (= [255 0 0 255 255] (red hits-anchor)))
+        (is (every? :contact (:edge-tracking cleared)))
+        (is (= [255 255 255 255 255] (red cleared)))))))
