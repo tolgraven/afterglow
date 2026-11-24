@@ -7,12 +7,17 @@
 (def parameter-views [:auto :history :spatial :controls])
 (def history-spans [0.5 1 2 4 8 16])
 (def camera-lenses [:fit :panorama :audience])
+(def parameter-only-capabilities {:modes #{:parameters} :actions #{}})
 
 (defn option [state model k default]
   (get state k (get-in model [:settings :controllers :push-display k] default)))
 
 (defn mode [state model]
-  (or (:display-mode state) (get-in model [:settings :controllers :push-display :mode]) :parameters))
+  (let [supported (get-in state [:display-capabilities :modes])
+        preferred [(:display-mode state) (get-in model [:settings :controllers :push-display :mode]) :parameters]]
+    (if supported
+      (or (some supported preferred) (first (sort supported)))
+      (some identity preferred))))
 
 (defn page-ids [model]
   (vec (sort-by str (keys (:pages model)))))
@@ -41,6 +46,14 @@
 (def ^:private mode-actions
   {:display/pages :pages :display/simulator :simulator :display/rig :rig
    :display/parameters :parameters :display/audio :audio :display/block-trace :block-trace})
+
+(defn action-supported? [state action]
+  (let [{:keys [modes actions]} (:display-capabilities state)
+        action (if (vector? action) (first action) action)
+        next-mode (if (= :display/parameter-view action) :parameters (mode-actions action))]
+    (and action
+         (or (nil? actions) (contains? actions action))
+         (or (nil? modes) (nil? next-mode) (contains? modes next-mode)))))
 
 (defn action? [action]
   (or (contains? mode-actions action)

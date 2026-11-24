@@ -1,5 +1,6 @@
 (ns afterglow.control.devices.push-2-test
   (:require [clojure.test :refer [deftest is]]
+            [afterglow.control.display :as display]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.session-test :as fixture]
             [afterglow.control.devices.push-2 :as push]
@@ -347,7 +348,36 @@
         (click! 110)
         (cc! 49 127) (click! 110) (click! 62) (cc! 49 0)
         (is (= [:parameters :history 2] ((juxt :display-mode :parameter-view :history-beats) (view h))))
+        (click! 113)
+        (is (= :audio (:display-mode (view h))))
+        (cc! 49 127) (click! 113) (cc! 49 0)
+        (is (= :block-trace (:display-mode (view h))))
         (is (= before @(:show h))))
+      (finally (finish! h)))))
+
+(deftest parameter-only-display-keeps-top-row-and-navigation-on-parameters
+  (let [h (fixture/harness {:profile (push/profile {:display {:display-capabilities display/parameter-only-capabilities}})})
+        cc! (fn [cc v] (receive! h [0xb0 cc v]))
+        click! (fn [cc] (cc! cc 127) (cc! cc 0))]
+    (swap! (:show h) #(-> %
+                         (assoc-in [:settings :controllers :push-display] {:mode :pages :parameter-view :history})
+                         (assoc-in [:pages :archive] {:id :archive :cells {}})
+                         (update-in [:registry :effects :wash] assoc :params schemas :param-order order)))
+    (try
+      (fixture/ready! h)
+      (is (= :parameters (:display-mode (view h))))
+      (let [first-id (launch! h 37) second-id (launch! h 36)]
+        (click! 20)
+        (is (true? (:enabled (values h second-id))))
+        (doseq [cc [51 31 110 113 112]] (click! cc))
+        (cc! 49 127)
+        (doseq [cc [51 31 110 113 112 63]] (click! cc))
+        (cc! 49 0)
+        (is (= [:ninth :tenth] (mapv :id (:parameters (view h)))))
+        (is (= 1 (get-in (view h) [:parameter-bank :index])))
+        (click! 62)
+        (is (= [:parameters :main first-id] ((juxt :display-mode :page :instance-id) (view h))))
+        (is (= {:mode :pages :parameter-view :history} (get-in @(:show h) [:settings :controllers :push-display]))))
       (finally (finish! h)))))
 
 (deftest shift-encoder-follows-the-selected-pan-channel

@@ -1,7 +1,8 @@
 (ns afterglow.control.devices.repl
   "Explicit REPL entry points for real devices. Supply a host model snapshot,
   synchronous command dispatcher and logical clock; importing does no I/O."
-  (:require [afterglow.control.devices.session :as session]
+  (:require [afterglow.control.display :as display]
+            [afterglow.control.devices.session :as session]
             [afterglow.control.devices.push-2 :as push]
             [afterglow.control.devices.push-3 :as push-3]
             [afterglow.control.devices.seaboard :as seaboard]
@@ -35,7 +36,8 @@
   (let [options (cond-> (with-feedback options)
                   (not (:midi options)) (assoc :midi (transports/midi-transport options))
                   (and (:native-display? options) (not (:display options)))
-                  (assoc :display (transports/wayang-display)))]
+                  (assoc :display (assoc (transports/wayang-display)
+                                         :display-capabilities display/parameter-only-capabilities)))]
     (push/connect! options)))
 
 (defn open-midi! [options]
