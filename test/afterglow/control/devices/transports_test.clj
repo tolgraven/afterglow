@@ -89,6 +89,50 @@
           (is (< (Math/abs (- 1.0 (/ (Double/parseDouble text) value))) 1e-5))))
       (finally (.dispose graphics)))))
 
+(deftest native-readouts-distinguish-adjacent-physical-codes
+  (let [image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)
+        graphics (.createGraphics image)]
+    (try
+      (.setFont graphics (Font. "SansSerif" Font/PLAIN 14))
+      (let [metrics (.getFontMetrics graphics)
+            label #(#'transports/parameter-readout metrics % 104)]
+        (doseq [[bits code max-code expected] [[8 127 255.0 ["0.498" "0.502"]]
+                                               [16 32767 65535.0 ["0.49999" "0.50001"]]]
+                :let [parameter {:schema {:type :number :bounds [0 1] :dmx-bits bits}
+                                 :value (/ code max-code)}]]
+          (is (= expected [(label parameter) (label (assoc parameter :effective-value (/ (inc code) max-code)))])))
+        (is (= "-0.12…0.23" (label {:schema {:type :range :bounds [-360 360] :dmx-bits 16}
+                                   :value [-0.123 0.234]})))
+        (is (= "-0.5 · 0.5" (label {:schema {:type :vector :bounds [-0.5 0.5] :dmx-bits 8}
+                                    :value [-0.5 0.5]})))
+        (is (= "-0.00002" (label {:schema {:type :number :bounds [-0.5 0.5] :dmx-bits 16}
+                                  :value -0.0000153})))
+        (is (= "1.0E-10" (label {:schema {:type :number} :value 1e-10}))))
+      (finally (.dispose graphics)))))
+
+(deftest native-waveform-draws-only-current-supplied-samples
+  (let [image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)
+        parameter {:name "Waveform" :value 0 :preview-status :ready :preview-samples [0 1 0 -1 0]}
+        pixels (fn [row options]
+                 (transports/render-view! image (assoc options :parameters [row]))
+                 (vec (.getRGB image 0 115 120 18 nil 0 120)))
+        footer-pixels (fn [row]
+                        (transports/render-view! image {:parameters [row] :labels ["Orchid"]})
+                        (vec (.getRGB image 0 133 120 27 nil 0 120)))
+        empty-pixels (pixels (dissoc parameter :preview-samples) {})]
+    (is (not= empty-pixels (pixels parameter {})))
+    (is (not= (pixels parameter {}) (pixels (assoc parameter :preview-samples [1 1 0 0 1]) {})))
+    (is (= (footer-pixels (dissoc parameter :preview-samples)) (footer-pixels parameter)))
+    (is (= empty-pixels (pixels (dissoc parameter :preview-status) {})))
+    (is (= empty-pixels (pixels (-> parameter (dissoc :preview-status) (assoc :source-state :active)) {})))
+    (is (not= empty-pixels (pixels (assoc parameter :source-state :active) {})))
+    (doseq [state [:held :pending :error]]
+      (is (= empty-pixels (pixels (assoc parameter :source-state state) {}))))
+    (doseq [status [:stale :unavailable]]
+      (is (= empty-pixels (pixels (assoc parameter :preview-status status) {}))))
+    (is (= empty-pixels (pixels (assoc parameter :preview-samples [0 ##Inf 1]) {})))
+    (is (= empty-pixels (pixels parameter {:target-picker {:open? true}})))))
+
 (deftest a-slow-native-driver-never-owns-the-caller-and-retries-reuse-its-scan
   (let [running (promise)
         release (promise)

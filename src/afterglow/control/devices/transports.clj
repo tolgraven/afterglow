@@ -2,11 +2,13 @@
   "Optional real transports, acquired only through returned open! functions.
   Java MIDI uses explicit ports; OSC and Wayang are loaded lazily on acquisition."
   (:require [afterglow.control.params :as params]
+            [afterglow.control.resolution :as resolution]
             [clojure.string :as str])
   (:import [javax.sound.midi MidiSystem MidiDevice MidiMessage Receiver ShortMessage SysexMessage]
-           [java.awt Color Font FontMetrics RenderingHints]
+           [java.awt Color Font FontMetrics Graphics2D RenderingHints]
+           [java.awt.geom Path2D$Double]
            [java.awt.image BufferedImage]
-           [java.math BigDecimal]
+           [java.math BigDecimal RoundingMode]
            [java.util Locale]
            [java.util.concurrent Callable ExecutionException Executors FutureTask ThreadFactory TimeUnit TimeoutException]))
 
@@ -193,6 +195,50 @@
               (when (fits? "…") "…")
               ""))))))
 
+(defn- channel-value-label [{:keys [dmx-bits bounds]} value]
+  (when (and (params/finite-number? value) (not (integer? value)))
+    (let [[low high] bounds
+          bounds (if (and (params/finite-number? low) (params/finite-number? high) (< low high)) bounds [0 1])]
+      (when-let [step (resolution/fine-step dmx-bits bounds)]
+        (let [places (int (max 0 (min 15 (Math/ceil (- (Math/log10 step))))))
+              ^BigDecimal number (bigdec (if (ratio? value) (double value) value))]
+          (.toPlainString (.stripTrailingZeros (.setScale number places RoundingMode/HALF_UP))))))))
+
+(defn- parameter-readout [^FontMetrics metrics {:keys [schema value effective-value component]} available-width]
+  (let [shown (if (some? effective-value) effective-value value)
+        fits? #(<= (.stringWidth metrics ^String %) available-width)
+        label (fn [value]
+                (or (when-let [text (channel-value-label schema value)]
+                      (when (fits? text) text))
+                    (parameter-value-label metrics value available-width)))
+        choice (some #(when (= shown (:value %)) (:label %)) (:choices schema))]
+    (cond
+      (and (string? choice) (fits? choice)) choice
+      (and (#{:vector :range} (:type schema)) (sequential? shown))
+      (let [components (vec (take 9 shown))
+            text (str/join (if (= :range (:type schema)) "…" " · ") (map label components))]
+        (if (and (<= (count components) 8) (fits? text))
+          text
+          (label (nth shown (or component 0) nil))))
+      :else (label shown))))
+
+(defn- draw-waveform! [^Graphics2D graphics {:keys [source-state preview-status preview-samples]} x width]
+  (when (and (contains? #{nil :active} source-state)
+             (= :ready preview-status)
+             (sequential? preview-samples)
+             (pos? width))
+    (let [samples (mapv #(if (map? %) (:value %) %) (take 256 preview-samples))]
+      (when (and (< 1 (count samples)) (every? params/finite-number? samples))
+        (let [low (apply min samples) high (apply max samples)
+              span (- (* 0.5 high) (* 0.5 low))
+              trace (Path2D$Double.)]
+          (doseq [[index sample] (map-indexed vector samples)]
+            (let [x (+ x (* width (/ (double index) (dec (count samples)))))
+                  y (if (pos? span) (- 130 (* 14 (/ (- (* 0.5 sample) (* 0.5 low)) span))) 123)]
+              (if (zero? index) (.moveTo trace x y) (.lineTo trace x y))))
+          (.setColor graphics (Color. 105 192 236))
+          (.draw graphics trace))))))
+
 (defn render-view!
   "Render a shared Push display view into an owned BufferedImage. This AWT
   boundary is independently testable headlessly; it does not send a frame."
@@ -212,11 +258,14 @@
                                  (when (:fine? view) "  Fine")) 16 52)
       (let [metrics (.getFontMetrics graphics)
             available-width (max 0 (- cell 16))]
-        (doseq [[index {:keys [name value]}] (map-indexed vector (take 8 (:parameters view)))]
-          (.setColor graphics (Color. 105 192 236))
-          (.drawString graphics (subs (str name) 0 (min 12 (count (str name)))) (+ 8 (* cell index)) 88)
-          (.setColor graphics Color/WHITE)
-          (.drawString graphics ^String (parameter-value-label metrics value available-width) (+ 8 (* cell index)) 112)))
+        (doseq [[index {:keys [name] :as parameter}] (map-indexed vector (take 8 (:parameters view)))]
+          (let [x (+ 8 (* cell index))]
+            (.setColor graphics (Color. 105 192 236))
+            (.drawString graphics (subs (str name) 0 (min 12 (count (str name)))) x 88)
+            (.setColor graphics Color/WHITE)
+            (.drawString graphics ^String (parameter-readout metrics parameter available-width) x 112)
+            (when-not (get-in view [:target-picker :open?])
+              (draw-waveform! graphics parameter x available-width)))))
       (doseq [[index label] (map-indexed vector (take 8 (:labels view)))]
         (.setColor graphics (Color. 160 170 184))
         (.drawString graphics (subs (str label) 0 (min 12 (count (str label)))) (+ 8 (* cell index)) (- height 15)))
