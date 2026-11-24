@@ -40,7 +40,8 @@
           amount [0.0 0.25 1.0]]
     (let [fraction (c amount)
           expression (ir/partial-max-blend prior incoming fraction)
-          reference {:op :mix :args [prior {:op :max :args [prior incoming]} fraction]}
+          delta {:op :subtract :args [{:op :max :args [prior incoming]} prior]}
+          reference {:op :add :args [prior {:op :multiply :args [fraction delta]}]}
           result (ir/evaluate reference {})
           expected (if (vector? result) result [result])
           outputs {:test expression}
@@ -51,7 +52,7 @@
       (is (= (into expected expected) (vec values)))
       (is (empty? (:inputs shader)))
       (is (= (count expected) (:stride shader)))
-      (is (str/includes? (:source shader) "return mix(prior, max(prior, incoming), amount);"))
+      (is (str/includes? (:source shader) "return prior + amount * (max(prior, incoming) - prior);"))
       (is (str/includes? (:source (ir/emit-glsl expression)) "afterglow_max_blend("))
       (is (seq (ir/validate-expression (into {} expression))))
       (is (not (str/includes? (:source (ir/emit-glsl-batch {:test reference})) "afterglow_max_blend"))))))

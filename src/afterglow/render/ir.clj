@@ -127,7 +127,8 @@
                      :clamp (fn [x lo hi]
                               (when (> lo hi) (invalid! path "Clamp lower bound exceeds upper bound"))
                               (min hi (max lo x)))
-                     (:mix ::partial-max-blend) (fn [a b amount] (+ (* (- 1.0 amount) a) (* amount b)))
+                     :mix (fn [a b amount] (+ (* (- 1.0 amount) a) (* amount b)))
+                     ::partial-max-blend (fn [prior highest amount] (+ prior (* amount (- highest prior))))
                      nil)
         eval-fn (if (= ::partial-max-blend op)
                   (let [[previous incoming amount] (mapv :evaluate children)]
@@ -359,7 +360,7 @@
               (reify ScalarExpression
                 (evalDouble [_ inputs]
                   (let [x (.evalDouble a inputs), highest (max x (.evalDouble b inputs)), amount (.evalDouble c inputs)]
-                    (+ (* (- 1.0 amount) x) (* amount highest))))))]
+                    (+ x (* amount (- highest x)))))))]
         (reify ScalarExpression
           (evalDouble [_ inputs] (finite-result (.evalDouble ^ScalarExpression operation inputs) path)))))))
 
@@ -578,7 +579,7 @@
   (when (::partial-max-blend used)
     (apply str (for [type ["float" "vec2" "vec3" "vec4"]]
                  (str type " afterglow_max_blend(" type " prior, " type " incoming, float amount) {\n"
-                      "  return mix(prior, max(prior, incoming), amount);\n}\n")))))
+                      "  return prior + amount * (max(prior, incoming) - prior);\n}\n")))))
 
 (defn emit-glsl
   "Generate a complete GLSL ES 3 fragment shader and binding metadata.

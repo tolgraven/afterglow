@@ -162,6 +162,9 @@
                amount (if alpha (get env alpha) 1)
                final (cond (nil? blended) nil
                            (== 1 amount) blended
+                           (= :max blend) (let [[lo hi] prior, [lower upper] blended]
+                                            (range-of [(+ lo (* amount (- lower lo)))
+                                                       (+ hi (* amount (- upper hi)))]))
                            prior (range-of [(+ (* (- 1.0 amount) (first prior)) (* amount (first blended)))
                                             (+ (* (- 1.0 amount) (second prior)) (* amount (second blended)))]))]
            (if (valid-output? attr final) (assoc ranges attr final) (reduced nil))))))

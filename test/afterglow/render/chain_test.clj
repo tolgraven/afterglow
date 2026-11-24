@@ -166,6 +166,36 @@
     (is (str/includes? source "max("))
     (is (not (str/includes? source "afterglow_max_blend")))))
 
+(deftest no-op-partial-maxima-preserve-the-unfused-dmx-rounding-boundary
+  (let [base (block {:focus (lit 0.1)} :replace 1 default-env)
+        no-op (block {:focus (lit 0.05)} :max 0.5 default-env)
+        last-stage (assoc-in no-op [:batch :opacity] 0.3)
+        stages (into [base] (concat (repeat 9 no-op) [last-stage]))
+        fused (chain/fuse (chain/create-cache) prepare stages)
+        expected (oracle stages)
+        actual (oracle fused)]
+    (is (= 1 (count fused)))
+    (is (= 26 (get-in expected [:universes 1 0])))
+    (is (= expected actual))))
+
+(deftest following-add-validates-the-composited-range
+  (let [base (block {:focus (lit 0.5)} :replace 1 default-env)
+        partial-max (block {:focus (lit 0.75)} :max 0.5 default-env)
+        valid-add (block {:focus (lit 0.75)} :add 0.5 default-env)
+        invalid-add (-> valid-add
+                        (assoc-in [:batch :opacity] 0.75)
+                        (assoc :source {:instance-id :invalid-add}))
+        draw (partial chain/fuse (chain/create-cache) prepare)
+        valid [base partial-max valid-add]
+        invalid [base partial-max invalid-add]]
+    (is (= 1 (count (draw valid))))
+    (is (= (oracle valid) (oracle (draw valid))))
+    (try
+      (oracle (draw invalid))
+      (is false "The fractional add exceeds the normalized range")
+      (catch clojure.lang.ExceptionInfo e
+        (is (= (:source invalid-add) (:effect-source (ex-data e))))))))
+
 (deftest repeated-fixture-rows-and-illegal-geometry-blends-retain-stage-order
   (let [cache (chain/create-cache)
         base (block {:focus (lit 0.2)} :replace 1 default-env)
