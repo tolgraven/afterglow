@@ -18,7 +18,9 @@
     (if (= cue-id (first ids))
       model
       (assoc-in model history-path
-                (into [cue-id] (comp (remove #{cue-id}) (take (dec limit))) ids)))))
+                (into [cue-id] (comp (remove #{cue-id})
+                                     (filter (get-in model [:registry :cues]))
+                                     (take (dec limit))) ids)))))
 
 (defn forget-cue [model cue-id]
   (let [ids (recent-ids model)]

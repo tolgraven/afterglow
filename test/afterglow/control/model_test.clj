@@ -239,7 +239,8 @@
         show (reduce launch published ids)
         page (views/page-view show pages/recent-page-id)
         expected (vec (reverse (drop 2 ids)))
-        revisited (launch show (peek expected))]
+        revisited (launch show (peek expected))
+        stale (update-in show [:registry :cues] dissoc (first expected))]
     (is (empty? (recent-cue-ids published)))
     (is (= {:id pages/recent-page-id :name "Recent cues" :columns 8 :rows 8}
            (dissoc page :cells)))
@@ -250,6 +251,7 @@
            (mapv (fn [{:keys [x y]}] (pages/cue-id-at show pages/recent-page-id [x y])) (:cells page))))
     (is (= (into [(peek expected)] (pop expected)) (recent-cue-ids revisited)))
     (is (= (recent-cue-ids revisited) (recent-cue-ids (launch revisited (peek expected)))))
+    (is (= (into [(first ids)] (rest expected)) (recent-cue-ids (launch stale (first ids)))))
     (is (identical? (:pages authored) (:pages revisited)))
     (is (= page (peek (:pages (views/snapshot show)))))))
 
