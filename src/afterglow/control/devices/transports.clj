@@ -198,20 +198,31 @@
 (defn- channel-value-label [{:keys [dmx-bits bounds]} value]
   (when (and (params/finite-number? value) (not (integer? value)))
     (let [[low high] bounds
-          bounds (if (and (params/finite-number? low) (params/finite-number? high) (< low high)) bounds [0 1])]
+          bounds (if (and (params/finite-number? low) (params/finite-number? high) (< low high))
+                   ;; The authored interval may be wider than a signed long.
+                   (if (and (integer? low) (integer? high)) [(bigint low) (bigint high)] bounds)
+                   [0 1])]
       (when-let [step (resolution/fine-step dmx-bits bounds)]
-        (let [places (int (max 0 (min 15 (Math/ceil (- (Math/log10 step))))))
-              ^BigDecimal number (bigdec (if (ratio? value) (double value) value))]
-          (.toPlainString (.stripTrailingZeros (.setScale number places RoundingMode/HALF_UP))))))))
+        (when (and (params/finite-number? step) (pos? step))
+          (let [places (int (max 0 (Math/ceil (- (Math/log10 step)))))]
+            (when (<= places 15)
+              (let [^BigDecimal number (bigdec (if (ratio? value) (double value) value))]
+                (.toPlainString (.stripTrailingZeros (.setScale number places RoundingMode/HALF_UP)))))))))))
 
-(defn- parameter-readout [^FontMetrics metrics {:keys [schema value effective-value component]} available-width]
-  (let [shown (if (some? effective-value) effective-value value)
+(defn- fitted-value-label [^FontMetrics metrics schema value width]
+  (or (when-let [text (channel-value-label schema value)]
+        (when (<= (.stringWidth metrics text) width) text))
+      (parameter-value-label metrics value width)))
+
+(defn- shown-value [{:keys [value effective-value]}]
+  (if (some? effective-value) effective-value value))
+
+(defn- parameter-readout [^FontMetrics metrics {:keys [schema component] :as parameter} available-width]
+  (let [shown (shown-value parameter)
         fits? #(<= (.stringWidth metrics ^String %) available-width)
-        label (fn [value]
-                (or (when-let [text (channel-value-label schema value)]
-                      (when (fits? text) text))
-                    (parameter-value-label metrics value available-width)))
-        choice (some #(when (= shown (:value %)) (:label %)) (:choices schema))]
+        label #(fitted-value-label metrics schema % available-width)
+        choice (when (sequential? (:choices schema))
+                 (some #(when (= shown (:value %)) (:label %)) (:choices schema)))]
     (cond
       (and (string? choice) (fits? choice)) choice
       (and (#{:vector :range} (:type schema)) (sequential? shown))
@@ -221,6 +232,28 @@
           text
           (label (nth shown (or component 0) nil))))
       :else (label shown))))
+
+(defn- color-readouts [^FontMetrics metrics schema values width]
+  (let [schema (assoc schema :bounds [0.0 1.0])]
+    (mapv (fn [^String channel value]
+            (let [prefix (str channel " ")
+                  available (- width (.stringWidth metrics prefix))
+                  text (channel-value-label schema value)]
+              (cond
+                (and text (<= (.stringWidth metrics text) available)) (str prefix text)
+                (and text (<= (.stringWidth metrics "…") available)) (str prefix "…")
+                (and (nil? text) (pos? available)) (str prefix (parameter-value-label metrics value available))
+                (<= (.stringWidth metrics channel) width) channel
+                :else "")))
+          ["R" "G" "B" "W"] (take 4 values))))
+
+(defn- draw-color-readouts! [^Graphics2D graphics schema values x width]
+  (let [font (.getFont graphics)]
+    (try
+      (.setFont graphics (.deriveFont font (float 11)))
+      (doseq [[index text] (map-indexed vector (color-readouts (.getFontMetrics graphics) schema values width))]
+        (.drawString graphics ^String text x (+ 100 (* index 10))))
+      (finally (.setFont graphics font)))))
 
 (defn- draw-waveform! [^Graphics2D graphics {:keys [source-state preview-status preview-samples]} x width]
   (when (and (contains? #{nil :active} source-state)
@@ -258,14 +291,18 @@
                                  (when (:fine? view) "  Fine")) 16 52)
       (let [metrics (.getFontMetrics graphics)
             available-width (max 0 (- cell 16))]
-        (doseq [[index {:keys [name] :as parameter}] (map-indexed vector (take 8 (:parameters view)))]
-          (let [x (+ 8 (* cell index))]
+        (doseq [[index {:keys [name schema] :as parameter}] (map-indexed vector (take 8 (:parameters view)))]
+          (let [x (+ 8 (* cell index))
+                shown (shown-value parameter)]
             (.setColor graphics (Color. 105 192 236))
             (.drawString graphics (subs (str name) 0 (min 12 (count (str name)))) x 88)
             (.setColor graphics Color/WHITE)
-            (.drawString graphics ^String (parameter-readout metrics parameter available-width) x 112)
-            (when-not (get-in view [:target-picker :open?])
-              (draw-waveform! graphics parameter x available-width)))))
+            (if (and (= :color (:type schema)) (sequential? shown))
+              (draw-color-readouts! graphics schema shown x available-width)
+              (do
+                (.drawString graphics ^String (parameter-readout metrics parameter available-width) x 112)
+                (when-not (get-in view [:target-picker :open?])
+                  (draw-waveform! graphics parameter x available-width)))))))
       (doseq [[index label] (map-indexed vector (take 8 (:labels view)))]
         (.setColor graphics (Color. 160 170 184))
         (.drawString graphics (subs (str label) 0 (min 12 (count (str label)))) (+ 8 (* cell index)) (- height 15)))

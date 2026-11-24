@@ -1,5 +1,6 @@
 (ns afterglow.control.devices.transports-test
   (:require [clojure.test :refer [deftest is]]
+            [afterglow.control.devices.push-2 :as push]
             [afterglow.control.devices.transports :as transports]
             [afterglow.control.devices.generic :as generic])
   (:import [java.awt Font]
@@ -107,7 +108,41 @@
                                     :value [-0.5 0.5]})))
         (is (= "-0.00002" (label {:schema {:type :number :bounds [-0.5 0.5] :dmx-bits 16}
                                   :value -0.0000153})))
-        (is (= "1.0E-10" (label {:schema {:type :number} :value 1e-10}))))
+        (is (= "1.0E-10" (label {:schema {:type :number} :value 1e-10})))
+        (is (= "0.5" (label {:schema {:type :number :choices true} :value 0.5})))
+        (is (= "Pulse" (label {:schema {:type :number :choices [{:value 0.5 :label "Pulse"}]} :value 0.5})))
+        (is (= "1" (label {:schema {:type :number :dmx-bits 16 :bounds [Long/MIN_VALUE Long/MAX_VALUE]}
+                            :value 1.234})))
+        (doseq [[bounds value] [[[(- Double/MAX_VALUE) Double/MAX_VALUE] 1.2e300]
+                                [[-1e-300 1e-300] -1.2e-301]
+                                [[(- Double/MIN_VALUE) Double/MIN_VALUE] Double/MIN_VALUE]]
+                :let [text (label {:schema {:type :number :dmx-bits 16 :bounds bounds} :value value})]]
+          (is (= value (Double/parseDouble text)))))
+      (finally (.dispose graphics)))))
+
+(deftest native-color-readout-keeps-the-labeled-components-and-physical-precision
+  (let [rgb [(/ 32767.0 65535) (/ 32768.0 65535) 1.0]
+        schema {:type :color :default rgb :dmx-bits 16}
+        instance {:id "0:1" :cue-id :wash :definition {:params {:tint schema}} :params {:tint rgb}}
+        view (push/display-view {:selected-instance "0:1" :page-id :main :origin [0 0]}
+                                {:instances {"0:1" instance}})
+        image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)
+        graphics (.createGraphics image)
+        pixels (fn [color y height]
+                 (transports/render-view! image (assoc-in view [:parameters 0 :effective-value] color))
+                 (vec (.getRGB image 0 y 120 height nil 0 120)))]
+    (try
+      (.setFont graphics (Font. "SansSerif" Font/PLAIN 11))
+      (let [metrics (.getFontMetrics graphics)
+            readouts #(#'transports/color-readouts metrics (get-in view [:parameters 0 :schema]) %1 %2)]
+        (is (= ["R 0.49999" "G 0.50001" "B 1"] (readouts rgb 104)))
+        (is (= ["R 0.49999" "G 0.50001" "B 1" "W 0.25"] (readouts (conj rgb 0.25) 104)))
+        (let [narrow-width (.stringWidth metrics "R …")
+              [red :as narrow] (readouts rgb narrow-width)]
+          (is (= "R …" red))
+          (is (every? #(<= (.stringWidth metrics ^String %) narrow-width) narrow))))
+      (is (not= (pixels nil 101 21) (pixels (assoc rgb 1 0.75) 101 21)))
+      (is (not= (pixels nil 122 11) (pixels (conj rgb 0.25) 122 11)))
       (finally (.dispose graphics)))))
 
 (deftest native-waveform-draws-only-current-supplied-samples
