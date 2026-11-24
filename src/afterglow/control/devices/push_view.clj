@@ -3,6 +3,7 @@
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.devices.target-picker :as targets]
             [afterglow.control.display :as display]
+            [afterglow.control.pages :as pages]
             [afterglow.control.parameter-edit :as parameter-edit]
             [afterglow.control.views :as views]))
 
@@ -20,7 +21,7 @@
 
 (defn- cue-at-x [state model x]
   (let [[left bottom] (:origin state)
-        cue (get-in model [:pages (:page-id state) :cells [(+ left x) bottom]])]
+        cue (pages/cue-id-at model (:page-id state) [(+ left x) bottom])]
     (get-in model [:registry :cues cue])))
 
 (defn- parameter-row [state instance effect k]

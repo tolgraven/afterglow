@@ -2,6 +2,7 @@
   "Immutable show commands. Time and identity enter through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
+            [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.targets :as targets]
             [afterglow.time :as musical-time]
@@ -56,6 +57,10 @@
      (require! (instance? Boolean (:blackout? model)) :invalid-model "Blackout must be boolean")
      (doseq [k [:registry :instances :pages :variables :transport]]
        (require! (map? (get model k)) :invalid-model "Expected map" {:field k}))
+     (require! (not-any? (fn [[id page]]
+                          (or (= id pages/recent-page-id) (= (:id page) pages/recent-page-id)))
+                        (:pages model))
+               :invalid-model "The generated recent page ID cannot be authored")
      (assoc model
             :registry (merge {:effects {} :cues {} :fixtures {} :versions {}} (:registry model))
             :transport (merge {:bpm 120 :playing? true :beat 0.0
@@ -132,7 +137,8 @@
     {:model (cond-> (-> model
                        (assoc-in [:registry kind id] definition)
                        (assoc-in [:registry :versions [kind id (:version definition)]] definition))
-              (not= definition previous) (update-in [:registry :revision] (fnil inc 0)))
+              (not= definition previous) (update-in [:registry :revision] (fnil inc 0))
+              (and (= :cues kind) (nil? previous)) (pages/forget-cue id))
      :events [{:type :registry/published :kind kind :id id :version (:version definition)}]
      :result {:id id :version (:version definition)}}))
 
@@ -247,6 +253,7 @@
       {:model (-> model
                   (update-in [:registry :cues] dissoc id)
                   (update-in [:registry :revision] (fnil inc 0))
+                  (pages/forget-cue id)
                   (update :pages (fn [pages]
                                    (into {} (map (fn [[k page]]
                                                    [k (update page :cells
@@ -258,7 +265,8 @@
                     (reject! :unknown-cue "Cue does not exist" {:cue-id (:cue-id command)})))
           effect (if cue (effect-definition model cue) (get-in model [:registry :effects (:effect-id command)]))]
       (require! effect :unknown-effect "Effect is not published")
-      (launch-instance model command cue effect))
+      (cond-> (launch-instance model command cue effect)
+        cue (update :model pages/record-launch (:cue-id command))))
     :instance/end
     (let [id (:instance-id command)
           instance (instance! model id)
@@ -347,9 +355,11 @@
       {:model (assoc-in model [:pages (:id page)] (assoc page :cells (get page :cells {})))
        :events [{:type :page/changed :page-id (:id page)}]})
     :page/delete
-    (do (require! (get-in model [:pages (:page-id command)]) :unknown-page "Page does not exist")
-        {:model (update model :pages dissoc (:page-id command))
-         :events [{:type :page/deleted :page-id (:page-id command)}]})
+    (let [id (:page-id command)]
+      (require! (and (not= id pages/recent-page-id) (get-in model [:pages id]))
+                :unknown-page "Page does not exist")
+      {:model (update model :pages dissoc id)
+       :events [{:type :page/deleted :page-id id}]})
     :show/restart
     (let [time (time! model command)]
       {:model (-> model (update :epoch inc) (assoc :instances {} :time-ms time)

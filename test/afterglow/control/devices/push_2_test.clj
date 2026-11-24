@@ -6,6 +6,7 @@
             [afterglow.control.devices.push-2 :as push]
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.model :as model]
+            [afterglow.control.pages :as pages]
             [afterglow.control.views :as views]
             [afterglow.render.frame :as frame]
             [afterglow.render.frame-test :refer [assignment bytes-at]]))
@@ -353,6 +354,30 @@
         (cc! 49 127) (click! 113) (cc! 49 0)
         (is (= :block-trace (:display-mode (view h))))
         (is (= before @(:show h))))
+      (finally (finish! h)))))
+
+(deftest recent-page-selection-launches-and-releases-the-captured-cue
+  (let [h (harness)
+        click! (fn [cc] (receive! h [0xb0 cc 127]) (receive! h [0xb0 cc 0]))
+        top-second (codec/pad-note 1 7)]
+    (try
+      (launch! h 36)
+      (receive! h [0x80 36 0])
+      (launch! h 37)
+      (let [before @(:show h)]
+        (click! 51)
+        (click! 21)
+        (is (= pages/recent-page-id (:page (view h))))
+        (is (= [0 0] (:origin (view h))))
+        (is (identical? before @(:show h))))
+      (let [held (launch! h top-second)
+            instance #(get-in @(:show h) [:instances held])]
+        (is (= :held (:cue-id (instance))))
+        (is (= :latched (pages/cue-id-at @(:show h) pages/recent-page-id [1 7])))
+        (receive! h [0x80 top-second 0])
+        (is (= :releasing (:phase (instance)))))
+      (click! 20)
+      (is (= :main (:page (view h))))
       (finally (finish! h)))))
 
 (deftest parameter-only-display-keeps-top-row-and-navigation-on-parameters

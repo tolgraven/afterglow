@@ -1,6 +1,7 @@
 (ns afterglow.control.devices.push-3-test
   (:require [clojure.test :refer [deftest is]]
             [afterglow.control.model :as model]
+            [afterglow.control.pages :as pages]
             [afterglow.control.devices.push-3 :as push]
             [afterglow.control.devices.repl :as devices]
             [afterglow.control.devices.transports :as transports]
@@ -173,6 +174,30 @@
     (is (empty? (:commands selected)))
     (is (= :pages (:display-mode (push/control-view (:state overview) show))))
     (is (= :wash (:page (push/control-view (:state selected) show))))))
+
+(deftest recent-page-selection-routes-user-mode-and-mpe-pads
+  (doseq [[mode original recent] [[:poly-aftertouch [0x93 12] [0x93 14]]
+                                  [:mpe [0x91 40] [0x92 41]]]]
+    (let [bindings {:blackout :display/pages :right [:display/select-page 1]}
+          config (cond-> {:expression-mode mode :button-bindings bindings}
+                   (= :poly-aftertouch mode) (assoc :layout (assoc-in layout [:pads [0 7]] {:channel 3 :note 14}))
+                   (= :mpe mode) (assoc :zone {:manager-channel 0 :member-channels [1 2]}
+                                        :mpe-note-cells {40 [0 0] 41 [0 7]}))
+          {:keys [show log receive device]} (harness config)]
+      (try
+        (session/open! device)
+        (@receive (conj original 127))
+        (let [before @show]
+          (@receive [0xb4 22 127])
+          (@receive [0xb4 23 127])
+          (let [view (push/control-view (:local (session/snapshot device)) @show)]
+            (is (= pages/recent-page-id (:page view)))
+            (is (= :held (get-in view [:cells 56 :cue :id]))))
+          (is (identical? before @show)))
+        (@receive (conj recent 127))
+        (is (= [:held :held] (mapv :cue-id (filter #(= :cue/launch (:op %)) @log))))
+        (is (empty? (:errors (session/snapshot device))))
+        (finally (session/close! device))))))
 
 (deftest mpe-page-selection-retains-held-voices-and-routes-new-presses
   (let [options {:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1 2]}

@@ -1,6 +1,7 @@
 (ns afterglow.control.display
   "Presentation choices owned by a control session. A display gesture never
-  changes the show or launches a cue.")
+  changes the show or launches a cue."
+  (:require [afterglow.control.pages :as pages]))
 
 (def modes #{:parameters :pages :simulator :rig :audio :block-trace})
 (def page-palettes [:both :cue :type])
@@ -20,7 +21,7 @@
       (some identity preferred))))
 
 (defn page-ids [model]
-  (vec (sort-by str (keys (:pages model)))))
+  (pages/page-ids model))
 
 (defn page-window [ids page bank]
   (let [banks (max 1 (quot (+ (count ids) 7) 8))

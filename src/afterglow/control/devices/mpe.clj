@@ -4,7 +4,8 @@
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.codecs.mpe :as codec]
             [afterglow.control.devices.expressive :as expressive]
-            [afterglow.control.devices.session :as session]))
+            [afterglow.control.devices.session :as session]
+            [afterglow.control.pages :as pages]))
 
 (def capabilities
   {:protocol :midi-1-mpe :axes codec/axes :automatic-schema-mapping? true
@@ -21,7 +22,7 @@
       (when-let [cell (get (:note-cells options) note)]
         (let [page (get state :page-id (get options :page-id :main))
               coordinate (mapv + cell (get state :origin [0 0]))]
-          (get-in model [:pages page :cells coordinate])))
+          (pages/cue-id-at model page coordinate)))
       (:cue-id options)))
 
 (defn- mapped-commands [instance-id values]

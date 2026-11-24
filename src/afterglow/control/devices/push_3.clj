@@ -9,6 +9,7 @@
             [afterglow.control.devices.session :as session]
             [afterglow.control.display :as display]
             [afterglow.control.devices.target-picker :as targets]
+            [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.parameter-edit :as edit]
             [afterglow.control.views :as views]))
@@ -29,7 +30,7 @@
 
 (defn- cue-at [state model [x y]]
   (let [[left bottom] (:origin state)
-        id (get-in model [:pages (:page-id state) :cells [(+ left x) (+ bottom y)]])]
+        id (pages/cue-id-at model (:page-id state) [(+ left x) (+ bottom y)])]
     (get-in model [:registry :cues id])))
 
 (defn- release-pad [state key envelope]
