@@ -6,6 +6,7 @@
             [afterglow.render.chain :as chain]
             [afterglow.render.frame :as frame]
             [afterglow.render.gpu.movement :as movement]
+            [afterglow.render.hdr :as hdr]
             [afterglow.render.ir :as ir]
             [afterglow.runtime.faults :as faults])
   (:import [java.util.concurrent CancellationException ExecutionException Future TimeUnit TimeoutException]))
@@ -172,7 +173,9 @@
                          (if mover
                            (movement/resolve-contributions! mover patch contributions (assoc options :deadline-nanos deadline))
                            (frame/resolve-contributions patch contributions options))))
-            fused (if (expressions-enabled? owner)
+            ;; Contribution gains use each original source and that owner's dimmers.
+            fused (if (and (expressions-enabled? owner)
+                           (not (hdr/contribution-gains? blocks (:hdr options))))
                     (chain/fuse (:chains owner) (group-preparer owner) blocks)
                     blocks)]
         (if (identical? fused blocks) (resolve! blocks)

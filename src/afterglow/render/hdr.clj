@@ -286,11 +286,19 @@
       :batch (update-in block [:compiled :columns]
                         #(mapv (partial scale-column (:target-ids compiled) scale? scale) %)))))
 
+(defn contribution-gains?
+  "Whether HDR may scale ordered contributions before blending, including
+  intrinsic emission gain tags that enable HDR without explicit settings."
+  [blocks {:keys [cue-gains instance-gains]}]
+  (or (not (contains? #{nil {}} cue-gains))
+      (not (contains? #{nil {}} instance-gains))
+      (boolean (some :emission-gain blocks))))
+
 (defn apply-contribution-gains
   "Scale an owner's dimmer or its emitters exactly once, ahead of composition.
   Fresh typed buffers keep retries and captures independent."
   [blocks settings emitting?]
-  (if-not (and settings (or (seq (:cue-gains settings)) (seq (:instance-gains settings)) (some :emission-gain blocks)))
+  (if-not (and settings (contribution-gains? blocks settings))
     blocks
     (let [dimmers (dimmer-targets blocks) selected (some-> (:fixture-ids settings) set)
           applies? #(and (emitting? %) (or (nil? selected) (contains? selected %)))]
