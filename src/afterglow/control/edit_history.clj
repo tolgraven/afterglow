@@ -139,8 +139,8 @@
   together through the show reducer, after validating all writes against current
   schemas. The caller supplies live scalar cells keyed by target, each with
   :value and :generation. Advance the generation for canonical value changes
-  outside these actions, keeping generations with live targets. The caller
-  normalizes scalar values to their schema's numeric type for exact comparison.
+  outside these actions, keeping generations with tracked targets. Supply native
+  scalar values in the representation used for exact Clojure equality.
 
   The caller owns authentication, command receipts and deadline scheduling. The
   :open map belongs to the live show epoch and is excluded from saved history. Use
