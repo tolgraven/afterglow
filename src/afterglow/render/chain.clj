@@ -96,6 +96,29 @@
 
 (defn- hull [ranges] [(reduce min (map first ranges)) (reduce max (map second ranges))])
 
+(defn- weighted-mix-range [prior incoming [lo hi]]
+  (when (<= 0 lo hi 1)
+    (let [dry (endpoints * prior [(- 1.0 hi) (- 1.0 lo)])
+          wet (endpoints * incoming [lo hi])]
+      (when (and dry wet) (endpoints + dry wet)))))
+
+(defn- partial-mixed-range [blend [lo hi :as prior] [incoming-lo :as incoming]
+                            [blended-lo blended-hi] amount]
+  (let [frame-lo (+ lo (* amount (- blended-lo hi)))
+        frame-hi (+ hi (* amount (- blended-hi lo)))
+        ;; A nonnegative add cannot lower the prior, and a replacement
+        ;; between nonnegative inputs cannot produce a negative result.
+        frame-lo (case blend
+                   :add (max lo frame-lo)
+                   :replace (if (and (<= 0 lo) (<= 0 incoming-lo)) (max 0.0 frame-lo) frame-lo))
+        amounts [amount amount]
+        lowered (case blend
+                  :replace (weighted-mix-range prior incoming amounts)
+                  :add (when-let [wet (endpoints * incoming amounts)] (endpoints + prior wet)))]
+    ;; The frame computes prior + alpha * (blended - prior). GLSL mix
+    ;; and the simplified add round differently. Both must stay valid.
+    (when lowered (range-of [(min frame-lo (first lowered)) (max frame-hi (second lowered))]))))
+
 (defn- partial-max-range [[lo hi :as prior] [incoming-lo incoming-hi] [alpha-lo alpha-hi]]
   (when (<= 0 alpha-lo alpha-hi 1)
     (if (<= incoming-hi lo)
@@ -125,7 +148,7 @@
       :min [(reduce min (map first ranges)) (reduce min (map second ranges))]
       :max [(reduce max (map first ranges)) (reduce max (map second ranges))]
       :clamp (when (<= bh cl) [(min cl (max bl al)) (min ch (max bh ah))])
-      :mix (when (<= 0 cl ch 1) (hull (take 2 ranges)))
+      :mix (apply weighted-mix-range ranges)
       ::ir/partial-max-blend (apply partial-max-range ranges)
       :subtract (if bl (endpoints - (first ranges) (second ranges)) [(- ah) (- al)])
       :divide (when-not (<= bl 0 bh) (endpoints / (first ranges) (second ranges)))
@@ -179,8 +202,7 @@
                final (cond (nil? blended) nil
                            (== 1 amount) blended
                            (= :max blend) (partial-max-range prior incoming [amount amount])
-                           prior (range-of [(+ (* (- 1.0 amount) (first prior)) (* amount (first blended)))
-                                            (+ (* (- 1.0 amount) (second prior)) (* amount (second blended)))]))]
+                           prior (partial-mixed-range blend prior incoming blended amount))]
            (if (valid-output? attr final) (assoc ranges attr final) (reduced nil))))))
    previous fields))
 
@@ -258,6 +280,12 @@
     ;; requests so the show can attribute any failure to the right running effect.
     (catch RuntimeException _ nil)))
 
+(defn- mixed-partial-blends? [blocks]
+  (let [modes (into #{} (keep (fn [{:keys [batch]}]
+                               (when-not (== 1 (:opacity batch 1))
+                                 (:blend batch :replace)))) blocks)]
+    (and (contains? modes :max) (some modes [:add :replace]))))
+
 (defn- append-runs
   "Try the entire aligned interval first. Split only at semantic, range or IR
   complexity limits. A failed trial never generates an exponential-size shader:
@@ -266,9 +294,13 @@
   (if (= 1 (count blocks)) (conj! out (first blocks))
     (if-let [fused (fuse-run cache prepare-group blocks false)]
       (conj! out fused)
-      (let [i (quot (count blocks) 2)
-            left (append-runs cache prepare-group out (subvec blocks 0 i))]
-        (append-runs cache prepare-group left (subvec blocks i))))))
+      (if (mixed-partial-blends? blocks)
+        ;; A fused prefix could round its backdrop differently and hide
+        ;; an invalid stage when the remaining requests run on the frame.
+        (reduce conj! out blocks)
+        (let [i (quot (count blocks) 2)
+              left (append-runs cache prepare-group out (subvec blocks 0 i))]
+          (append-runs cache prepare-group left (subvec blocks i)))))))
 
 (defn- fuse-adjacent
   "Replace adjacent compatible requests over identical ordered target IDs with

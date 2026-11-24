@@ -24,11 +24,13 @@
    :batch {:target-ids ids :blend blend :opacity opacity
            :field-request {:group (prepare outputs positions (ir/compile-batch outputs) nil) :env env}}})
 
-(defn- oracle [blocks]
-  (let [fields ((fields/frame-evaluator
-                 (fn [{:keys [cpu-plan positions surface-uvs]} env]
-                   (ir/evaluate-batch cpu-plan env positions surface-uvs))) blocks)]
-    (frame/portable-frame (frame/resolve-contributions (frame/compile-patch fixtures) fields))))
+(defn- oracle
+  ([blocks] (oracle (frame/compile-patch fixtures) blocks))
+  ([patch blocks]
+   (let [fields ((fields/frame-evaluator
+                  (fn [{:keys [cpu-plan positions surface-uvs]} env]
+                    (ir/evaluate-batch cpu-plan env positions surface-uvs))) blocks)]
+     (frame/portable-frame (frame/resolve-contributions patch fields)))))
 
 (defn- shader [blocks] (get-in (first blocks) [:batch :field-request :group :expressions]))
 
@@ -231,6 +233,32 @@
         (is false "The middle fixture's prior rounds to one before the additive overflow")
         (catch clojure.lang.ExceptionInfo e
           (is (= :invalid-add (:effect-source (ex-data e)))))))))
+
+(deftest failed-mixed-blend-proof-retains-the-original-backdrop
+  (let [u (Math/scalb 1.0 (int -53))
+        patch (frame/compile-patch
+               (mapv (fn [id index] {:id id :address (inc (* 2 index)) :universe 1
+                                     :channels {:focus 1 :zoom 2}})
+                     ids (range)))
+        base (block {:focus (lit 1.0) :zoom (lit 0.0)} :replace 1 default-env)
+        maxima (mapv (fn [i] (block {:focus (lit 0.0) :zoom (lit (/ (double i) 16))} :max 0.5 default-env))
+                     (range 1 11))
+        partial-replace (block {:focus (lit (- 1.0 (* 3 u)))} :replace 0.4375 default-env)
+        raw-add (assoc (block {:focus (lit (Math/ulp 1.0))} :add 0.625 default-env) :source :raw-add)
+        full-add (assoc (block {:focus (lit (* 2.125 u))} :add 1 default-env) :source :after-replace)
+        cover (block {:focus (lit 0.25)} :replace 1 default-env)
+        draw (partial chain/fuse (chain/create-cache) prepare)]
+    ;; Keeping zoom live makes both runs exceed the old IR tree limit.
+    (doseq [[prefix invalid] [[[base] raw-add] [[base partial-replace] full-add]]]
+      (let [stages (into (into prefix maxima) [invalid cover])
+            fused (draw stages)]
+        (is (identical? stages fused) (str (:source invalid)))
+        (doseq [contributions [stages fused]]
+          (try
+            (oracle patch contributions)
+            (is false "The opaque cover must leave the earlier focus fault observable")
+            (catch clojure.lang.ExceptionInfo e
+              (is (= (:source invalid) (:effect-source (ex-data e)))))))))))
 
 (deftest repeated-fixture-rows-and-illegal-geometry-blends-retain-stage-order
   (let [cache (chain/create-cache)
