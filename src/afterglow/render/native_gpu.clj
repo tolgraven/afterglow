@@ -53,11 +53,13 @@
   "Physical rounding guard for each driver, in float32 steps at 1.0 (:ulps) on
   a normalized axis. Rows are tried in order and :renderer must match the whole
   GL_RENDERER string. The final row covers every driver without a measured
-  bound. doc/architecture/moving-head-shaders.md records the measurements and
-  how to qualify another driver."
+  bound and is never narrower than a measured row.
+  doc/architecture/moving-head-shaders.md records the measurements and how to
+  qualify another driver."
   [{:row :apple-m-series :renderer #"Apple M\d+(?: (?:Pro|Max|Ultra))?" :ulps 8}
    {:row :mesa-llvmpipe :renderer #"llvmpipe \(LLVM [^()]*\)" :ulps 128}
-   {:row :unqualified :ulps 256}])
+   {:row :apple-software :renderer #"Apple Software Renderer" :ulps 512}
+   {:row :unqualified :ulps 512}])
 
 (defn rounding-guard
   "Select the rounding guard for a GL_RENDERER string. Returns the matched

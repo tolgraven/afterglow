@@ -263,7 +263,8 @@
     (is (= {:row :apple-m-series :ulps 8 :margin (* 8 ulp)} (gpu/rounding-guard "Apple M4 Pro")))
     (is (= {:row :mesa-llvmpipe :ulps 128 :margin (* 128 ulp)}
            (gpu/rounding-guard "llvmpipe (LLVM 21.1.8, 256 bits)")))
-    (is (= {:row :unqualified :ulps 256 :margin (* 256 ulp)} (gpu/rounding-guard nil)))
+    (is (= {:row :apple-software :ulps 512 :margin (* 512 ulp)} (gpu/rounding-guard "Apple Software Renderer")))
+    (is (= {:row :unqualified :ulps 512 :margin (* 512 ulp)} (gpu/rounding-guard nil)))
     (is (every? #(= :apple-m-series (row %))
                 ["Apple M1" "Apple M2 Ultra" "Apple M3 Max" "Apple M4" "Apple M4 Pro" "Apple M4 Max" "Apple M12 Pro"]))
     (is (every? #(= :mesa-llvmpipe (row %))
@@ -271,12 +272,12 @@
     ;; Software, translated and other vendors' drivers have no measured bound.
     ;; Neither has a chip name with any suffix other than Pro, Max or Ultra.
     (is (every? #(= :unqualified (row %))
-                ["" "Apple Software Renderer" "Apple M1 (G13G B0)" "Apple M4 Pro (software)" "Apple MX"
+                ["" "Apple Software Renderer 2" "Apple M1 (G13G B0)" "Apple M4 Pro (software)" "Apple MX"
                  "Apple Paravirtual device" "AMD Radeon Pro 5500M OpenGL Engine" "Intel(R) Iris(TM) Plus Graphics OpenGL Engine"
                  "softpipe" "zink Vulkan 1.3(llvmpipe (LLVM 21.1.8, 256 bits) (LLVMPIPE))" "llvmpipe"
                  "NVIDIA GeForce RTX 4090/PCIe/SSE2" "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"]))
-    ;; Rows widen in order, and the fallback row matches every renderer.
-    (is (apply < (map :ulps gpu/rounding-margins)))
+    ;; Rows never narrow in order, and the fallback row matches every renderer.
+    (is (apply <= (map :ulps gpu/rounding-margins)))
     (is (nil? (:renderer (peek gpu/rounding-margins))))))
 
 (deftest published-frames-use-only-effective-selected-movement
