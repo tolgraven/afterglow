@@ -131,7 +131,7 @@ float32 step at 1.0, about 1.19e-7 of a normalized axis.
 | Row | `GL_RENDERER` | Margin | Largest scaled axis error measured |
 | --- | --- | ---: | --- |
 | `:apple-m-series` | `Apple M<n>`, optionally ` Pro`, ` Max` or ` Ultra` | 8 ulp, 9.54e-7 | 1.83e-7 on an M4 Pro with `4.1 Metal - 91.7`, 1.5 million samples |
-| `:mesa-llvmpipe` | `llvmpipe (LLVM …)` | 128 ulp, 1.53e-5 | 1.89e-6 unscaled on Mesa 26.0.8 with LLVM 21.1.8, 1,344 samples |
+| `:mesa-llvmpipe` | `llvmpipe (LLVM …)` | 128 ulp, 1.53e-5 | 1.91e-6 on Mesa 26.0.8 with `llvmpipe (LLVM 21.1.8, 256 bits)`, 105,000 samples |
 | `:unqualified` | anything else | 256 ulp, 3.05e-5 | none |
 
 A solver reports its row as `:rounding {:row … :ulps … :margin …}` beside
@@ -148,10 +148,14 @@ reports `:backend :cpu` with `:reason :ambiguous`. The native draw still runs.
 An 8-bit axis has a step of 1/255, so it stays native under every row for all
 but about 1% (llvmpipe) or 2% (unqualified) of its range.
 
-The llvmpipe margin is eight times an error that was measured on only 1,344
-samples from one seed. Four times that error is already half a 16-bit step,
-so no margin with that headroom keeps 16-bit axes native on llvmpipe. The
-wider value costs nothing more for those axes and little for 8-bit axes.
+The llvmpipe margin is eight times its largest scaled error. Linux CI measured
+1.89e-6, 1.88e-6 and 1.91e-6 in sweeps of 2,560, 51,200 and 51,198 samples
+with three seeds. Unlike the Apple error it comes from the tilt axis, where
+the largest pan error was 8.4e-7, and it did not grow with the sample. Four
+times that error is already half a 16-bit step, so no margin with that
+headroom keeps 16-bit axes native on llvmpipe. The wider value costs nothing
+more for those axes and little for 8-bit axes: 24,842 of 25,600 8-bit heads
+stayed native in that run, and all 400 frames packed the reference bytes.
 llvmpipe runs on the CPU, so the native path there is a test lane and not a
 faster backend. The Apple row matches only the exact chip names of Apple's own
 driver. Apple Software Renderer, a chip name with any other suffix, other
