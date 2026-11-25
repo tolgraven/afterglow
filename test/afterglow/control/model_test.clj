@@ -5,6 +5,7 @@
             [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.views :as views]
+            [afterglow.runtime.engine :as engine]
             [afterglow.runtime.events :as events]))
 
 (def effect
@@ -164,6 +165,36 @@
       (is (empty? (:events same)))
       (is (= ["0:1" "0:3" "0:2" "0:4"] (mapv :id (instance-order/ordered down))))
       (is (not (contains? (get-in down [:instances "0:1"]) :render-priority))))))
+
+(deftest mixed-numeric-priorities-share-command-view-and-render-order
+  (let [launch (fn [show priority]
+                 (apply! show {:op :cue/launch :cue-id :red :launch {:priority priority}}))
+        set-priority (fn [show priority]
+                       (apply! show {:op :instance/set-priority :instance-id "0:1" :priority priority}))
+        show (-> (configured) (launch 0.25M) (set-priority 1/3))
+        mixed (reduce launch show [0.333333333333333333M 0.5M 1/2 0.5 1/3 0.3333333333333333])
+        view (views/snapshot mixed)
+        moved (apply! mixed {:op :instance/move-after :instance-id "0:3" :after-instance-id "0:5"})
+        restored (model/new-show moved)
+        compile-effect (fn [_]
+                         #(update % :assignments conj {:target-id :pixel :attribute :dimmer
+                                                       :value 0.5 :blend :replace}))
+        frame (engine/advance restored {:time-ms 0}
+                              compile-effect
+                              (fn [f prepared] (reverse (mapv f prepared))))
+        cleared (set-priority restored 1/4)]
+    (is (= 1/3 (get-in show [:instances "0:1" :render-priority])))
+    (is (= ["0:7" "0:2" "0:1" "0:6" "0:3" "0:4" "0:5"] (mapv :id (:instances view))))
+    (is (= ["0:1" "0:7" "0:2" "0:6" "0:3" "0:4" "0:5"]
+           (get-in view [:cues 0 :instances])
+           (get-in view [:groups 0 :instance-ids])))
+    (is (= ["0:7" "0:2" "0:1" "0:6" "0:4" "0:5" "0:3"]
+           (mapv :id (instance-order/ordered restored))
+           (mapv #(get-in % [:source :instance-id]) (:contributions frame))))
+    (is (not (contains? (get-in moved [:instances "0:3"]) :render-priority)))
+    (is (= 0.25M (get-in cleared [:instances "0:1" :priority])))
+    (is (not (contains? (get-in cleared [:instances "0:1"]) :render-priority)))
+    (is (= ["0:1" "0:7" "0:2" "0:6" "0:4" "0:5" "0:3"] (mapv :id (instance-order/ordered cleared))))))
 
 (deftest setting-active-priority-moves-the-native-unit-and-rejects-invalid-targets
   (let [launch (fn [show priority source]

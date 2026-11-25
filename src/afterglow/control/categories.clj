@@ -1,7 +1,8 @@
 (ns afterglow.control.categories
   "Output-derived categories and explicit selectors shared by every control surface.
   Category display colors describe controls; cue swatches describe emitted color."
-  (:require [afterglow.render.photometry :as photometry]))
+  (:require [afterglow.control.instance-order :as instance-order]
+            [afterglow.render.photometry :as photometry]))
 
 (def colors
   {:color "#c18be8" :intensity "#e8ca74" :movement "#70bedb"
@@ -62,7 +63,7 @@
                             (let [actual (set (definition-categories (:definition instance)))]
                               (and (seq wanted)
                                    (if (= :all (:match selector)) (every? actual wanted) (some actual wanted))))))))
-         (sort-by (juxt :priority :order :id)) vec)))
+         (sort instance-order/authored-instance-comparator) vec)))
 
 (defn group-view [model]
   (let [instances (vals (:instances model))

@@ -9,7 +9,7 @@
 (defn active-instances
   "Priority and launch order for cue grids and latest-launch lookup."
   [model]
-  (->> (:instances model) vals (sort-by (juxt :priority :order :id)) vec))
+  (->> (:instances model) vals (sort instance-order/authored-instance-comparator) vec))
 
 (defn cue-view
   "A grid can supply active instances grouped by cue in presentation order."

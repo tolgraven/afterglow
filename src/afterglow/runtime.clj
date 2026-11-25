@@ -156,10 +156,8 @@
   (validate-context context)
   (let [instances (:effects context)
         results (index-results instances evaluated)
-        ordered (sort-by (fn [[position instance]]
-                           (instance-order/sort-key instance position))
-                         (map-indexed vector instances))
-        ordered-results (map (fn [[_ instance]] (get results (:id instance))) ordered)
+        ordered (sort instance-order/render-position-comparator instances)
+        ordered-results (map #(get results (:id %)) ordered)
         suppressed-ids (::suppressed-instance-ids context #{})
         blocks (into [] (comp (remove #(contains? suppressed-ids (:id %))) (mapcat :contributions)) ordered-results)
         structured? (some #(or (:native-layer %) (= :batch (:kind %))) blocks)
@@ -173,7 +171,7 @@
                       :intents intents)]
     (if (seq intents)
       (assoc merged :intent-emissions
-             (into [] (mapcat (fn [[_ descriptor]]
+             (into [] (mapcat (fn [descriptor]
                                 (intent-emissions descriptor (get results (:id descriptor)))))
                    ordered))
       (dissoc merged :intent-emissions))))

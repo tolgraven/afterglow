@@ -541,7 +541,7 @@
          evaluations (vec (map-work (partial evaluate-isolated snapshot compiled factors) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
-         evaluations (vec (sort-by (comp instance-order/sort-key :instance) evaluations))]
+         evaluations (vec (sort-by :instance instance-order/render-instance-comparator evaluations))]
      (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
                             :last-frame-beat (:beat clock) :frame-number frame-number)
                snapshot descriptors evaluations))))
