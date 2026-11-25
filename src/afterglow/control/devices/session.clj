@@ -63,7 +63,8 @@
   (let [{:keys [dispatch! profile]} (:options session)]
     (loop [remaining (seq commands) count 0]
       (when-let [template (first remaining)]
-        (when (>= count 64)
+        ;; Push 2 can release 64 held pads and close eight encoder edits at once.
+        (when (>= count 72)
           (throw (ex-info "Device transition emitted too many commands" {})))
         ;; Admission time/identity are assigned here, including delayed releases.
         (let [envelope (envelope! session)
