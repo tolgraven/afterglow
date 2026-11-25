@@ -93,16 +93,19 @@
     ;; An unlabelled trailing detent must not change a just-settled edit.
     (< (- time-ms released-at) encoder-release-tail-ms)))
 
-(defn edit [state gesture edit-parameter]
-  (cond
-    (and (= :accepted (:status gesture)) (nil? (:pending gesture)))
-    (let [result (edit-parameter)]
-      (if-let [write (first (:commands result))]
-        (assoc result :commands [(assoc (gesture-command gesture :gesture/sample)
-                                        :sequence (inc (:last-sequence gesture)) :value (:value write))])
-        result))
-    (= :pass-through (:status gesture)) (edit-parameter)
-    :else {:state state}))
+(defn edit
+  ([state gesture edit-parameter] (edit state gesture edit-parameter nil))
+  ([state gesture edit-parameter sample-context]
+   (cond
+     (and (= :accepted (:status gesture)) (nil? (:pending gesture)))
+     (let [result (edit-parameter)]
+       (if-let [write (first (:commands result))]
+         (assoc result :commands [(cond-> (assoc (gesture-command gesture :gesture/sample)
+                                                 :sequence (inc (:last-sequence gesture)) :value (:value write))
+                                    (some? sample-context) (assoc :sample-context sample-context))])
+         result))
+     (= :pass-through (:status gesture)) (edit-parameter)
+     :else {:state state})))
 
 (defn detached-terminals [state]
   (into []
