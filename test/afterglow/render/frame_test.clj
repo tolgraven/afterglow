@@ -705,6 +705,40 @@
       (doseq [options [{} {:include-values? false} {:include-values? false :compact-values? true}]]
         (is (thrown? clojure.lang.ExceptionInfo (frame/resolve-contributions fixtures [geometry bad] options)))))))
 
+(deftest general-typed-rows-preserve-first-error-and-opacity-rules
+  (let [fixtures [(assoc moving :id :left) (assoc moving :id :right :address 30)]
+        patch (frame/compile-patch fixtures)
+        geometry {:kind :assignments :assignments [(assignment :left :aim [1 2 4])
+                                                    (assignment :right :aim [2 3 5])]}
+        render #(frame/resolve-contributions patch [geometry %1]
+                                            {:include-values? %2 :compact-values? true})
+        batch (fn [ids opacity outputs]
+                {:kind :batch :source source-a
+                 :batch {:target-ids ids :blend :replace :opacity opacity :outputs outputs}})]
+    (doseq [[focus expected-attribute] [[[0.5 1.5 0.7] :pan] [[1.5 0.5 0.7] :focus]]]
+      ;; Scalar zero opacity still validates a write. The first row wins over a
+      ;; lexically earlier column at a later row.
+      (let [block (batch [:right :left :right] 0.0
+                         {:pan (field :number 1 [1.25 0.5 0.5])
+                          :focus (field :number 1 focus)})
+            reference (caught-exception #(render block true))
+            error (caught-exception #(render block false))]
+        (is (= (ex-message reference) (ex-message error)))
+        (is (= (ex-data reference) (ex-data error)))
+        (is (= (ex-data (ex-cause reference)) (ex-data (ex-cause error))))
+        (is (identical? source-a (:effect-source (ex-data error))))
+        (is (= {:target-id :right :attribute expected-attribute :blend :replace
+                :value (if (= expected-attribute :pan) 1.25 1.5) :opacity 0.0}
+               (:assignment (ex-data error))))))
+    (let [block (assoc (batch [:right :left] 1.0 {:focus (field :number 1 [1.5 0.75])})
+                       :native-layer {:id :mask :member 0 :target-weights {:right 0.0 :left 0.5}})
+          reference (render block true)
+          actual (render block false)]
+      ;; A zero row mask excludes its assignment before value validation.
+      (is (= (buffer-values reference) (buffer-values actual)))
+      (is (= (frame/project-compact (:compact reference)) (frame/project-compact (:compact actual))))
+      (is (= 0.375 (:focus (first (frame/project-compact (:compact actual)))))))))
+
 (deftest explicit-physical-footprints-reserve-sparse-and-cross-universe-gaps
   (let [sparse {:id :sparse :universe 1 :address 1 :channels {:dimmer [1 4]}}
         gap {:id :gap :universe 1 :address 2 :channels {:dimmer 1}}
