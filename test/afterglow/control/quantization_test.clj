@@ -174,3 +174,18 @@
     (is (= :invalid-launch-intent
            (get-in (quantization/admit state {:command {:command-id :emergency :op :blackout/set} :grid {:beats 1}} at)
                    [:receipt :reason])))))
+
+(deftest prior-release-suppresses-an-immediate-held-launch-and-its-retry
+  (let [at (clock 3 100)
+        req (-> (launch :held :off)
+                (assoc-in [:command :launch :mode] :held)
+                (assoc :raw {:time-ms 91}))
+        cancelled (quantization/admit (quantization/new-state) req at :held-release)
+        retried (quantization/admit (:state cancelled) req at)]
+    (is (empty? (:due cancelled)))
+    (is (= {:time-ms 91} (get-in cancelled [:receipt :raw])))
+    (is (= {:status :cancelled :reason :held-release}
+           (select-keys (:receipt cancelled) [:status :reason])))
+    (is (empty? (:due retried)))
+    (is (:duplicate? retried))
+    (is (= (:receipt cancelled) (:receipt retried)))))

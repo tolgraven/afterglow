@@ -34,6 +34,20 @@
   [state command-id]
   (:receipt (find-entry state command-id)))
 
+(defn pending
+  "Project pending launches in intake order. Command payloads stay private."
+  [state]
+  (mapv (fn [{:keys [request receipt]}]
+          (assoc (select-keys receipt [:command-id :mode :due-beat :requested-at])
+                 :cue-id (get-in request [:command :cue-id])
+                 :source (select-keys (get-in request [:command :source]) [:adapter :session-id])))
+        (sort-by #(get-in % [:receipt :order]) (vals (:pending state)))))
+
+(defn source
+  "Return the source as admitted for this intent."
+  [state command-id]
+  (get-in (find-entry state command-id) [:request :command :source]))
+
 (defn- remember [state entry]
   (let [command-id (get-in entry [:receipt :command-id])
         order (conj (:history-order state) command-id)
@@ -119,45 +133,51 @@
   :beat; scheduling uses the flat authoritative clock at submission. Pending
   launches capture its meter and optional :grid-origin-beat (default zero).
   A retry returns the current receipt with :duplicate?. Reusing an ID for a
-  changed command, grid, or raw input is a conflict."
-  [state {:keys [command grid raw] :or {grid :off}} clock]
-  (let [id (:command-id command)
-        request {:command command :grid grid :raw raw}
-        existing (find-entry state id)]
-    (cond
-      (not= (:clock-epoch state) (:clock-epoch clock)) (reject state id :stale-clock-epoch)
-      (not (and (map? command) (= :cue/launch (:op command))
-                (or (keyword? id) (and (string? id) (not (empty? id))))))
-      (reject state id :invalid-launch-intent)
+  changed command, grid, or raw input is a conflict. An owner that already
+  received release may supply a cancellation reason."
+  ([state request clock] (admit state request clock nil))
+  ([state {:keys [command grid raw] :or {grid :off}} clock prior-cancellation]
+   (let [id (:command-id command)
+         request {:command command :grid grid :raw raw}
+         existing (find-entry state id)]
+     (cond
+       (not= (:clock-epoch state) (:clock-epoch clock)) (reject state id :stale-clock-epoch)
+       (not (and (map? command) (= :cue/launch (:op command))
+                 (or (keyword? id) (and (string? id) (not (empty? id))))))
+       (reject state id :invalid-launch-intent)
 
-      existing (if (= request (:request existing))
-                 {:state state :due [] :receipt (:receipt existing) :duplicate? true}
-                 (reject state id :command-id-conflict))
-      (and (= grid :off) (>= (count (:dispatched state)) (:pending-limit state)))
-      (reject state id :dispatch-full)
-      (and (not= grid :off) (>= (count (:pending state)) (:pending-limit state)))
-      (reject state id :queue-full)
+       existing (if (= request (:request existing))
+                  {:state state :due [] :receipt (:receipt existing) :duplicate? true}
+                  (reject state id :command-id-conflict))
+       (and (nil? prior-cancellation) (= grid :off) (>= (count (:dispatched state)) (:pending-limit state)))
+       (reject state id :dispatch-full)
+       (and (nil? prior-cancellation) (not= grid :off) (>= (count (:pending state)) (:pending-limit state)))
+       (reject state id :queue-full)
 
-      :else
-      (try
-        (let [at (position clock)
-              raw (if (nil? raw) at
-                      (do (when-not (and (map? raw)
-                                        (every? time/finite-number? (vals (select-keys raw [:time-ms :beat]))))
-                            (fail! :invalid-raw-time "Raw timing must supply finite coordinates"))
-                          (merge at (select-keys raw [:time-ms :beat]))))
-              {:keys [grid-info boundary]} (when-not (= grid :off) (grid-boundary grid clock))
-              result (merge {:command-id id :clock-epoch (:clock-epoch state) :order (:next-order state)
-                             :status :pending :mode (get-in command [:launch :mode] :persistent)
-                             :grid grid :raw raw :requested-at at} grid-info)
-              entry {:request request :receipt result :boundary boundary}
-              state (update state :next-order inc')]
-          (if (= grid :off)
-            (let [[state decision] (dispatch state entry at)]
-              {:state state :receipt (receipt state id) :due [decision]})
-            {:state (assoc-in state [:pending id] entry) :receipt result :due []}))
-        (catch clojure.lang.ExceptionInfo error
-          (reject state id (get (ex-data error) :quantization/error :invalid-grid)))))))
+       :else
+       (try
+         (let [at (position clock)
+               raw (if (nil? raw) at
+                       (do (when-not (and (map? raw)
+                                         (every? time/finite-number? (vals (select-keys raw [:time-ms :beat]))))
+                             (fail! :invalid-raw-time "Raw timing must supply finite coordinates"))
+                           (select-keys raw [:time-ms :beat])))
+               {:keys [grid-info boundary]} (when-not (= grid :off) (grid-boundary grid clock))
+               result (merge {:command-id id :clock-epoch (:clock-epoch state) :order (:next-order state)
+                              :status :pending :mode (get-in command [:launch :mode] :persistent)
+                              :grid grid :raw raw :requested-at at} grid-info)
+               entry {:request request :receipt result :boundary boundary}
+               state (update state :next-order inc')]
+           (cond
+             prior-cancellation
+             (let [cancelled (assoc result :status :cancelled :reason prior-cancellation)]
+               {:state (remember state (assoc entry :receipt cancelled)) :receipt cancelled :due []})
+             (= grid :off)
+             (let [[state decision] (dispatch state entry at)]
+               {:state state :receipt (receipt state id) :due [decision]})
+             :else {:state (assoc-in state [:pending id] entry) :receipt result :due []}))
+         (catch clojure.lang.ExceptionInfo error
+           (reject state id (get (ex-data error) :quantization/error :invalid-grid))))))))
 
 (defn tick
   "Return due decisions once, in due beat order and then admission order. A
@@ -200,22 +220,25 @@
 (defn settle
   "Record the usual cue admission result for a due decision. Supply the actual
   admission clock and whether launch succeeded. A failed admission records the
-  attempted time and a distinct :missed receipt. Repeated settlement is inert."
-  [state command-id clock launched?]
-  (let [{current :receipt :as entry} (find-entry state command-id)]
-    (cond
-      (not= (:clock-epoch state) (:clock-epoch clock)) (reject state command-id :stale-clock-epoch)
-      (nil? current) (reject state command-id :unknown-intent)
-      (= :pending (:status current)) (reject state command-id :not-due)
-      (not= :due (:status current)) {:state state :receipt current :due []}
-      (not (boolean? launched?)) (reject state command-id :invalid-admission)
-      :else
-      (let [at (position clock)
-            result (if launched?
-                     (assoc current :status :fired :admitted-at at)
-                     (assoc current :status :missed :reason :launch-rejected :attempted-at at))]
-        {:state (remember (update state :dispatched dissoc command-id) (assoc entry :receipt result))
-         :receipt result :due []}))))
+  attempted time and a distinct :missed receipt. Optional :instance-id and
+  :code come from the core acknowledgement. Repeated settlement is inert."
+  ([state command-id clock launched?] (settle state command-id clock launched? nil))
+  ([state command-id clock launched? acknowledgement]
+   (let [{current :receipt :as entry} (find-entry state command-id)]
+     (cond
+       (not= (:clock-epoch state) (:clock-epoch clock)) (reject state command-id :stale-clock-epoch)
+       (nil? current) (reject state command-id :unknown-intent)
+       (= :pending (:status current)) (reject state command-id :not-due)
+       (not= :due (:status current)) {:state state :receipt current :due []}
+       (not (boolean? launched?)) (reject state command-id :invalid-admission)
+       :else
+       (let [at (position clock)
+             result (if launched?
+                      (merge (assoc current :status :fired :admitted-at at) (select-keys acknowledgement [:instance-id]))
+                      (merge (assoc current :status :missed :reason :launch-rejected :attempted-at at)
+                             (select-keys acknowledgement [:code])))]
+         {:state (remember (update state :dispatched dissoc command-id) (assoc entry :receipt result))
+          :receipt result :due []})))))
 
 (defn invalidate
   "Advance the clock epoch and mark every outstanding launch missed. Supply
