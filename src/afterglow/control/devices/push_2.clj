@@ -121,8 +121,8 @@
               (update :encoder-releases dissoc control-id))
    :commands [(gesture-command gesture :gesture/begin)]})
 
-(defn- retry-encoder-end [state {:keys [control-id retouch] :as gesture}]
-  (if-let [end (and retouch (end-encoder-gesture gesture))]
+(defn- retry-encoder-end [state {:keys [control-id released?] :as gesture}]
+  (if-let [end (and released? (end-encoder-gesture gesture))]
     {:state (assoc-in state [:encoder-gestures control-id :end-retry] :in-flight)
      :commands [end]}
     {:state state}))
@@ -150,7 +150,7 @@
             ;; One still-held touch waits for the preceding end on this encoder.
             (let [ending (assoc gesture :retouch touch)
                   state (assoc-in state path ending)]
-              (if (= :ready (:end-retry ending))
+              (if (get-in ending [:end-retry :retouch-now?])
                 (retry-encoder-end state ending)
                 {:state state}))
             (begin-encoder-gesture state touch)))
@@ -160,16 +160,15 @@
 (defn- release-encoder [state note envelope]
   (let [control-id (encoder-control-id note)
         gesture (get-in state [:encoder-gestures control-id])
-        end (end-encoder-gesture gesture)
+        end (when-not (:released? gesture) (end-encoder-gesture gesture))
         state (cond-> (-> state (update :touches dissoc note)
                           (update :touch-order #(vec (remove #{note} %))))
                 (:retouch gesture) (-> (update-in [:encoder-gestures control-id] dissoc :retouch)
                                        (assoc-in [:encoder-releases control-id] (:time-ms envelope))))]
     (cond
-      end {:state (cond-> state
-                    (not (:released? gesture))
-                    (-> (assoc-in [:encoder-gestures control-id :released?] true)
-                        (assoc-in [:encoder-releases control-id] (:time-ms envelope))))
+      end {:state (-> state
+                      (assoc-in [:encoder-gestures control-id :released?] true)
+                      (assoc-in [:encoder-releases control-id] (:time-ms envelope)))
            :commands [end]}
       (and gesture (not (:released? gesture))) {:state (update state :encoder-gestures dissoc control-id)}
       :else {:state state})))
@@ -533,11 +532,13 @@
         (or (= :accepted status) (= :unknown-gesture failure)) (finish-encoder-gesture state gesture)
         (= :pending status) {:state (assoc-in state (conj path :pending-end) [command completion])}
         (#{:dispatch-busy :dispatch-error :queue-full :gesture-end-queued} failure)
-        ;; The first retry can follow the old receipt. Further attempts use the feedback clock.
-        (let [retry (if (= :in-flight (:end-retry gesture)) (+ time-ms encoder-end-retry-ms) :ready)
+        ;; A waiting retouch may use the first retry immediately. The released
+        ;; gesture keeps its feedback deadline even if that touch goes away.
+        (let [retry {:at-ms (+ time-ms encoder-end-retry-ms)
+                     :retouch-now? (not= :in-flight (:end-retry gesture))}
               ending (assoc (dissoc gesture :pending-end) :end-retry retry)
               state (assoc-in state path ending)]
-          (if (= :ready retry)
+          (if (and (:retouch ending) (:retouch-now? retry))
             (retry-encoder-end state ending)
             {:state state}))
         :else {:state (update-in state path dissoc :pending-end :end-retry)})
@@ -568,8 +569,8 @@
           (mapcat settled-encoder-receipts (sort-by :control-id (vals (:encoder-gestures state))))))
 
 (defn- retry-due-encoder-ends [{:keys [state] :as result} time-ms]
-  (reduce (fn [result {:keys [end-retry retouch] :as gesture}]
-            (if (and retouch (number? end-retry) (>= time-ms end-retry))
+  (reduce (fn [result {:keys [end-retry] :as gesture}]
+            (if (and (:at-ms end-retry) (>= time-ms (:at-ms end-retry)))
               (let [retry (retry-encoder-end (:state result) gesture)]
                 (-> result (assoc :state (:state retry))
                     (update :commands (fnil into []) (:commands retry))))

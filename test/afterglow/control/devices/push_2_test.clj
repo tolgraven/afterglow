@@ -308,7 +308,88 @@
                    (:errors (session/snapshot device)))))
           (finally (session/close! device true)))))))
 
-(deftest retouch-cadence-stops-on-release-or-permanent-rejection
+(deftest released-encoders-retry-independently-without-a-retouch
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        attempts (atom [])
+        blocked (atom #{:push-2/encoder-0 :push-2/encoder-1})
+        device (session/create
+                 (assoc options :dispatch!
+                        (fn [{:keys [op control-id time-ms] :as command}]
+                          (when (= :gesture/end op) (swap! attempts conj [control-id time-ms]))
+                          (if (and (= :gesture/end op) (contains? @blocked control-id))
+                            {:status :rejected :code :dispatch-busy}
+                            (apply! command)))))
+        history #(get-in @show [:control :edit-history])]
+    (swap! show update-in [:registry :effects :wash]
+           #(-> % (assoc-in [:params :tone] (:level schemas)) (assoc :param-order [:level :tone])))
+    (let [h (fixture/ready! (assoc h :session device))]
+      (try
+        (let [id (launch! h 37)]
+          (doseq [note [0 1]]
+            (receive! h [0x90 note 127])
+            (receive! h [0xb0 (+ 71 note) 1])
+            (receive! h [0x80 note 0])
+            (receive! h [0x80 note 0]))
+          (is (= [0 0] (mapv second @attempts)))
+          (is (= 2 (count (:open (history)))))
+          (reset! now 99)
+          (session/refresh! device)
+          (is (= [0 0] (mapv second @attempts)))
+          (swap! blocked disj :push-2/encoder-1)
+          (reset! now 100)
+          (dotimes [_ 3] (session/refresh! device))
+          (is (= [[:push-2/encoder-0 0] [:push-2/encoder-1 0]
+                  [:push-2/encoder-0 100] [:push-2/encoder-1 100]] @attempts))
+          (is (= [:instance-param id :tone] (get-in (history) [:nodes 1 :target])))
+          (is (= #{[:instance-param id :level]} (set (keys (:open (history))))))
+          (reset! blocked #{})
+          (reset! now 200)
+          (session/refresh! device)
+          (is (= [:push-2/encoder-0 200] (peek @attempts)))
+          (is (= 5 (count @attempts)))
+          (is (= [:instance-param id :level] (get-in (history) [:nodes 2 :target])))
+          (is (empty? (:open (history))))
+          (is (= {:level 0.51 :tone 0.51} (values h id))))
+        (finally (finish! h))))))
+
+(deftest encoder-end-retry-cannot-cross-an-epoch
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        attempts (atom 0)
+        replacement (atom nil)
+        device (session/create
+                 (assoc options
+                        :model! (fn []
+                                  (let [snapshot @show]
+                                    (when-let [new-show (first (reset-vals! replacement nil))]
+                                      (reset! show new-show))
+                                    snapshot))
+                        :dispatch! (fn [command]
+                                     (if (= :gesture/end (:op command))
+                                       (do (swap! attempts inc) {:status :rejected :code :dispatch-busy})
+                                       (apply! command)))))
+        h (fixture/ready! (assoc h :session device))]
+    (try
+      (let [id (launch! h 37)
+            new-show (model/new-show (update @show :epoch inc))]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (reset! now 100)
+        (reset! replacement new-show)
+        (session/refresh! device)
+        (is (= 1 @attempts))
+        (is (= :stale-epoch (get-in (session/snapshot device) [:last-ack :reason])))
+        (is (= 0.5 (:level (values h id))))
+        (is (nil? (get-in @show [:control :edit-history])))
+        (session/refresh! device)
+        (is (empty? (:encoder-gestures (local h)))))
+      (finally (finish! h)))))
+
+(deftest released-retouch-never-starts-and-permanent-rejection-stops-retries
   (doseq [stopped-by [:release :permanent-rejection]]
     (testing (name stopped-by)
       (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
@@ -336,13 +417,17 @@
           (receive! h [0x90 0 127])
           (is (= 2 @attempts))
           (when (= :release stopped-by)
-            (receive! h [0x80 0 0]))
+            (receive! h [0x80 0 0])
+            (is (= 2 @attempts)))
           (let [previous-attempts @attempts]
             (reset! recovered? true)
             (doseq [time [100 200 300]]
               (reset! now time)
               (session/refresh! device))
-            (is (= previous-attempts @attempts))
+            (is (= (if (= :release stopped-by) (inc previous-attempts) previous-attempts) @attempts))
+            (when (= :release stopped-by)
+              (is (= 1 (get-in @show [:control :edit-history :cursor])))
+              (is (empty? (get-in @show [:control :edit-history :open]))))
             (session/close! device true)
             (is (= (inc previous-attempts) @attempts)))
           (is (= [:cue/launch :gesture/begin :gesture/sample :gesture/end]
