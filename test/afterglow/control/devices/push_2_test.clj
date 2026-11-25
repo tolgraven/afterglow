@@ -197,6 +197,56 @@
                    (:errors (session/snapshot device)))))
           (finally (session/close! device true)))))))
 
+(deftest pending-encoder-end-preserves-the-next-physical-touch
+  (doseq [[held? end-status] [[true :accepted] [false :accepted] [true :rejected]]]
+    (testing (str "retouch held? " held? ", prior end " end-status)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            deferred-end (atom nil)
+            completion (promise)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (and (= :gesture/end (:op command)) (compare-and-set! deferred-end nil command))
+                                {:status :pending :completion completion}
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (receive! h [0x90 0 127])
+            (receive! h [0x90 0 127])
+            (reset! now 250)
+            (when-not held? (receive! h [0x80 0 0]))
+            (receive! h [0xb0 71 1])
+            (is (= 0.51 (:level (values h id))))
+            (deliver completion
+                     (if (= :accepted end-status)
+                       (:ack (apply! (assoc @deferred-end :time-ms @now)))
+                       {:status :rejected :code :dispatch-busy}))
+            ;; The first detent after acknowledgement uses the newly admitted gesture.
+            (receive! h [0xb0 71 1])
+            (when held? (receive! h [0x80 0 0]))
+            (let [gestures (->> (admitted-commands h) (filter :gesture-id) (partition-by :gesture-id))]
+              (is (= (if held? 2 1) (count gestures)))
+              (is (every? #(= [:gesture/begin :gesture/sample :gesture/end] (mapv :op %)) gestures))
+              (when held?
+                (is (= [:main 0 250] ((juxt :show-id :epoch :time-ms) (first (second gestures))))))
+              (is (= (if held? [0.51 0.52] [0.51])
+                     (mapv #(get-in (history) [:nodes % :after]) (range 1 (inc (:cursor (history)))))))
+              (is (empty? (:open (history)))))
+            (doseq [[cursor expected] (if held? [[2 0.51] [1 0.5]] [[1 0.5]])]
+              (let [ack (:ack (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                             {:command-id (str "undo-" cursor) :source :test :op :history/undo
+                                              :expected-cursor cursor :expected-history-position (:position (history))})))]
+                (is (= :accepted (:status ack)))
+                (is (= expected (:level (values h id)))))))
+          (finally (finish! h)))))))
+
 (deftest encoder-detents-and-touch-strip-share-one-scalar-gesture
   (let [h (gesture-harness push-operator nil)]
     (try

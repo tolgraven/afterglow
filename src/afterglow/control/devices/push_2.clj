@@ -115,13 +115,25 @@
   (when (and (#{:pending :accepted} status) (nil? pending-end))
     (assoc (gesture-command gesture :gesture/end) :last-sequence last-sequence)))
 
+(defn- begin-encoder-gesture [state {:keys [control-id] :as gesture}]
+  {:state (-> state (assoc-in [:encoder-gestures control-id] gesture)
+              (update :encoder-releases dissoc control-id))
+   :commands [(gesture-command gesture :gesture/begin)]})
+
+(defn- retry-encoder-end [state {:keys [control-id retouch retouch-retry?] :as gesture}]
+  (if-let [end (and retouch (not retouch-retry?) (end-encoder-gesture gesture))]
+    {:state (assoc-in state [:encoder-gestures control-id :retouch-retry?] true)
+     :commands [end]}
+    {:state state}))
+
 (defn- touch-encoder [state model note envelope operator-gestures?]
   (if-let [selection (case note
                        8 {:target :master :encoder note}
                        9 {:target :tempo :encoder note}
                        (parameter-at state model note))]
     (let [control-id (encoder-control-id note)
-          gesture (get-in state [:encoder-gestures control-id])
+          path [:encoder-gestures control-id]
+          gesture (get-in state path)
           instance (get-in model [:instances (:instance-id selection)])
           schema (get-in instance [:definition :params (:param selection)])
           state (cond-> (-> state (assoc-in [:touches note] selection)
@@ -130,11 +142,14 @@
                   (update :encoder-releases dissoc control-id))]
       (if (and operator-gestures? (= :running (:phase instance))
                (#{:number :integer} (:type schema))
-               (nil? gesture))
-        (let [gesture (assoc selection :control-id control-id :gesture-id (:command-id envelope)
-                            :show-id (:show-id envelope) :epoch (:epoch envelope) :last-sequence 0)]
-          {:state (assoc-in state [:encoder-gestures control-id] gesture)
-           :commands [(gesture-command gesture :gesture/begin)]})
+               (or (nil? gesture) (and (:released? gesture) (nil? (:retouch gesture)))))
+        (let [touch (assoc selection :control-id control-id :gesture-id (:command-id envelope)
+                           :show-id (:show-id envelope) :epoch (:epoch envelope) :last-sequence 0)]
+          (if gesture
+            ;; One still-held touch waits for the preceding end on this encoder.
+            (let [ending (assoc gesture :retouch touch)]
+              (retry-encoder-end (assoc-in state path ending) ending))
+            (begin-encoder-gesture state touch)))
         {:state state}))
     {:state state}))
 
@@ -142,8 +157,10 @@
   (let [control-id (encoder-control-id note)
         gesture (get-in state [:encoder-gestures control-id])
         end (end-encoder-gesture gesture)
-        state (-> state (update :touches dissoc note)
-                  (update :touch-order #(vec (remove #{note} %))))]
+        state (cond-> (-> state (update :touches dissoc note)
+                          (update :touch-order #(vec (remove #{note} %))))
+                (:retouch gesture) (-> (update-in [:encoder-gestures control-id] dissoc :retouch :retouch-retry?)
+                                       (assoc-in [:encoder-releases control-id] (:time-ms envelope))))]
     (cond
       end {:state (cond-> state
                     (not (:released? gesture))
@@ -260,7 +277,7 @@
 
 (defn- active-encoder-gesture [state note]
   (let [gesture (get-in state [:encoder-gestures (encoder-control-id note)])]
-    (when-not (:released? gesture) gesture)))
+    (if (:released? gesture) (:retouch gesture) gesture)))
 
 (defn- edit-encoder-gesture [state model gesture value mode]
   (cond
@@ -493,54 +510,63 @@
                    (map (fn [[index rgbw]] (codec/palette-write device-id index rgbw)))
                    (sort-by key (:palettes state))))})
 
+(defn- finish-encoder-gesture [state {:keys [control-id retouch]}]
+  (if retouch
+    (begin-encoder-gesture state retouch)
+    {:state (update state :encoder-gestures dissoc control-id)}))
+
 (defn- acknowledge-encoder [state {:keys [op control-id gesture-id sequence] :as command}
                             {:keys [status code completion]}]
   (let [path [:encoder-gestures control-id]
         gesture (get-in state path)]
     (cond
-      (not= gesture-id (:gesture-id gesture)) state
+      (not= gesture-id (:gesture-id gesture)) {:state state}
 
       (= :gesture/end op)
       (cond
-        (or (= :accepted status) (#{:unknown-gesture :stale-epoch :wrong-show} code))
-        (update state :encoder-gestures dissoc control-id)
-        (= :pending status) (assoc-in state (conj path :pending-end) completion)
-        (:pending-end gesture) (update-in state path dissoc :pending-end)
-        :else state)
+        (#{:stale-epoch :wrong-show} code) {:state (update state :encoder-gestures dissoc control-id)}
+        (or (= :accepted status) (= :unknown-gesture code)) (finish-encoder-gesture state gesture)
+        (= :pending status) {:state (assoc-in state (conj path :pending-end) completion)}
+        :else (let [ending (dissoc gesture :pending-end)]
+                (retry-encoder-end (assoc-in state path ending) ending)))
 
       (and (= :gesture/begin op) (= :rejected status) (:released? gesture))
-      (update state :encoder-gestures dissoc control-id)
+      (finish-encoder-gesture state gesture)
 
       :else
-      (assoc-in state path
-                (cond-> gesture
-                  (= :pending status) (assoc :pending [command completion])
-                  (not= :pending status) (dissoc :pending)
-                  (= :gesture/begin op) (assoc :status (if (= :operator-required code) :pass-through status))
-                  (and (= :gesture/sample op) (= :accepted status)) (assoc :last-sequence sequence))))))
+      {:state (assoc-in state path
+                        (cond-> gesture
+                          (= :pending status) (assoc :pending [command completion])
+                          (not= :pending status) (dissoc :pending)
+                          (= :gesture/begin op) (assoc :status (if (= :operator-required code) :pass-through status))
+                          (and (= :gesture/sample op) (= :accepted status)) (assoc :last-sequence sequence)))})))
+
+(defn- settled-encoder-receipts [{:keys [pending pending-end] :as gesture}]
+  (let [[command completion] pending]
+    (cond-> []
+      (and completion (realized? completion)) (conj [command @completion])
+      (and pending-end (realized? pending-end)) (conj [(gesture-command gesture :gesture/end) @pending-end]))))
 
 (defn- reconcile-encoders [state]
-  (reduce (fn [state {:keys [pending pending-end] :as gesture}]
-            (let [[command completion] pending
-                  state (if (and completion (realized? completion))
-                          (acknowledge-encoder state command @completion)
-                          state)]
-              (if (and pending-end (realized? pending-end))
-                (acknowledge-encoder state (gesture-command gesture :gesture/end) @pending-end)
-                state)))
-          state (vals (:encoder-gestures state))))
+  (reduce (fn [{:keys [state commands]} [command ack]]
+            (let [result (acknowledge-encoder state command ack)]
+              {:state (:state result) :commands (into commands (:commands result))}))
+          {:state state :commands []}
+          (mapcat settled-encoder-receipts (sort-by :control-id (vals (:encoder-gestures state))))))
 
 (defn- with-encoder-gestures [profile]
   (let [{:keys [reconcile stop]} profile]
     (assoc profile
            :operator-gestures? true
            :stop (fn [state model envelope disconnected?]
-                   (stop (reconcile-encoders state) model envelope disconnected?))
+                   ;; Settle receipts for cleanup without enacting a waiting touch.
+                   (stop (:state (reconcile-encoders state)) model envelope disconnected?))
            :reconcile (fn [state model]
-                        (let [resolved (reconcile-encoders state)
+                        (let [{resolved :state commands :commands} (reconcile-encoders state)
                               resolved? (not (identical? resolved state))]
                           (cond-> (or (when reconcile (reconcile resolved model))
                                       (when resolved? {:state resolved}))
+                            (seq commands) (update :commands #(into commands %))
                             resolved? (assoc :refresh-model? true)))))))
 
 (defn profile
@@ -595,7 +621,7 @@
                            :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]
             (if (#{:gesture/begin :gesture/sample :gesture/end} (:op command))
-              {:state (acknowledge-encoder state command ack)}
+              (acknowledge-encoder state command ack)
               (let [hold (when-let [gesture (:gesture-id command)]
                            (bindings/acknowledge-hold (:holds state) gesture ack))
                     accepted? (and (= :cue/launch (:op command)) (= :accepted (:status ack)))
