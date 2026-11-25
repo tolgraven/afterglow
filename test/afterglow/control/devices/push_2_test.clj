@@ -881,6 +881,7 @@
         (receive! h [0xb0 71 1])
         (reset! after-model-read replace!)
         (receive! h [0x80 0 0])
+        (receive! h [0xb0 49 0])
         (let [new-id (first (keys (:instances @show)))
               before (admitted-commands h)]
           (is (not= old-id new-id))
