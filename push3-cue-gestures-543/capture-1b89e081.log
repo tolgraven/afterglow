@@ -1,0 +1,7 @@
+
+Testing push-cue-gesture-replay-543
+{:mode :mpe, :edits [["0:1" :level 1.0] ["0:1" :position [2.0 0 0]] ["0:2" :position [0 0 -2.0]]], :phases-after-note-off [:running :running]}
+{:mode :user-mode, :strike {:time-ms 670}, :admitted {:time-ms 1000, :beat 2.0}, :held-instance "0:2", :release-phase :releasing}
+
+Ran 2 tests containing 27 assertions.
+0 failures, 0 errors.

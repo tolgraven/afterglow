@@ -1,0 +1,19 @@
+
+Testing afterglow.control.devices.session-test
+
+Testing afterglow.control.devices.push-2-test
+
+Testing afterglow.control.devices.push-3-test
+
+Testing afterglow.control.devices.push-3-cue-gestures-test
+
+Testing afterglow.control.devices.push-cue-gesture-test
+
+Testing afterglow.control.devices.active-cue-grid-test
+
+Testing afterglow.control.codecs.push-2-test
+
+Testing afterglow.control.codecs.push-3-test
+
+Ran 107 tests containing 1320 assertions.
+0 failures, 0 errors.

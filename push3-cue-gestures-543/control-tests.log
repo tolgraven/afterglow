@@ -1,0 +1,57 @@
+
+Testing afterglow.control.bindings-test
+
+Testing afterglow.control.categories-test
+
+Testing afterglow.control.clock-test
+
+Testing afterglow.control.codecs.midi-test
+
+Testing afterglow.control.codecs.mpe-test
+
+Testing afterglow.control.codecs.osc-test
+
+Testing afterglow.control.codecs.push-2-test
+
+Testing afterglow.control.codecs.push-3-test
+
+Testing afterglow.control.codecs.x-touch-test
+
+Testing afterglow.control.devices.mpe-test
+
+Testing afterglow.control.devices.osc-transport-parity-test
+
+Testing afterglow.control.devices.push-2-test
+
+Testing afterglow.control.devices.push-3-cue-gestures-test
+
+Testing afterglow.control.devices.push-3-display-test
+
+Testing afterglow.control.devices.push-3-test
+
+Testing afterglow.control.devices.push-cue-gesture-test
+
+Testing afterglow.control.devices.session-test
+
+Testing afterglow.control.devices.transports-test
+
+Testing afterglow.control.devices.x-touch-test
+
+Testing afterglow.control.edit-history-test
+
+Testing afterglow.control.model-test
+
+Testing afterglow.control.parameter-edit-test
+
+Testing afterglow.control.quantization-test
+
+Testing afterglow.control.resolution-test
+
+Testing afterglow.control.sensors-test
+
+Testing afterglow.control.system-test
+
+Testing afterglow.control.views-test
+
+Ran 259 tests containing 3609 assertions.
+0 failures, 0 errors.
