@@ -1,5 +1,6 @@
 (ns afterglow.control.model-test
   (:require [clojure.test :refer [deftest is testing]]
+            [afterglow.control.instance-order :as instance-order]
             [afterglow.control.model :as model]
             [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
@@ -131,6 +132,68 @@
            (mapv :id (:instances (views/snapshot (launch moved 10))))))
     (is (= ["0:2" "0:1" "0:3" "0:4" "0:5"] (get-in down [:ack :instance-ids])))
     (is (nil? (get-in down [:model :instances "0:1" :render-priority])))))
+
+(deftest setting-active-priority-appends-in-the-destination-tier-and-keeps-launch-state
+  (let [launch (fn [show priority]
+                 (apply! show {:op :cue/launch :cue-id :red :launch {:priority priority}}))
+        show (-> (reduce launch (configured) [-5 10 10 20])
+                 (apply! {:op :instance/move-after :instance-id "0:2" :after-instance-id "0:3"})
+                 (assoc-in [:instances "0:1" :state] {:ticks 17}))
+        op {:op :instance/set-priority :instance-id "0:1" :priority 10.0}
+        cmd (command show op)
+        up (model/apply-command show cmd)
+        moved (:model up)
+        ids ["0:3" "0:2" "0:1" "0:4"]]
+    (is (= {:status :accepted :instance-id "0:1" :render-priority 10.0 :instance-ids ids}
+           (select-keys (:ack up) [:status :instance-id :render-priority :instance-ids])))
+    (is (= [{:type :instances/reordered :instance-ids ids}] (:events up)))
+    (is (= (get-in show [:instances "0:1"])
+           (dissoc (get-in moved [:instances "0:1"]) :render-priority :render-order)))
+    (is (= ids (mapv :id (instance-order/ordered (model/new-show moved)))))
+    (is (every? instance-order/valid-render-position? (vals (:instances moved))))
+    (is (= ["0:3" "0:2" "0:1" "0:5" "0:4"]
+           (mapv :id (instance-order/ordered (launch moved 10)))))
+    (is (= {:model moved :events [] :ack (:ack up)} (model/apply-command moved cmd)))
+    (let [same-position (model/apply-command moved (command moved (assoc op :instance-id "0:4" :priority 30)))]
+      (is (= ids (get-in same-position [:ack :instance-ids])))
+      (is (= 30 (get-in same-position [:ack :render-priority])))
+      (is (= [{:type :instances/reordered :instance-ids ids}] (:events same-position))))
+    (let [same (model/apply-command moved (command moved (assoc op :priority 10)))
+          down (apply! moved (assoc op :priority -5))]
+      (is (identical? (:instances moved) (get-in same [:model :instances])))
+      (is (empty? (:events same)))
+      (is (= ["0:1" "0:3" "0:2" "0:4"] (mapv :id (instance-order/ordered down))))
+      (is (not (contains? (get-in down [:instances "0:1"]) :render-priority))))))
+
+(deftest setting-active-priority-moves-the-native-unit-and-rejects-invalid-targets
+  (let [launch (fn [show priority source]
+                 (apply! show {:op :cue/launch :cue-id :red :launch {:priority priority} :source source}))
+        show (-> (configured)
+                 (launch 0 {:adapter :test :native-layer {:id :macro :member 0}})
+                 (launch 1 :test)
+                 (launch 2 {:adapter :test :native-layer {:id :macro :member 1}})
+                 (apply! {:op :instance/end :instance-id "0:1"}))
+        op {:op :instance/set-priority :instance-id "0:3" :priority 7/2}
+        up (model/apply-command show (command show op))
+        moved (:model up)]
+    (is (= :accepted (get-in up [:ack :status])))
+    (is (= ["0:2" "0:1" "0:3"] (mapv :id (instance-order/ordered moved))))
+    (doseq [id ["0:1" "0:3"]]
+      (let [instance (get-in moved [:instances id])]
+        (is (= 7/2 (:render-priority instance)))
+        (is (= (get-in show [:instances id]) (dissoc instance :render-priority :render-order)))))
+    (doseq [[payload code] [[{:instance-id "0:1"} :instance-not-running]
+                            [{:instance-id "0:99"} :unknown-instance]
+                            [{:epoch 1} :stale-epoch]
+                            [{:expected-revision (dec (:revision show))} :stale-revision]
+                            [{:priority nil} :invalid-priority]
+                            [{:priority "3"} :invalid-priority]
+                            [{:priority Double/NaN} :invalid-priority]
+                            [{:priority Double/POSITIVE_INFINITY} :invalid-priority]]]
+      (let [rejected (model/apply-command show (command show (merge op payload)))]
+        (is (= code (get-in rejected [:ack :code])))
+        (is (identical? show (:model rejected)))
+        (is (empty? (:events rejected)))))))
 
 (deftest seeded-shuffle-preserves-priorities-and-pins-releasing-and-layer-slots
   (let [launch {:op :cue/launch :cue-id :red}

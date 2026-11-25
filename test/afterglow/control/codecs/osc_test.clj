@@ -30,6 +30,21 @@
   (is (= "instance-4" (:instance-id (osc/command mappings {:path "/release" :args []}
                                                      (assoc envelope :instance-id "replacement"))))))
 
+(deftest osc-translates-explicit-active-and-launch-priority-mappings
+  (let [priority-mappings (assoc mappings
+                                "/priority" {:op :instance/set-priority :instance-id "instance-4"}
+                                "/cue/priority" {:op :cue/launch :cue-id :red :priority-arg? true
+                                                  :launch {:mode :timed :duration-ms 500 :priority 9}})
+        translate (fn [path args]
+                    (osc/command priority-mappings {:path path :args args :instance-id "injected"} envelope))]
+    (is (= (merge envelope {:op :instance/set-priority :instance-id "instance-4" :priority -2.5})
+           (translate "/priority" [-2.5])))
+    (is (= (merge envelope {:op :cue/launch :cue-id :red :launch {:mode :timed :duration-ms 500 :priority 4}})
+           (translate "/cue/priority" [4])))
+    (doseq [path ["/priority" "/cue/priority"]
+            args [[] [2 3] ["2"] [nil] [Double/NaN] [Double/NEGATIVE_INFINITY]]]
+      (is (thrown? clojure.lang.ExceptionInfo (translate path args))))))
+
 (deftest boolean-buttons-and-normalized-master
   (doseq [[value expected] [[true true] [false false] [1 true] [0 false] [1.0 true] [0.0 false]]]
     (is (= expected (:value (osc/command mappings {:path "/blackout" :args [value]} envelope)))))
