@@ -81,6 +81,59 @@
     (is (thrown? Exception (fog/validate-fogger! (assoc-in fixture [:fogger :flow-m3-min] -1))))
     (is (thrown? Exception (fog/plan (assoc room :fog-half-life-s 0) (frame/compile-patch [fixture]))))))
 
+(deftest measured-flow-curve-uses-delivered-dmx-and-held-time
+  (let [nozzle (-> fixture
+                   (assoc-in [:fogger :dmx-range] [240 40])
+                   (assoc-in [:channels :fog] {:offset 1 :fine-offset 2 :inverted-from 42}))
+        curve [[0 0] [0.2 0] [0.6 0.4] [1 1]]
+        patch (frame/compile-patch [nozzle])
+        linear (fog/plan room patch)
+        calibrated (fog/plan room (frame/compile-patch [(assoc-in nozzle [:fogger :flow-curve] curve)]))
+        channel (get-in patch [:fixtures 0 :compiled-channels :fog])
+        packed (fn [physical]
+                 (:universes (frame/resolve-frame patch [{:target-id :jet :attribute :fog
+                                                         :value (fog/physical-level channel physical)}])))
+        idle (frame/idle-universes patch)
+        middle (packed 140.6)
+        replay (fn [plan]
+                 (let [start (fog/present plan (fog/initial plan 0 0) 0 idle)
+                       coarse (fog/present plan start 500 (select-keys middle [4]))
+                       fine (fog/present plan coarse 1500 (select-keys middle [5]))
+                       stop (fog/present plan fine 3500 idle)]
+                   [coarse fine stop (fog/advance plan stop 7500)]))
+        flow #(get-in % [:sources 0 :flow-m3-s])
+        emitted #(get-in % [:sources 0 :emitted-m3])
+        [coarse fine stop late] (replay calibrated)
+        [plain-coarse plain-fine plain-stop] (replay linear)]
+    (is (= [140 0] ((juxt :dmx-coarse :dmx-fine) (first (:sources coarse)))))
+    (is (= [140 153] ((juxt :dmx-coarse :dmx-fine) (first (:sources fine)))))
+    (is (near? 0.5 (flow plain-coarse)))
+    (is (near? 0.497 (flow plain-fine)))
+    (is (near? 1.494 (emitted plain-stop)))
+    (is (near? 0.3 (flow coarse)))
+    (is (near? 0.297 (flow fine)))
+    (is (zero? (flow stop)))
+    (is (near? 0.894 (emitted stop)))
+    (is (= (emitted stop) (emitted late)))
+    (is (< (get-in late [:sources 0 :local-m3]) (get-in stop [:sources 0 :local-m3])))
+    (is (< (:mixed-m3 stop) (:mixed-m3 late)))
+    (is (< (total late) (total stop)))
+    (let [start (fog/initial calibrated 0 0)]
+      (doseq [[physical expected] [[250 0] [240 0] [200 0] [160 0.2] [120 0.4] [80 0.7] [40 1] [35 1]]]
+        (is (near? expected (flow (fog/present calibrated start 0 (packed physical)))))))))
+
+(deftest fog-flow-curve-rejects-invalid-calibration
+  (doseq [curve [nil [] [[0 0]] '([0 0] [1 1])
+                 [[0.1 0] [1 1]] [[0 0] [1 0.9]]
+                 [[0 0] [0.5 -0.1] [1 1]] [[0 0] [0.5 1.1] [1 1]]
+                 [[0 0] [0.5 ##NaN] [1 1]] [[0 0] [##Inf 0.5] [1 1]]
+                 [[0 0] [0.5 0.4] [0.5 0.6] [1 1]]
+                 [[0 0] [0.6 0.4] [0.5 0.6] [1 1]]
+                 [[0 0] [0.4 0.6] [0.6 0.4] [1 1]]
+                 [[0 0] [0.5] [1 1]]]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Fog flow curve"
+                          (frame/compile-patch [(assoc-in fixture [:fogger :flow-curve] curve)])))))
+
 (deftest calibrated-fog-idles-at-its-physical-off-bytes
   (doseq [[off pivot] [[255 0] [224.5 42] [128 41.3] [255 30.1] [201.25 nil]]]
     (let [f (-> fixture (assoc-in [:fogger :dmx-range] [off 1])

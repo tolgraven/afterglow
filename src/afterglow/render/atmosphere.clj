@@ -11,6 +11,31 @@
 
 (defn- flow? [x] (and (finite? x) (< 0 x 1e9)))
 
+(defn- flow-curve? [curve]
+  (and (vector? curve) (<= 2 (count curve))
+       (every? (fn [point]
+                 (and (vector? point) (= 2 (count point))
+                      (every? #(and (finite? %) (<= 0 % 1)) point)))
+               curve)
+       (every? zero? (first curve))
+       (every? #(== 1 %) (peek curve))
+       (apply < (map (comp double first) curve))
+       (apply <= (map (comp double second) curve))))
+
+(defn- flow-fraction [curve dmx-fraction]
+  (if curve
+    (loop [i 1]
+      (let [[end-dmx end-flow] (nth curve i)]
+        (cond
+          (< dmx-fraction end-dmx)
+          (let [[start-dmx start-flow] (nth curve (dec i))
+                phase (/ (- dmx-fraction start-dmx) (- end-dmx start-dmx))]
+            (+ start-flow (* phase (- end-flow start-flow))))
+
+          (== dmx-fraction end-dmx) end-flow
+          :else (recur (inc i)))))
+    dmx-fraction))
+
 (defn- physical-bytes [channel physical]
   (if (:fine channel)
     [(int physical) (Math/round (* 255.0 (- (double physical) (int physical))))]
@@ -20,7 +45,7 @@
   (+ (* 255 coarse) (or fine 0)))
 
 (defn validate-fogger! [{:keys [id channels fogger]}]
-  (let [{:keys [flow-m3-min direction mixing-seconds dmx-range]
+  (let [{:keys [flow-m3-min direction mixing-seconds dmx-range flow-curve]
          :or {mixing-seconds 8 direction [0 0 1] dmx-range [0 255]}} fogger]
     (require! (and (map? fogger) (:fog channels) (flow? flow-m3-min)
                    (finite? mixing-seconds) (<= 0.001 mixing-seconds 86400)
@@ -30,6 +55,10 @@
                    (not (== (first dmx-range) (second dmx-range))))
               "Fogger needs a fog channel, positive rated m³/min, mixing time, nozzle direction and distinct DMX endpoints"
               {:fixture-id id :fogger fogger})
+    (when (contains? fogger :flow-curve)
+      (require! (flow-curve? flow-curve)
+                "Fog flow curve must go from [0 0] to [1 1] with strictly increasing DMX and nondecreasing flow"
+                {:fixture-id id :flow-curve flow-curve}))
     (let [raw (:fog channels)
           width {:fine (if (vector? raw) (second raw) (:fine-offset raw))}
           endpoint-ticks (map #(ticks (physical-bytes width %)) dmx-range)]
@@ -115,12 +144,14 @@
              (let [v (:direction fogger [0 0 1])
                    channel (:fog compiled-channels)
                    endpoints (mapv #(physical-bytes channel %) (:dmx-range fogger [0 255]))
+                   curve (:flow-curve fogger)
                    length (Math/hypot (Math/hypot (double (first v)) (double (second v))) (double (nth v 2)))]
-               {:fixture-id id :position (or position [0 0 0]) :direction (mapv #(/ % length) v)
-                :max-flow-m3-s (/ (:flow-m3-min fogger) 60.0)
-                :mix-per-s (/ 1.0 (:mixing-seconds fogger 8.0))
-                :dmx-range (:dmx-range fogger [0 255]) :channel channel
-                :off-bytes (first endpoints) :endpoint-ticks (mapv ticks endpoints)}))
+               (cond-> {:fixture-id id :position (or position [0 0 0]) :direction (mapv #(/ % length) v)
+                        :max-flow-m3-s (/ (:flow-m3-min fogger) 60.0)
+                        :mix-per-s (/ 1.0 (:mixing-seconds fogger 8.0))
+                        :dmx-range (:dmx-range fogger [0 255]) :channel channel
+                        :off-bytes (first endpoints) :endpoint-ticks (mapv ticks endpoints)}
+                 curve (assoc :flow-curve (mapv #(mapv double %) curve)))))
            (filter :fogger (:fixtures patch)))}))
 
 (defn- source-state [spec]
@@ -203,7 +234,7 @@
   [plan state now universes]
   (let [updated (update (advance plan state now) :sources
           (fn [sources]
-            (mapv (fn [s {:keys [channel off-bytes endpoint-ticks max-flow-m3-s]}]
+            (mapv (fn [s {:keys [channel off-bytes endpoint-ticks max-flow-m3-s flow-curve]}]
                     (let [{:keys [coarse fine]} channel
                           received-hi (dmx-byte universes coarse)
                           received-lo (when fine (dmx-byte universes fine))]
@@ -212,7 +243,8 @@
                               hi (or received-hi (:dmx-coarse s) (first off-bytes))
                               lo (if fine (or received-lo (:dmx-fine s) (second off-bytes)) 0)
                               amount (min 1.0 (max 0.0 (/ (double (- (+ (* 255 hi) lo) off)) (- full off))))]
-                          (assoc s :flow-m3-s (* amount max-flow-m3-s) :dmx-coarse hi :dmx-fine lo
+                          (assoc s :flow-m3-s (* (flow-fraction flow-curve amount) max-flow-m3-s)
+                                 :dmx-coarse hi :dmx-fine lo
                                  :last-presented-ms now))
                         s))) sources (:sources plan))))]
     (cond-> updated (some #(= now (:last-presented-ms %)) (:sources updated))
