@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.model :as model]
             [afterglow.control.pages :as pages]
+            [afterglow.control.display :as presentation]
             [afterglow.control.devices.push-3 :as push]
             [afterglow.control.devices.repl :as devices]
             [afterglow.control.devices.transports :as transports]
@@ -140,6 +141,130 @@
                     {:button-bindings {:blackout :invented}}]]
     (is (thrown? clojure.lang.ExceptionInfo (push/profile (merge options override)))))
   (is (thrown? clojure.lang.ExceptionInfo (push/connect! (assoc options :display {})))))
+
+(defn- overlay-options [display]
+  {:layout (-> layout
+               (assoc-in [:pads [0 1]] {:channel 3 :note 14})
+               (assoc-in [:buttons :variation] {:channel 4 :controller 28}))
+   :button-bindings {:variation :variation/cycle :right :page-right}
+   :display display
+   :pad-overlay {:project (fn [selection _ _]
+                            {:view selection
+                             :display {:layout (:layout selection)
+                                       :cells [{:position [1 0]} {:position [7 7]}]}})
+                 :input (fn [selection {:keys [action position]} _ {:keys [presented selected-instance]}]
+                          (cond
+                            (= :variation/cycle action)
+                            {:state (case (:layout selection)
+                                      :full (assoc selection :layout :rows)
+                                      :rows nil
+                                      (when selected-instance {:layout :full :instance-id selected-instance}))}
+                            (and presented (= [1 0] position))
+                            {:state selection
+                             :commands [{:op :param/set :instance-id (:instance-id presented)
+                                         :param :count :value 8}]}))}})
+
+(deftest variation-overlay-honors-pad-ownership-and-display-receipts
+  (doseq [[mode gesture?] [[:poly-aftertouch false] [:mono-aftertouch true]]]
+    (let [frames (atom []) clock (atom 0)
+          display {:presentation-receipts? true :open! (constantly :capture) :close! (fn [_])
+                   :render! (fn [_ view] (swap! frames conj view))}
+          {:keys [show log receive device]}
+          (harness (merge (overlay-options display)
+                          {:expression-mode mode :cue-gestures? gesture? :hold-ms 100
+                           :now-ms! #(deref clock)}))
+          cycle! (fn [] (@receive [0xb4 28 127]) (@receive [0xb4 28 0]))
+          press! #(@receive [0x93 % 100])
+          lift! #(@receive [0x93 % 0])
+          pressure! #(if gesture? (@receive [0xd3 %]) (@receive [0xa3 12 %]))
+          value #(get-in @show [:instances "0:1" :params %])]
+      (testing (name mode)
+        (try
+          (session/open! device)
+          (press! 12)
+          (reset! clock 100)
+          (session/refresh! device)
+          (is (= :running (get-in @show [:instances "0:1" :phase])))
+          (cycle!)
+          (let [full (peek @frames)]
+            (is (= {:layout :full :cells [{:position [1 0]}]} (:pad-overlay full)))
+            (press! 13)
+            (pressure! 127)
+            (is (= 5 (value :count)))
+            (is (= (if gesture? 0.5 1.0) (value :level)))
+            (lift! 13)
+            (pressure! 0)
+            (is (zero? (value :level)))
+            (cycle!)
+            (presentation/presented! full)
+            (press! 13)
+            (lift! 13)
+            (is (= 5 (value :count)))
+            (let [rows (peek @frames)]
+              (is (= :rows (get-in rows [:pad-overlay :layout])))
+              (presentation/presented! (assoc rows :display-mode :pages))
+              (press! 13)
+              (lift! 13)
+              (is (= 5 (value :count)))
+              (presentation/presented! rows)
+              (press! 13)
+              (is (= 8 (value :count)))
+              (cycle!)
+              (let [live-view (peek @frames)
+                    commands (count @log)]
+                (is (nil? (:pad-overlay live-view)))
+                (press! 13)
+                (press! 14)
+                (lift! 12)
+                (is (= :instance/end (:op (last @log))))
+                (is (= (inc commands) (count @log)))
+                (is (= :releasing (get-in @show [:instances "0:1" :phase])))
+                (presentation/presented! live-view)
+                (press! 14)
+                (lift! 14)
+                (lift! 13)
+                (is (= (inc commands) (count @log)))
+                (press! 13)
+                (lift! 13)
+                (is (= [:held :latched] (mapv :cue-id (filter #(= :cue/launch (:op %)) @log)))))))
+          (is (empty? (:errors (session/snapshot device))))
+          (finally (session/close! device)))))))
+
+(deftest variation-overlay-requires-receipts-and-dedicated-captures
+  (let [config (merge options (overlay-options {:presentation-receipts? true}))]
+    (doseq [invalid [(dissoc config :display)
+                     (assoc config :expression-mode :mpe)
+                     (assoc config :button-bindings {})
+                     (assoc-in config [:layout :buttons :variation] {:channel 0 :controller 57})
+                     (assoc-in config [:layout :buttons :variation] {:channel 0 :controller 49})]]
+      (is (thrown? clojure.lang.ExceptionInfo (push/profile invalid))))))
+
+(deftest old-display-receipts-cannot-arm-choices-after-epoch-reset
+  (let [surface (atom nil)
+        display {:presentation-receipts? true :open! (constantly :capture) :close! (fn [_])
+                 :render! (fn [_ view] (reset! surface view))}
+        {:keys [show log receive device]} (harness (overlay-options display))]
+    (try
+      (session/open! device)
+      (@receive [0x93 12 100])
+      (@receive [0xb4 28 127])
+      (@receive [0xb4 28 0])
+      (@receive [0x93 13 100])
+      (let [old @surface]
+        (reset! show (model/new-show (assoc (initial-model) :epoch 1)))
+        (session/refresh! device)
+        (is (nil? (:pad-overlay @surface)))
+        (presentation/presented! old)
+        (@receive [0x93 13 100])
+        (is (empty? (:instances @show)))
+        (presentation/presented! @surface)
+        (@receive [0x93 13 100])
+        (is (empty? (:instances @show)))
+        (@receive [0x93 13 0])
+        (@receive [0x93 13 100])
+        (is (= [[:held 0] [:latched 1]]
+               (mapv (juxt :cue-id :epoch) (filter #(= :cue/launch (:op %)) @log)))))
+      (finally (session/close! device)))))
 
 (deftest captured-browse-button-routes-a-single-user-or-mpe-pad-launch
   (doseq [[mode note-a note-b] [[:poly-aftertouch [0x93 12] [0x93 13]] [:mpe [0x91 40] [0x92 41]]]]
