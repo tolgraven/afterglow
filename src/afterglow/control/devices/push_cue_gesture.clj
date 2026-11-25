@@ -186,12 +186,17 @@
                          (and (= :active-wait (:kind pad)) (exact-active? model pad)) :active-hold
                          (= :idle-wait (:kind pad)) :launch
                          :else :empty)
-                  state (assoc-in state [:pads key :kind] kind)]
-              (case kind
-                :launch (let [result (launch-cue options state key pad :held envelope)]
-                          {:state (:state result) :commands (into commands (:commands result))})
-                :active-hold {:state state :commands (into commands (edit-commands options model pad (:strike pad)))}
-                {:state state :commands commands})))
+                  next-state (assoc-in state [:pads key :kind] kind)
+                  result (case kind
+                           :launch (launch-cue options next-state key pad :held envelope)
+                           :active-hold {:state next-state :commands (edit-commands options model pad (:strike pad))}
+                           {:state next-state})
+                  next-commands (into commands (:commands result))]
+              ;; Keep deadline work bounded and leave remaining pads undecided
+              ;; for the next refresh.
+              (if (> (count next-commands) 64)
+                (reduced {:state state :commands commands})
+                (assoc result :commands next-commands))))
           {:state state :commands []}
           (sort-by (fn [[_ pad]] [(:deadline pad) (:order pad)])
                    (filter (fn [[_ pad]] (and (waiting? pad) (<= (:deadline pad) (:time-ms envelope))))

@@ -1,9 +1,16 @@
 # Push cue-pad gestures
 
 `afterglow.control.devices.push-cue-gesture` is the shared interaction policy for
-[#543](https://github.com/tolgraven/tolglow/issues/543). The shipped Push 2 and
-Push 3 profiles still use their existing gesture paths. Profile integration and
-physical replay remain open.
+[#543](https://github.com/tolgraven/tolglow/issues/543). Enable it in a Push 3
+User Mode or MPE connection with `:cue-gestures? true`. The existing Push 3
+profile behavior is the connection default while physical replay is pending.
+Push 2 profile integration also remains open.
+
+Bind a captured button ID to `:cue-gesture`, or use a custom semantic action
+with `:gesture-modifier`. Keep Shift bound to `:shift` for fine encoder edits.
+Push 3 drives deadlines on the supplied session refresh schedule. A direct
+connection without a supplied schedule owns a 10 ms cadence, including without
+a display. A host can supply `:schedule! nil` and call `session/refresh!` itself.
 
 | Pad at note-on | Short release | Held through the deadline |
 | --- | --- | --- |
@@ -14,9 +21,11 @@ physical replay remain open.
 An idle cue with expression keeps its authored launch mode on note-on. The
 modifier offers tap and hold for that cue. A timed or one-shot cue retains its
 explicit launch behavior. An armed target selector applies to the next launch
-and is consumed only when the policy emits that launch. The compound pad editor
-and open target picker can claim new pad presses. The cue policy retains the
-release path for a note it already owns, including across page changes.
+and is consumed only when the policy emits that launch. The open target picker
+can claim new pad presses. The cue policy retains the release path for a note it
+already owns, including across page changes. Integrating the compound pad editor
+from [#529](https://github.com/tolgraven/tolglow/issues/529) uses the same
+exclusive pad ownership contract.
 
 ## Timing and ownership
 
@@ -35,7 +44,7 @@ receipt. A page change detaches waiting decisions and selection feedback from
 their original view. Committed launches retain their captured cue ID. Show ID,
 epoch, per-press token and pad key fence late receipts.
 
-## Profile integration
+## Profile integration contract
 
 - Normalize pad and expression messages into `step` events. User Mode pads use
   their captured channel and note as the key. MPE uses the decoder's full voice
@@ -50,14 +59,12 @@ epoch, per-press token and pad key fence late receipts.
 - Respect `:pass-through?` for an overlay-owned pad. Retain the overlay's own
   press, release and expression bookkeeping. Clear the one-use target picker
   after `:target-consumed?`.
-- Drive `:tick` with the input's logical clock, including when the display is
-  disabled. `next-deadline-ms` gives the next time needed. Call `acknowledge`
-  for launch feedback, `stop` on teardown and initialize the state on show reset.
-  Carry the supplied show identity and epoch through admission of every gesture
-  command. At this base the device session checks epoch explicitly for grid
-  launches and cancellations. Ordinary commands also need that admission check
-  when the session adopts the policy. Use the owner's current logical time for
-  dispatch.
+- Drive `:tick` through the session's `:advance` hook and the input's logical
+  clock. `next-deadline-ms` gives the next time needed. The hook receives the
+  committed show model before display projection. MIDI input feedback does not
+  advance gesture deadlines. Call `acknowledge` for launch feedback, `stop` on
+  teardown and initialize the state on show reset. Carry show identity and
+  epoch through admission and use the owner's current logical time for dispatch.
 
 ## Expression
 
@@ -80,11 +87,13 @@ definition and uses its latest parameter values for untouched components.
 
 ## Replay coverage
 
-The focused tests use the real show reducer, quantization queue, Push 3 User
-Mode decoder, and MPE decoder with synthetic bytes. They cover deadline and missed-timer
-behavior, exact-instance stop and release, per-note expression, captured-layout
-modifier decode, editor and target-picker precedence, and late receipts after
-page and show changes.
+The focused tests use synthetic User Mode and MPE byte streams through Push 3
+sessions, the real show reducer, and the quantization queue. They cover deadline
+and missed-timer behavior, exact-instance stop and release, per-note expression,
+captured-layout modifier decode, target-picker precedence, and late receipts
+after page and show changes. The shared policy tests also exercise overlay
+ownership. The compound pad editor integration needs a replay on the combined
+Push 3 profile when that feature lands.
 
 Physical qualification needs timestamped Push 2 strike and poly-pressure, Push 3
 User Mode pad and modifier bytes, and Push 3 MPE notes, pressure, pitch bend and
