@@ -28,6 +28,8 @@
                         :active-cue-grid :user-mode-handoff :reconnect}
          :hardware-verified? false))
 
+(def ^:private accent-cc 57)
+
 (defn- decode [device-id raw]
   (cond
     (map? raw) raw
@@ -660,8 +662,9 @@
   Missing responses are reported on refresh!, never guessed. :launch-grid
   optionally routes pad launches to a musical grid owned by the host. Set
   :operator-gestures? true with a trusted host dispatcher to group touched scalar
-  encoders. :temporary-encoder-modifier can be :shift or a mapped button CC.
-  Hold it when touching an authored parameter encoder to restore its value on lift.
+  encoders. Hold Accent while touching an authored parameter encoder to restore
+  its value on lift. :temporary-encoder-modifier can override Accent with a MIDI
+  button CC. Legacy :shift and CC 49 settings select Accent and keep Shift fine.
   The host must settle pending ends and cancels after prior samples. Detents
   without touch use ordinary control after a short release tail.
   :active-cue-grid? enables Select and Duplicate to open separate active
@@ -686,15 +689,14 @@
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
   (when (and (some? temporary-encoder-modifier)
              (not (and (true? operator-gestures?)
-                       (or (= :shift temporary-encoder-modifier)
+                       (or (#{:accent :shift} temporary-encoder-modifier)
                            (and (integer? temporary-encoder-modifier) (<= 0 temporary-encoder-modifier 127))))))
-    (throw (ex-info "Temporary encoder edits require operator gestures and :shift or a MIDI button CC"
+    (throw (ex-info "Temporary encoder edits require operator gestures and an Accent or MIDI button CC setting"
                     {:temporary-encoder-modifier temporary-encoder-modifier})))
-  (let [modifier (if (= 49 temporary-encoder-modifier) :shift temporary-encoder-modifier)
-        modifier-key (cond
-                       (= :shift modifier) :shift?
-                       (some? modifier) :temporary-encoder-modifier-down?)
-        modifier-cc (if (= :shift modifier) 49 modifier)
+  (let [modifier-cc (when (true? operator-gestures?)
+                      (if (contains? #{nil :accent :shift 49} temporary-encoder-modifier)
+                        accent-cc temporary-encoder-modifier))
+        modifier-key (when (some? modifier-cc) :temporary-encoder-modifier-down?)
         grid (launch/grid options)
         {:keys [modes actions] :as display-capabilities} (:display-capabilities display)
         _ (when-not (and (or (nil? modes) (and (set? modes) (seq modes) (every? display/modes modes)))
@@ -718,7 +720,7 @@
                     control (when (and (:ready? state) (= :control-change (:type event))) (:controller event))
                     down? (and control (pos? (:raw-value event)))
                     cc (when down? control)
-                    modifier-input? (and control (= modifier control))
+                    modifier-input? (and control (= modifier-cc control))
                     overlay-input (when (and pad-overlay (not modifier-input?))
                                     (pad-overlay-input pad-overlay (selected-state state model) event model))
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]

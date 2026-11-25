@@ -295,13 +295,13 @@
                       [:gesture/cancel [0x80 0 0]]]]
     (testing (str op)
       (let [{:keys [session show after-model-read complete-sample] :as h}
-            (pending-sample-harness (when (= :gesture/cancel op) {:temporary-encoder-modifier :shift}))]
+            (pending-sample-harness)]
         (try
           (let [id (launch! h 37)
                 ;; A trusted host may initialize a new epoch with captured instances.
                 replacement (model/new-show (update @show :epoch inc))]
             (when (= :gesture/cancel op)
-              (receive! h [0xb0 49 127]))
+              (receive! h [0xb0 57 127]))
             (when (not= :gesture/begin op)
               (receive! h [0x90 0 127]))
             (when (#{:gesture/end :gesture/cancel} op)
@@ -713,16 +713,50 @@
                  (mapv :gesture-id (take-last 2 commands))))))
       (finally (finish! h)))))
 
-(deftest an-unadmitted-temporary-touch-blocks-detents-and-release-tail
-  (let [h (fixture/ready! (fixture/harness {:profile (push/profile {:operator-gestures? true
-                                                                    :temporary-encoder-modifier :shift})}))]
+(deftest factory-accent-restores-and-shift-commits-an-ordinary-fine-edit
+  (let [h (gesture-harness push-operator nil)]
     (try
       (let [id (launch! h 37)]
+        (receive! h [0xb0 57 127])
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 57 0])
+        (receive! h [0xb0 71 1])
+        (is (= 0.51 (:level (values h id))))
+        (receive! h [0x80 0 0])
+        (is (= 0.5 (:level (values h id))))
         (receive! h [0xb0 49 127])
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (receive! h [0xb0 49 0])
+        (is (= 0.501 (:level (values h id))))
+        (is (= [:cue/launch :gesture/begin :gesture/sample :gesture/cancel
+                :gesture/begin :gesture/sample :gesture/end]
+               (mapv :op (admitted-commands h))))
+        (is (= 1 (get-in @(:show h) [:control :edit-history :cursor]))))
+      (finally (finish! h)))))
+
+(deftest accent-does-not-intercept-ordinary-turns-without-operator-gesture-capability
+  (let [h (fixture/ready! (fixture/harness))]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 57 127])
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (is (= [:cue/launch :param/set] (mapv :op (admitted-commands h))))
+        (is (= 0.51 (:level (values h id)))))
+      (finally (finish! h)))))
+
+(deftest an-unadmitted-temporary-touch-blocks-detents-and-release-tail
+  (let [h (fixture/ready! (fixture/harness {:profile (push/profile {:operator-gestures? true})}))]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 57 127])
         (receive! h [0x90 0 127])
         (is (= :operator-required (get-in (session/snapshot (:session h)) [:last-ack :code])))
         (receive! h [0xb0 71 10])
-        (receive! h [0xb0 49 0])
+        (receive! h [0xb0 57 0])
         (receive! h [0xb0 71 10])
         (receive! h [0x80 0 0])
         (receive! h [0xb0 71 10])
@@ -737,17 +771,16 @@
 (deftest temporary-touch-with-an-unavailable-or-empty-slot-cannot-become-an-edit
   (doseq [slot [:not-running :empty]]
     (testing (name slot)
-      (let [{:keys [show now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true
-                                                                             :temporary-encoder-modifier :shift})}
+      (let [{:keys [show now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
                                                     push-operator)]
         (swap! show update-in [:registry :effects :wash] assoc :params schemas :param-order order)
         (fixture/ready! h)
         (try
           (when (= :not-running slot)
             (swap! show assoc-in [:instances (launch! h 37) :phase] :releasing))
-          (receive! h [0xb0 49 127])
+          (receive! h [0xb0 57 127])
           (receive! h [0x90 0 127])
-          (receive! h [0xb0 49 0])
+          (receive! h [0xb0 57 0])
           (let [id (if (= :empty slot) (launch! h 37) (:selected-instance (local h)))]
             (receive! h [0xb0 71 5])
             (receive! h [0xe0 127 127])
@@ -769,8 +802,7 @@
           (finally (finish! h)))))))
 
 (deftest temporary-push-edits-use-the-typed-controls-and-restore-whole-parameters
-  (let [{:keys [show] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true
-                                                                       :temporary-encoder-modifier :shift})}
+  (let [{:keys [show] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
                                              push-operator)]
     (swap! show update-in [:registry :effects :wash] assoc :params schemas :param-order order)
     (fixture/ready! h)
@@ -778,9 +810,9 @@
       (let [id (launch! h 37)
             original (values h id)
             temporary-touch! (fn [note]
-                               (receive! h [0xb0 49 127])
+                               (receive! h [0xb0 57 127])
                                (receive! h [0x90 note 127])
-                               (receive! h [0xb0 49 0]))]
+                               (receive! h [0xb0 57 0]))]
         (temporary-touch! 0)
         (receive! h [0xb0 71 1])
         (is (true? (:enabled (values h id))))
@@ -832,17 +864,16 @@
   (doseq [stage [:held :trailing]]
     (testing (name stage)
       (let [{:keys [show now] :as h} (fixture/ready!
-                                      (fixture/harness {:profile (push/profile {:operator-gestures? true
-                                                                                :temporary-encoder-modifier :shift})}
+                                      (fixture/harness {:profile (push/profile {:operator-gestures? true})}
                                                        push-operator))]
         (try
           (reset! now 1000)
           (let [old-id (launch! h 37)]
-            (receive! h [0xb0 49 127])
+            (receive! h [0xb0 57 127])
             (receive! h [0x90 0 127])
             (receive! h [0xb0 71 10])
-            (receive! h [0xb0 49 0])
-            (is (= 0.51 (:level (values h old-id))))
+            (receive! h [0xb0 57 0])
+            (is (= 0.6 (:level (values h old-id))))
             (when (= :trailing stage)
               (receive! h [0x80 0 0])
               (is (= 0.5 (:level (values h old-id)))))
@@ -867,7 +898,7 @@
 
 (deftest temporary-lift-crossing-epoch-reconciliation-clears-the-physical-touch
   (let [{:keys [show now after-model-read complete-sample apply!] :as h}
-        (pending-sample-harness {:temporary-encoder-modifier :shift})]
+        (pending-sample-harness)]
     (try
       (let [old-id (launch! h 37)
             replace! (fn []
@@ -876,12 +907,12 @@
                        (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
                                       {:op :cue/launch :command-id "replacement" :source {:adapter :test}
                                        :cue-id :latched})))]
-        (receive! h [0xb0 49 127])
+        (receive! h [0xb0 57 127])
         (receive! h [0x90 0 127])
         (receive! h [0xb0 71 1])
         (reset! after-model-read replace!)
         (receive! h [0x80 0 0])
-        (receive! h [0xb0 49 0])
+        (receive! h [0xb0 57 0])
         (let [new-id (first (keys (:instances @show)))
               before (admitted-commands h)]
           (is (not= old-id new-id))
@@ -896,7 +927,7 @@
       (finally (finish! h)))))
 
 (deftest a-held-temporary-modifier-applies-to-a-new-touch-after-epoch-adoption
-  (doseq [[modifier cc] [[:shift 49] [41 41]]]
+  (doseq [[modifier cc] [[nil 57] [:shift 57] [49 57] [41 41]]]
     (testing (str modifier)
       (let [{:keys [show] :as h} (fixture/ready!
                                   (fixture/harness {:profile (push/profile {:operator-gestures? true
@@ -922,7 +953,7 @@
           (finally (finish! h)))))))
 
 (deftest temporary-modifier-edges-crossing-epoch-reconciliation-only-update-physical-state
-  (doseq [[modifier cc] [[:shift 49] [41 41]] down? [false true]]
+  (doseq [[modifier cc] [[nil 57] [:shift 57] [49 57] [41 41]] down? [false true]]
     (testing (str modifier " " (if down? "press" "release"))
       (let [{:keys [show after-model-read complete-sample apply!] :as h}
             (pending-sample-harness {:temporary-encoder-modifier modifier})]
@@ -951,13 +982,13 @@
 
 (deftest temporary-touch-crossing-epoch-reconciliation-cannot-edit-the-replacement
   (let [{:keys [show after-model-read complete-sample apply!] :as h}
-        (pending-sample-harness {:temporary-encoder-modifier :shift})]
+        (pending-sample-harness)]
     (try
       (swap! show assoc-in [:registry :effects :wash :params :speed] {:type :number :default 0.25 :bounds [0 1]})
       (launch! h 37)
       (receive! h [0x90 1 127])
       (receive! h [0xb0 72 10])
-      (receive! h [0xb0 49 127])
+      (receive! h [0xb0 57 127])
       (reset! after-model-read #(do (@complete-sample)
                                     (reset! show (model/new-show (update (select-keys @show [:show-id :epoch :registry :pages]) :epoch inc)))
                                     (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
@@ -967,7 +998,7 @@
       (let [new-id (first (keys (:instances @show)))
             before (admitted-commands h)]
         (is (= :cue/launch (:op (peek before))))
-        (receive! h [0xb0 49 0])
+        (receive! h [0xb0 57 0])
         (receive! h [0xb0 71 5])
         (receive! h [0x80 0 0])
         (receive! h [0xb0 71 5])
