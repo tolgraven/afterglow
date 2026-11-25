@@ -25,6 +25,8 @@
 
 (def ^:private rgb-attributes [:red :green :blue])
 
+(def ^:private rgbw-attributes (conj rgb-attributes :white))
+
 ;; Final fields, no mutable buffers: safe to share between render workers/frames.
 (deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot ^boolean coarseRange])
 
@@ -32,7 +34,14 @@
 
 (deftype EmitterTint [attribute ^long slot ^double red ^double green ^double blue])
 
-(deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints])
+(deftype ColorCorrection [^double red ^double green ^double blue ^double white])
+
+(deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints correction])
+
+(defn- compile-color-correction [trims]
+  (when (seq trims)
+    (ColorCorrection. (double (get trims :red 1.0)) (double (get trims :green 1.0))
+                      (double (get trims :blue 1.0)) (double (get trims :white 1.0)))))
 
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
@@ -143,6 +152,7 @@
   advances the universe, including fine channels. Channel values are an offset,
   [coarse fine], or {:offset n :fine-offset n :inverted-from 0|1|...255}.
   :rgbw-policy is :none or :extract-min (requires a white channel).
+  :color-correction may trim generated RGBW drives after extraction.
   Optional :rotation-deg is [x y z], applied X then Y then Z.
   Axis calibration is {:min-deg a :max-deg b}, or legacy [center half-circle]
   values in DMX units. Optional :footprint reserves every physical channel in
@@ -241,6 +251,7 @@
           fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)]
       {:type ::patch ::hdr-layout (delay (hdr/layout compiled attribute-slots))
        ::emission-layout (emission/compile-layout compiled universes ::emission-channels)
+       ::corrected-targets (into [] (keep #(when (seq (:color-correction %)) (::index %))) compiled)
        :fog-off-bytes fog-off-bytes
        ::idle-off-bytes (into fog-off-bytes (emission-off-bytes compiled))
        :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
@@ -257,7 +268,7 @@
                                        (long (get attribute-slots attribute))
                                        (long (or (::compact-index channel) -1))
                                        (::scatter channel) channel)) (:compiled-channels fixture))
-                (::tints fixture))) compiled)
+                (::tints fixture) (compile-color-correction (:color-correction fixture)))) compiled)
        ::common-attributes (if (seq compiled)
                              (reduce (fn [common fixture] (into #{} (filter (::supported fixture)) common))
                                      (::supported (first compiled)) (rest compiled)) #{})
@@ -605,6 +616,11 @@
                       (double (get assigned (.-attribute tint) 0.0)))]
         (recur (inc i) (+ r (* level (.-red tint))) (+ g (* level (.-green tint))) (+ b (* level (.-blue tint))))))))
 
+(defn- color-drive [assigned overrides trims attribute generated]
+  (let [level (get assigned attribute generated)]
+    (if (and trims (not (contains? overrides attribute)))
+      (photometry/corrected-level trims attribute level) level)))
+
 (defn- pack-target! [fixture assigned {:keys [master blackout? include-values?] :as options} universes indexed compact]
   (let [id (:id fixture)
         source (when-let [^objects sources (::geometry-sources options)]
@@ -618,10 +634,12 @@
         dimmer (:dimmer assigned (if has-emitters? 1.0 0.0))
         intensity (if blackout? 0.0 (* master dimmer))
         extracted (if (= :extract-min (:rgbw-policy fixture)) (apply min color) 0.0)
-        red (get assigned :red (- (nth color 0) extracted))
-        green (get assigned :green (- (nth color 1) extracted))
-        blue (get assigned :blue (- (nth color 2) extracted))
-        white (get assigned :white extracted)
+        trims (:color-correction fixture)
+        overrides (when trims (or (get (::explicit-emitter-overrides options) (::index fixture)) assigned))
+        red (color-drive assigned overrides trims :red (- (nth color 0) extracted))
+        green (color-drive assigned overrides trims :green (- (nth color 1) extracted))
+        blue (color-drive assigned overrides trims :blue (- (nth color 2) extracted))
+        white (color-drive assigned overrides trims :white extracted)
         ;; Devices with a real dimmer apply intensity there; RGB-only devices
         ;; require scaling emitter channels. Blackout zeros both paths.
         scale (if (and (not blackout?) (::dimmer? fixture)) 1.0 intensity)
@@ -742,6 +760,7 @@
   (let [stride (int (::stride patch)), master (double master)
         fixtures (::dense-fixtures patch), fixture-count (count fixtures)
         ^objects general (::general-assigned options)
+        explicit-overrides (::explicit-emitter-overrides options)
         {:keys [universes indexed]} (create-buffers patch)
         compact (when compact-values? (create-compact patch))
         ^objects compact-arrays (:arrays compact), ^objects compact-masks (:masks compact)
@@ -759,10 +778,22 @@
               intensity (if blackout? 0.0 (* master dimmer))
               extracted (if (.-extractMin fixture)
                           (min (aget values base) (min (aget values (inc base)) (aget values (+ base 2)))) 0.0)
-              red (if (aget present (+ base 4)) (aget values (+ base 4)) (- (aget values base) extracted))
-              green (if (aget present (+ base 5)) (aget values (+ base 5)) (- (aget values (inc base)) extracted))
-              blue (if (aget present (+ base 6)) (aget values (+ base 6)) (- (aget values (+ base 2)) extracted))
-              white (if (aget present (+ base 7)) (aget values (+ base 7)) extracted)
+              red? (aget present (+ base 4)), green? (aget present (+ base 5))
+              blue? (aget present (+ base 6)), white? (aget present (+ base 7))
+              red (if red? (aget values (+ base 4)) (- (aget values base) extracted))
+              green (if green? (aget values (+ base 5)) (- (aget values (inc base)) extracted))
+              blue (if blue? (aget values (+ base 6)) (- (aget values (+ base 2)) extracted))
+              white (if white? (aget values (+ base 7)) extracted)
+              ^ColorCorrection correction (.-correction fixture)
+              overrides (when (and correction explicit-overrides) (get explicit-overrides index))
+              red (if (and correction (not (if overrides (contains? overrides :red) red?)))
+                    (* red (.-red correction)) red)
+              green (if (and correction (not (if overrides (contains? overrides :green) green?)))
+                      (* green (.-green correction)) green)
+              blue (if (and correction (not (if overrides (contains? overrides :blue) blue?)))
+                     (* blue (.-blue correction)) blue)
+              white (if (and correction (not (if overrides (contains? overrides :white) white?)))
+                      (* white (.-white correction)) white)
               scale (if (and (not blackout?) (.-dimmer fixture)) 1.0 intensity)
               channels (.-channels fixture)]
           (dotimes [channel-index (count channels)]
@@ -1264,9 +1295,26 @@
                                 occupied (:footprints result)))))
           reports)))))
 
+(defn- explicit-emitter-overrides
+  "HDR can create physical emitter values from color when combining it with an
+  explicit override. Preserve the original lane ownership for color trims."
+  [patch ^objects assigned ^booleans present]
+  (let [stride (int (::stride patch))]
+    (into {}
+          (map (fn [i]
+                 (let [target (when assigned (aget assigned (int i)))
+                       explicit? (if (or target (nil? present)) #(contains? target %)
+                                   (let [base (* (int i) stride), slots (::attribute-slots patch)]
+                                     #(aget present (+ base (int (slots %))))))]
+                   [i (into #{} (filter explicit?) rgbw-attributes)])))
+          (::corrected-targets patch))))
+
 (defn- finish-contributions [patch ^objects assigned options values present pack]
   (let [links (:edge-tracking options)
         reports (when (seq links) (apply-tracking! patch assigned (prepare-previous-compact patch options)))
+        options (cond-> options
+                  (and (:hdr options) (seq (::corrected-targets patch)))
+                  (assoc ::explicit-emitter-overrides (explicit-emitter-overrides patch assigned present)))
         contacts (when (:hdr options) (apply-hdr! patch options values present assigned))
         _ (when (:hdr options)
             ;; A tracked head that cannot reach its receiver stays dark even

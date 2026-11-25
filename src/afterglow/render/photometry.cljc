@@ -2,7 +2,8 @@
   "Portable fixture optics and full-white brightness for the renderer and Studio.")
 
 (def fixture-keys
-  [:beam-angle :zoom-range-deg :lens-radius-m :pseudo-fixture :max-watts :measured-relative-brightness])
+  [:beam-angle :zoom-range-deg :lens-radius-m :pseudo-fixture :max-watts :measured-relative-brightness
+   :color-correction])
 
 (defn- positive-finite? [x]
   (and (number? x) (#?(:clj Double/isFinite :cljs js/Number.isFinite) (double x)) (pos? x)))
@@ -20,13 +21,31 @@
    [:pseudo-fixture boolean? "Pseudo-fixture must be true or false"]
    [:emission-share #(and (number? %) (<= 0 % 1)) "The head's share of total output must be between 0 and 1"]])
 
+(defn- color-correction? [channels trims]
+  (and (map? trims)
+       (or (empty? trims)
+           (and (map? channels) (every? channels [:red :green :blue])
+                (every? (fn [[attribute gain]]
+                          (and (#{:red :green :blue :white} attribute)
+                               (contains? channels attribute)
+                               (number? gain) (<= 0 gain 1)))
+                        trims)))))
+
 (defn errors
   "Validate optional optical properties without filling defaults."
   [fixture]
-  (vec
-   (for [[key valid? message] specs
-         :when (and (contains? fixture key) (not (valid? (get fixture key))))]
-     {:path [key] :message message})))
+  (cond-> (vec (for [[key valid? message] specs
+                     :when (and (contains? fixture key) (not (valid? (get fixture key))))]
+                 {:path [key] :message message}))
+    (and (contains? fixture :color-correction)
+         (not (color-correction? (:channels fixture) (:color-correction fixture))))
+    (conj {:path [:color-correction]
+           :message "Color correction needs linear gains from 0 to 1 for mapped RGBW emitters on an RGB fixture"})))
+
+(defn corrected-level
+  "Apply a fixture's trim to a drive derived from authored color."
+  [trims attribute level]
+  (if-let [gain (get trims attribute)] (* (double gain) level) level))
 
 (def emitter-spectrum
   "Additive emitter channels mapped to [relative photopic response, linear RGB

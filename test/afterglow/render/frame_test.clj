@@ -108,6 +108,39 @@
     (is (= [64 0 128 128] (bytes-at override 1 1 2 3 4)))
     (is (seq (frame/validate-patch [(assoc rgb :rgbw-policy :extract-min)])))))
 
+(deftest color-correction-serves-rich-and-compact-rgb-output
+  (let [assignments [(assignment :rgb :color [1.0 0.5 0.25])]
+        fixture (assoc rgb :color-correction {:red 0.5 :green 0.0})]
+    (doseq [include-values? [true false]
+            :let [options {:include-values? include-values? :compact-values? true}
+                  output (frame/resolve-frame [fixture] assignments options)
+                  projected (frame/project-compact (:compact output) [0])
+                  untrimmed (frame/resolve-frame [rgb] assignments options)
+                  identity-trim (frame/resolve-frame [(assoc rgb :color-correction {:red 1 :green 1 :blue 1})]
+                                                     assignments options)]]
+      (is (= [128 0 64] (bytes-at output 1 1 2 3)))
+      (is (= [0.5 0.0 0.25] (get-in projected [0 :emitted-color])))
+      (is (= [255 128 64] (bytes-at untrimmed 1 1 2 3) (bytes-at identity-trim 1 1 2 3))))))
+
+(deftest color-correction-happens-after-native-blending-and-rgbw-extraction
+  (let [fixture (assoc rgb :channels {:red 1 :green 2 :blue 3 :white 4} :rgbw-policy :extract-min
+                       :color-correction {:red 0.0 :blue 0.5 :white 0.5})
+        blocks [{:kind :assignments :assignments [(assignment :rgb :color [0.5 0.5 1.0])]}
+                {:kind :batch
+                 :batch {:target-ids [:rgb] :outputs {:color {:type :vec3 :components 3
+                                                            :values (double-array [1.0 0.0 1.0])}}}
+                 :native-layer {:id :tint :member 0 :opacity 0.5}}
+                {:kind :assignments :assignments [(assignment :rgb :red 0.5)]}]]
+    (doseq [include-values? [true false]
+            intensity [{:master 0.5} {:hdr {:gain 0.5}}]
+            :let [output (frame/resolve-contributions [fixture] blocks
+                           (assoc intensity :include-values? include-values? :compact-values? true))
+                  projected (frame/project-compact (:compact output) [0])]]
+      (is (= [64 0 48 16] (bytes-at output 1 1 2 3 4)))
+      (is (= [0.3125 0.0625 0.25] (get-in projected [0 :emitted-color])))
+      (when include-values?
+        (is (= [0.75 0.25 1.0] (get-in output [:values :rgb :color])))))))
+
 (deftest blend-order-and-independent-targets
   (let [b (assoc rgb :id :b :address 10)
         assignments [(assignment :rgb :color [0.2 0.3 0.4])
