@@ -306,6 +306,11 @@
     :shift (into #{} (keep (fn [[id action]] (when (= :shift action) id))) button-bindings)
     #{temporary-encoder-modifier}))
 
+(defn- paired-parameter-encoders [layout bindings]
+  (keep (fn [[id {:keys [param]}]]
+          (when (and param (contains? (:encoder-touches layout) id)) id))
+        bindings))
+
 (defn- reset-encoder-model [options reset-model state]
   ;; A fresh show drops the gesture and its target. Held temporary touches need
   ;; their physical lift before a detent may edit the new selection.
@@ -363,7 +368,13 @@
                      (every? #(and (contains? (:buttons layout) %)
                                    (not (contains? members (get-in layout [:buttons % :channel])))) ids))
                 "Temporary encoder edits require operator gestures and a captured User Mode button"
-                {:temporary-encoder-modifier temporary-encoder-modifier})))
+                {:temporary-encoder-modifier temporary-encoder-modifier})
+        (doseq [id (paired-parameter-encoders layout encoder-bindings)
+                section [:encoder-touches :encoders]
+                :let [channel (get-in layout [section id :channel])]]
+          (valid! (not (contains? members channel))
+                  "Temporary encoder touch and turn require fixed User Mode channels outside MPE members"
+                  {:id id :layout-section section :channel channel}))))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
     (when (contains? options :launch-mode)
@@ -537,9 +548,7 @@
                (if (and mpe? result)
                  (update result :state #(assoc state :controls %))
                  result))
-        paired-encoders (filter (fn [[id binding]]
-                                  (and (:param binding) (contains? (:encoder-touches layout) id)))
-                                encoder-bindings)]
+        paired-encoders (paired-parameter-encoders layout encoder-bindings)]
     (assoc profile
            :capabilities (update-in (:capabilities profile) [:controls] into
                                     (cond-> #{:operator-gestures}

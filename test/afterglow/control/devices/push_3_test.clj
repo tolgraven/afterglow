@@ -431,6 +431,18 @@
           (is (empty? (:errors (session/snapshot device)))))
         (finally (session/close! device))))))
 
+(deftest mpe-temporary-encoder-pairs-require-fixed-control-addresses
+  (let [settings (assoc options :expression-mode :mpe :mpe-note-cells {40 [0 0]}
+                                :zone {:manager-channel 0 :member-channels [1]}
+                                :operator-gestures? true :temporary-encoder-modifier :right)]
+    (is (= :push-3 (:id (push/profile settings))))
+    (doseq [section [:encoder-touches :encoders]]
+      (let [member-capture (assoc-in settings [:layout section :level :channel] 1)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"fixed User Mode channels"
+                              (push/profile member-capture)))
+        (is (= :push-3 (:id (push/profile (dissoc member-capture :temporary-encoder-modifier)))))
+        (is (= :push-3 (:id (push/profile (update-in member-capture [:layout :encoder-touches] dissoc :level)))))))))
+
 (defn- launch-test-wash [show]
   (:model (model/apply-command show
             (merge (select-keys show [:show-id :epoch])
