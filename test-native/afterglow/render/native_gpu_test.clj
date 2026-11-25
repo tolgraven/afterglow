@@ -130,6 +130,45 @@
         (is (= (update-vals (:universes expected) vec)
                (update-vals (:universes actual) vec)))))))
 
+(deftest a-seeded-movement-sweep-packs-the-reference-bytes
+  ;; The guard is sound only while the driver's axis error stays inside its
+  ;; margin. Check both that error and the packed bytes it protects.
+  (let [n 32
+        patch (frame/compile-patch
+               (mapv (fn [i]
+                       {:id i :position [(- (mod i 8) 4) (+ 2.0 (mod i 3)) (- (quot i 8) 2)]
+                        :rotation-deg [(if (odd? i) 180 0) (- (mod (* i 31) 340) 170) (mod i 27)]
+                        :universe 0 :address (inc (* 4 i)) :channels {:pan [1 2] :tilt [3 4]}
+                        :calibration (if (even? i)
+                                       {:pan {:min-deg -270 :max-deg 270} :tilt [120 150]}
+                                       {:pan [125 -170] :tilt {:min-deg -45 :max-deg 55}})})
+                     (range n)))
+        margin @#'gpu/rounding-margin
+        rng (java.util.Random. 555)
+        coordinate #(* % (- (.nextDouble rng) 0.5))]
+    (with-open [solver (gpu/open! patch)
+                owner (movement/open! {:budget-ms 10000})]
+      (loop [frame 0 history {} retained 0]
+        (if (< frame 40)
+          (let [targets (into {} (for [id (range n)] [id [(coordinate 6.0) (coordinate 3.0) (coordinate 6.0)]]))
+                blocks [{:kind :assignments
+                         :assignments (vec (for [[id aim] targets] {:target-id id :attribute :aim :value aim}))}]
+                options (assoc history :compact-values? true)
+                expected (frame/resolve-contributions patch blocks options)
+                actual (movement/resolve-contributions! owner patch blocks options)
+                solved (gpu/solve! solver targets history)]
+            (is (every? (fn [[id values]]
+                          (every? #(< (abs (- (get-in expected [:values id %]) (% values))) margin) [:pan :tilt]))
+                        solved)
+                (str "frame " frame))
+            (is (= (update-vals (:universes expected) vec) (update-vals (:universes actual) vec))
+                (str "frame " frame))
+            (recur (inc frame) {:previous-compact (:compact expected)}
+                   (+ retained (get-in actual [:movement :gpu-heads]))))
+          ;; Roughly a quarter of heads have an axis within the margin of a
+          ;; 16-bit step; the rest must stay on the native path.
+          (is (< (* 0.5 n 40) retained)))))))
+
 (deftest published-frames-use-only-effective-selected-movement
   (let [patch (frame/compile-patch fixtures)
         reordered (frame/compile-patch (vec (reverse fixtures)))
