@@ -4,7 +4,7 @@
             [afterglow.reactive :as reactive]
             [afterglow.reactive.clock :as clock]
             [afterglow.reactive.registry :as registry])
-  (:import [java.util.concurrent CountDownLatch Executors TimeUnit Callable]))
+  (:import [java.util.concurrent Callable CountDownLatch Executors LinkedBlockingQueue TimeUnit]))
 
 (defn value-sub [{:keys [db]} _] (:value @db))
 
@@ -506,6 +506,141 @@
         (is (empty? (:cofx-snapshot @(:state sys))) "Released producers must drop their last sampled values.")
         (let [n @calls] (Thread/sleep 80) (is (= n @calls))))
       (finally (reactive/close! sys)))))
+
+(deftest frame-paced-coeffects-follow-committed-frames-and-stop-with-the-last-lease
+  (let [model {:show-id :show :epoch 0 :revision 0 :level :steady
+               :transport {:beat 8 :playing? false}}
+        sys (reactive/create-system model)
+        samples (LinkedBlockingQueue.) changes (LinkedBlockingQueue.)
+        raw-values (LinkedBlockingQueue.)
+        release (CountDownLatch. 1) interrupted (CountDownLatch. 1)
+        publish-frame! (fn [db expected]
+                         (is (= expected
+                                (some (fn [_]
+                                        (reactive/publish! sys db)
+                                        (.poll samples 20 TimeUnit/MILLISECONDS))
+                                      (range 150)))))
+        expect-value! (fn [^LinkedBlockingQueue received expected]
+                        (is (= expected
+                               (some (fn [_]
+                                       (reactive/publish! sys)
+                                       (.poll received 20 TimeUnit/MILLISECONDS))
+                                     (range 150)))))
+        expect-no-sample! #(is (nil? (.poll samples 20 TimeUnit/MILLISECONDS)))]
+    (try
+      (reactive/reg-cofx! sys ::remote
+                          {:mode :background :interval {:frames 2} :initial [nil :waiting]
+                           :sample (fn [{:keys [epoch frame-number level block?]}]
+                                     (.offer samples [epoch frame-number])
+                                     (when block?
+                                       (try (.await release)
+                                            (catch InterruptedException e
+                                              (.countDown interrupted)
+                                              (throw e))))
+                                     [frame-number level])})
+      (reactive/reg-sub! sys ::r (fn [{:keys [cofx]} _] (cofx ::remote)))
+      (reactive/reg-sub! sys ::level (fn [{:keys [subscribe]} _] (second @(subscribe [::r]))))
+      (reactive/publish! sys (assoc model :frame-number 0))
+      (expect-no-sample!)
+      (reactive/publish! sys model)
+      (let [a (reactive/acquire! sys [::r] #(.offer raw-values %))
+            b (reactive/acquire! sys [::level] #(.offer changes %))]
+        (is (= [nil :waiting] (:value a)))
+        (is (= :waiting (:value b)))
+        (expect-no-sample!)
+        (publish-frame! (assoc model :frame-number 0) [0 0])
+        (expect-value! raw-values [0 :steady])
+        (expect-value! changes :steady)
+        (reactive/publish! sys (assoc model :frame-number 0 :revision 1 :time-ms 10000))
+        (reactive/publish! sys (assoc-in (assoc model :frame-number 1) [:transport :beat] 40))
+        (expect-no-sample!)
+        (publish-frame! (assoc model :frame-number 2) [0 2])
+        (expect-value! raw-values [2 :steady])
+        (is (.isEmpty changes) "A distinct upstream sample can leave the consumer's selection unchanged.")
+        ((:close! a))
+        (publish-frame! (assoc model :frame-number 9 :level :updated) [0 9])
+        (expect-value! changes :updated)
+        (is (.isEmpty raw-values))
+        (expect-no-sample!)
+        (publish-frame! (assoc model :epoch 1 :frame-number 8 :block? true) [1 8])
+        (reactive/publish! sys (assoc model :epoch 1 :frame-number 10))
+        (expect-no-sample!)
+        ((:close! b))
+        (is (.await interrupted 3 TimeUnit/SECONDS))
+        (is (false? (reactive/demanded? sys #{::r})))
+        (reactive/publish! sys (assoc model :epoch 1 :frame-number 12))
+        (expect-no-sample!))
+      (finally (.countDown release) (reactive/close! sys)))))
+
+(deftest frame-sampling-intervals-require-one-positive-whole-frame-count
+  (let [sys (reactive/create-system {})]
+    (try
+      (doseq [interval [{:frames 0} {:frames -1} {:frames 1/2} {:frames "2"} {:frames 2 :beats 1}]]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (reactive/reg-cofx! sys ::remote {:mode :background :interval interval
+                                                       :sample (constantly nil)}))))
+      (finally (reactive/close! sys)))))
+
+(deftest frame-paced-samples-from-an-old-epoch-cannot-reach-retained-watchers
+  (let [model {:show-id :show :epoch 0 :frame-number 0}
+        sys (reactive/create-system model)
+        old-started (CountDownLatch. 1) old-interrupted (CountDownLatch. 1)
+        release-old (CountDownLatch. 1) new-started (CountDownLatch. 1)
+        release-new (CountDownLatch. 1) probe-started (CountDownLatch. 1)
+        changes (LinkedBlockingQueue.)]
+    (try
+      (reactive/reg-cofx! sys ::reading
+                          {:mode :background :interval {:frames 2} :initial :waiting
+                           :sample (fn [{:keys [epoch]}]
+                                     (if (zero? epoch)
+                                       (do
+                                         (.countDown old-started)
+                                         (try (.await release-old)
+                                              (catch InterruptedException _
+                                                (.countDown old-interrupted)
+                                                (.await release-old)))
+                                         :stale)
+                                       (do
+                                         (.countDown new-started)
+                                         (.await release-new)
+                                         :current)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (reactive/reg-fx! sys ::launch
+                        (fn [_ value _]
+                          (when (#{:stale :current} value)
+                            {:op :cue/launch :cue-id value})))
+      (reactive/watch! sys ::watch-reading [::reading] ::launch)
+      (let [{:keys [signal]} (reactive/acquire! sys [::reading] #(.offer changes %))]
+        (is (.await old-started 3 TimeUnit/SECONDS))
+        (reactive/publish! sys)
+        (reactive/publish! sys (update model :epoch inc))
+        (is (.await old-interrupted 3 TimeUnit/SECONDS))
+        (is (.await new-started 3 TimeUnit/SECONDS))
+        ;; Both sampler threads are occupied. The probe can only start once
+        ;; the old worker has handled its result because the new one stays held.
+        (reactive/reg-cofx! sys ::probe {:mode :background :interval {:frames 2}
+                                        :sample (fn [_] (.countDown probe-started))})
+        (reactive/reg-sub! sys ::probe (fn [{:keys [cofx]} _] (cofx ::probe)))
+        (let [{:keys [close!]} (reactive/acquire! sys [::probe] identity)]
+          (.countDown release-old)
+          (is (.await probe-started 3 TimeUnit/SECONDS))
+          (reactive/publish! sys)
+          (is (= :waiting @signal))
+          (is (.isEmpty changes))
+          (is (empty? (reactive/drain-actions! sys)))
+          (close!))
+        (.countDown release-new)
+        (is (= :current (some (fn [_]
+                                (reactive/publish! sys)
+                                (.poll changes 20 TimeUnit/MILLISECONDS))
+                              (range 150))))
+        (reactive/publish! sys)
+        (is (.isEmpty changes))
+        (is (= [{:op :cue/launch :cue-id :current}] (reactive/drain-actions! sys))))
+      (finally
+        (.countDown release-old)
+        (.countDown release-new)
+        (reactive/close! sys)))))
 
 (deftest invalid-db-does-not-stop-independent-sources-or-drop-diagnostics
   (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])}) src (reactive/ratom system ::x 1)]
