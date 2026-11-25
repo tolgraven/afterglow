@@ -73,6 +73,30 @@
     (is (= 0.0625 (get-in paused [:assignments 0 :value])))
     (is (= (double (/ 11/4 24)) (get-in edited [:assignments 0 :value])))))
 
+(deftest shared-time-forecast-refreshes-after-an-instance-pause-at-a-stationary-beat
+  (let [calls (atom [])
+        sample (fn [{:keys [frame] :as context}]
+                 (let [shared-ms (get-in frame [:transport-clock :time-ms])]
+                   (swap! calls conj [(:time-ms frame) shared-ms])
+                   (assoc context :assignments [{:target-id :lamp :attribute :dimmer
+                                                 :value (/ shared-ms 2000.0)}])))
+        compile (constantly (vary-meta (kf/predictable sample) assoc ::kf/transport-clock? true))
+        change (fn [model op at]
+                 (let [{:keys [ack model]} (control/apply-command model {:op op :instance-id "0:1" :source :test
+                                                                        :command-id (name op) :show-id (:show-id model)
+                                                                        :epoch (:epoch model) :time-ms at})]
+                   (is (= :accepted (:status ack)))
+                   model))
+        initial (advance (show {:interval {:beats 1}}) nil compile 0)
+        resumed (-> (:model initial) (change :instance/pause 0) (change :instance/resume 400))
+        after (engine/advance resumed {:time-ms 400 :keyframes (:keyframes initial)} compile)
+        window (get-in after [:keyframes "0:1"])]
+    (is (= {:clock-offset-beats 0 :clock-offset-ms 400}
+           (select-keys (get-in resumed [:instances "0:1" :system]) [:clock-offset-beats :clock-offset-ms])))
+    (is (= [[0.0 0.0] [500.0 500.0] [0.0 400.0] [500.0 900.0]] (mapv #(mapv double %) @calls)))
+    (is (= {:origin [0.2] :target [0.45] :result [0.2]}
+           (select-keys (kf/inspect window :lamp :dimmer) [:origin :target :result])))))
+
 (deftest progress-may-reverse-and-remain-short-of-a-boundary
   (let [opts {:interval {:beats 1} :progress {:mode :replace :variable [:audio :bass]}}
         calls (atom []) compile (compile-recorder calls)
