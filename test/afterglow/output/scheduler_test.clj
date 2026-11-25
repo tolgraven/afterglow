@@ -153,7 +153,7 @@
                              :uv {:offset 12 :fine-offset 523 :inverted-from 2.5}
                              :white {:offset 14 :fine-offset 15 :inverted-from 0 :functions {:white [0 255]}}}}
                  {:id :lamp :universe 5 :address 512
-                  :channels {:dimmer {:offset 1 :fine-offset 2 :inverted-from 0}
+                  :channels {:dimmer {:offset 1 :fine-offset 2 :inverted-from 1E-400M}
                              :fan {:offset 3 :inverted-from 0}}}
                  {:id :partial :universe 5 :address 8
                   :channels {:dimmer {:offset 1 :inverted-from 32}}}])

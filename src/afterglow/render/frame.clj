@@ -87,8 +87,8 @@
   (into {}
         (for [fixture fixtures
               [attribute {:keys [coarse fine inverted-from] :as channel}] (:compiled-channels fixture)
-              ;; Positive inversion pivots still encode zero drive as raw zero.
-              :when (and (zero? (or inverted-from -1))
+              ;; Match the pivot representation used by the channel packer.
+              :when (and (zero? (double (or inverted-from -1)))
                          (or (= :dimmer attribute) (contains? emitter-attributes attribute)))
               :let [word (long (emission/packed-word channel 0.0 false))]
               entry (if fine
