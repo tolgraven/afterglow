@@ -3,7 +3,7 @@
   show dispatch remains the host coordinator's responsibility. No work starts at
   namespace load. Profiles are pure transitions; transports are injected maps.")
 
-(declare receive! refresh! close! suspend! resume!)
+(declare receive! refresh! refresh-session! close! suspend! resume!)
 
 (defn create
   "Create an inert session. Required options: :session-id, :profile, :model!
@@ -15,14 +15,17 @@
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
   A :feedback-source may supply :open! [], :project! [handle local model] and
   :close! [handle]. Only feedback sees its projection; input always receives
-  the committed model. Its handle belongs to the active session.
+  the committed model. Its handle belongs to the active session. A profile's
+  optional :advance [local model envelope] handles logical refresh deadlines
+  before projection and may emit commands.
   Call open! explicitly; without schedule! the host owns the refresh cadence."
   [{:keys [session-id profile model! dispatch! now-ms!] :as options}]
   (when-not (and (or (keyword? session-id) (and (string? session-id) (seq session-id)))
                  (map? profile) (every? ifn? [model! dispatch! now-ms!]))
     (throw (ex-info "Session needs ID, profile, model!, dispatch! and now-ms!" {})))
   {:options options :lock (Object.) :resources (atom {})
-   :command-prefix (if (:grid-launches? profile) (str (java.util.UUID/randomUUID)) session-id)
+   :command-prefix (if (or (:grid-launches? profile) (:unique-command-prefix? profile))
+                     (str (java.util.UUID/randomUUID)) session-id)
    :state (atom {:status :closed :generation 0 :counter 0
                  :local (:initial-state profile {}) :errors []})})
 
@@ -193,7 +196,7 @@
                    (adopt-epoch! session model)
                    (let [model (reconcile! session model)]
                      (enact! session ((:input profile) (:local @(:state session)) event model (envelope! session model))))
-                   (refresh! session)))))
+                   (refresh-session! session false)))))
            (catch Exception error
              (record-error! session error)
              (when (:device/transport-failed (ex-data error))
@@ -217,17 +220,19 @@
         model))
     model))
 
-(defn refresh!
-  "Render latest model with bounded profile feedback. No background scheduler
-  is allocated; callers can invoke this from a shared UI scheduler."
-  [session]
+(defn- refresh-session! [session advance?]
   (locking (:lock session)
     (when (= :active (:status @(:state session)))
       (try
         (let [{:keys [profile model!]} (:options session)
               model (model!)]
           (adopt-epoch! session model)
-          (let [model (reconcile! session model)]
+          (let [model (reconcile! session model)
+                result (when-let [advance (when advance? (:advance profile))]
+                         (advance (:local @(:state session)) model (envelope! session model)))
+                _ (enact! session result)
+                model (if (seq (:commands result)) (model!) model)]
+            (adopt-epoch! session model)
             (when-let [feedback (:feedback profile)]
               (let [local (:local @(:state session))]
                 (enact! session (feedback local (feedback-model session local model) (envelope! session)))))))
@@ -238,6 +243,12 @@
             (update-state! session assoc :status :failed))
           (throw error))))
     (snapshot session)))
+
+(defn refresh!
+  "Process due profile work and render bounded feedback. No background
+  scheduler is allocated here; an owner may call this on its refresh cadence."
+  [session]
+  (refresh-session! session true))
 
 (defn suspend!
   "Release held gestures and restore device state before giving up its display.
