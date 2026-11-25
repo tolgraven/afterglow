@@ -215,10 +215,20 @@
       (and gesture (not (:released? gesture))) {:state (update state :encoder-gestures dissoc control-id)}
       :else {:state state})))
 
-(defn- release-stale-encoder-touch [state {:keys [type note]} {:keys [time-ms] :as envelope}]
-  (if (and (= :note-off type) (= :temporary (get-in state [:encoder-touch-modes note])))
+(defn- retain-stale-encoder-input
+  [modifier-cc modifier-key state {:keys [type note controller raw-value]} {:keys [time-ms] :as envelope}]
+  (cond
+    (and (:ready? state) (= :control-change type) (= modifier-cc controller))
+    (assoc state modifier-key (pos? raw-value))
+
+    (and (:ready? state) (= :note-on type) (<= 0 note 7) (get state modifier-key))
+    ;; Keep the physical touch suppressed without selecting a new show target.
+    (assoc-in state [:encoder-touch-modes note] :temporary)
+
+    (and (= :note-off type) (= :temporary (get-in state [:encoder-touch-modes note])))
     (:state (release-encoder (observe-temporary-release-tails state time-ms) note envelope))
-    state))
+
+    :else state))
 
 (defn- page-control [state model direction]
   (if (:shift? state)
@@ -395,7 +405,7 @@
         {:state (-> state (update :display-buttons (fnil conj #{}) controller)
                     (display/apply-action model action))}))))
 
-(defn- input [device-id grid operator-gestures? temporary-encoder-modifier state event model envelope]
+(defn- input [device-id grid operator-gestures? modifier-key state event model envelope]
   (let [state (selected-state state model)
         display-input (display-button state model event)]
    (cond
@@ -421,8 +431,7 @@
     (and (= :control-change (:type event)) (= 86 (:controller event)))
     {:state (assoc state :record? (pos? (:raw-value event)))}
     (and (= :note-on (:type event)) (<= 0 (:note event) 9))
-    (let [down? (if (= :shift temporary-encoder-modifier) (:shift? state) (:temporary-encoder-modifier-down? state))
-          mode (when temporary-encoder-modifier (if down? :temporary :ordinary))]
+    (let [mode (when modifier-key (if (get state modifier-key) :temporary :ordinary))]
       (touch-encoder state model (:note event) envelope operator-gestures? mode))
     (and (= :note-off (:type event)) (<= 0 (:note event) 9))
     (release-encoder state (:note event) envelope)
@@ -792,6 +801,10 @@
     (throw (ex-info "Temporary encoder edits require operator gestures and :shift or a MIDI button CC"
                     {:temporary-encoder-modifier temporary-encoder-modifier})))
   (let [modifier (if (= 49 temporary-encoder-modifier) :shift temporary-encoder-modifier)
+        modifier-key (cond
+                       (= :shift modifier) :shift?
+                       (some? modifier) :temporary-encoder-modifier-down?)
+        modifier-cc (if (= :shift modifier) 49 modifier)
         grid (launch/grid options)
         {:keys [modes actions] :as display-capabilities} (:display-capabilities display)
         _ (when-not (and (or (nil? modes) (and (set? modes) (seq modes) (every? display/modes modes)))
@@ -818,7 +831,7 @@
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
                 (cond
                   (and control (= modifier control))
-                  {:state (assoc state :temporary-encoder-modifier-down? down?)}
+                  {:state (assoc state modifier-key down?)}
                   (and target-search (= 111 cc))
                   {:state (targets/toggle (cond-> state (:active-grid state) (set-active-grid-mode nil))
                                           target-search model)}
@@ -830,15 +843,17 @@
                             (if (and (:target-picker state) x)
                               {:state (targets/pad state (:note event) [x y])}
                               (targets/launch state (input device-id grid (true? operator-gestures?)
-                                                           modifier state event model envelope)))))))
+                                                           modifier-key state event model envelope)))))))
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(reset-active-grid
-                     (assoc (dissoc (reset-encoder-epoch (targets/clear-selection %)) :grid-selection :grid-presses)
-                           :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
-                           :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
-                           :temporary-encoder-modifier-down? false :pressed-pads #{} :pad-instances {}))
+     :reset-model (fn [state]
+                    (reset-active-grid
+                      (cond-> (assoc (dissoc (reset-encoder-epoch (targets/clear-selection state)) :grid-selection :grid-presses)
+                                     :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
+                                     :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
+                                     :temporary-encoder-modifier-down? false :pressed-pads #{} :pad-instances {})
+                        modifier-key (assoc modifier-key (boolean (get state modifier-key))))))
      :ack (fn [state command ack]
             (if (#{:gesture/begin :gesture/sample :gesture/end :gesture/cancel} (:op command))
               (acknowledge-encoder state command ack)
@@ -858,7 +873,7 @@
                           (assoc-in [:pad-instances note] (:instance-id ack)))
                  :commands (:commands hold)})))}
       grid launch-receipt)
-      (some? modifier) (assoc :stale-input release-stale-encoder-touch)
+      modifier-key (assoc :stale-input (partial retain-stale-encoder-input modifier-cc modifier-key))
       (true? operator-gestures?) with-encoder-gestures)))
 
 (defn connect!

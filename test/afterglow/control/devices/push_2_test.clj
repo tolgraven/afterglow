@@ -833,6 +833,86 @@
           (is (= 0.51 (:level (values h new-id))))))
       (finally (finish! h)))))
 
+(deftest a-held-temporary-modifier-applies-to-a-new-touch-after-epoch-adoption
+  (doseq [[modifier cc] [[:shift 49] [41 41]]]
+    (testing (str modifier)
+      (let [{:keys [show] :as h} (fixture/ready!
+                                  (fixture/harness {:profile (push/profile {:operator-gestures? true
+                                                                            :temporary-encoder-modifier modifier})}
+                                                   push-operator))]
+        (try
+          (let [old-id (launch! h 37)]
+            (receive! h [0xb0 cc 127])
+            (receive! h [0x90 0 127])
+            (reset! show (model/new-show (update (select-keys @show [:show-id :epoch :registry :pages]) :epoch inc)))
+            (let [new-id (launch! h 37)
+                  before (count (admitted-commands h))]
+              (is (not= old-id new-id))
+              (receive! h [0x80 0 0])
+              (receive! h [0x90 0 127])
+              (receive! h [0xb0 71 10])
+              (is (> (:level (values h new-id)) 0.5))
+              (receive! h [0x80 0 0])
+              (let [[begin :as commands] (drop before (admitted-commands h))]
+                (is (true? (:temporary? begin)))
+                (is (= [:gesture/begin :gesture/sample :gesture/cancel] (mapv :op commands))))
+              (is (= 0.5 (:level (values h new-id))))))
+          (finally (finish! h)))))))
+
+(deftest temporary-modifier-edges-crossing-epoch-reconciliation-only-update-physical-state
+  (doseq [[modifier cc] [[:shift 49] [41 41]] down? [false true]]
+    (testing (str modifier " " (if down? "press" "release"))
+      (let [{:keys [show after-model-read complete-sample apply!] :as h}
+            (pending-sample-harness {:temporary-encoder-modifier modifier})]
+        (try
+          (let [old-id (launch! h 37)
+                replace! (fn []
+                           (@complete-sample)
+                           (reset! show (model/new-show (update (select-keys @show [:show-id :epoch :registry :pages]) :epoch inc)))
+                           (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                          {:op :cue/launch :command-id "replacement" :source {:adapter :test}
+                                           :cue-id :latched})))]
+            (when-not down? (receive! h [0xb0 cc 127]))
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 10])
+            (reset! after-model-read replace!)
+            (receive! h [0xb0 cc (if down? 127 0)])
+            (let [new-id (first (keys (:instances @show)))]
+              (is (not= old-id new-id))
+              (is (= :cue/launch (:op (peek (admitted-commands h)))))
+              (receive! h [0x80 0 0])
+              (receive! h [0x90 0 127])
+              (is (= down? (true? (:temporary? (peek (admitted-commands h))))))
+              (receive! h [0x80 0 0])
+              (is (= (if down? :gesture/cancel :gesture/end) (:op (peek (admitted-commands h)))))))
+          (finally (finish! h)))))))
+
+(deftest temporary-touch-crossing-epoch-reconciliation-cannot-edit-the-replacement
+  (let [{:keys [show after-model-read complete-sample apply!] :as h}
+        (pending-sample-harness {:temporary-encoder-modifier :shift})]
+    (try
+      (swap! show assoc-in [:registry :effects :wash :params :speed] {:type :number :default 0.25 :bounds [0 1]})
+      (launch! h 37)
+      (receive! h [0x90 1 127])
+      (receive! h [0xb0 72 10])
+      (receive! h [0xb0 49 127])
+      (reset! after-model-read #(do (@complete-sample)
+                                    (reset! show (model/new-show (update (select-keys @show [:show-id :epoch :registry :pages]) :epoch inc)))
+                                    (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                                   {:op :cue/launch :command-id "replacement" :source {:adapter :test}
+                                                    :cue-id :latched}))))
+      (receive! h [0x90 0 127])
+      (let [new-id (first (keys (:instances @show)))
+            before (admitted-commands h)]
+        (is (= :cue/launch (:op (peek before))))
+        (receive! h [0xb0 49 0])
+        (receive! h [0xb0 71 5])
+        (receive! h [0x80 0 0])
+        (receive! h [0xb0 71 5])
+        (is (= before (admitted-commands h)))
+        (is (= 0.5 (:level (values h new-id)))))
+      (finally (finish! h)))))
+
 (deftest touch-strip-keeps-ordinary-editing-for-a-different-target
   (let [h (gesture-harness push-operator nil)]
     (try
