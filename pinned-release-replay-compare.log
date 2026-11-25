@@ -1,0 +1,8 @@
+{:reload-policy :preserve-state, :compiler :reference, :dmx [[0 0] [255 0] [0 0] [0 0] [255 0]]}
+{:reload-policy :preserve-state, :compiler :batch, :dmx [[0 0] [255 0] [0 0] [0 0] [255 0]]}
+{:reload-policy :restart, :compiler :reference, :dmx [[0 0] [255 0] [0 0] [0 0] [255 0]]}
+{:reload-policy :restart, :compiler :batch, :dmx [[0 0] [255 0] [0 0] [0 0] [255 0]]}
+{:tolglow "16b384a93611ac7ed857411ef42a24f42491ce6d", :afterglow "35caaf1907deb068f4862e1518cc30d022ce874a"}
+All 20 recorded frames match the corrected and intermediate captures on every field.
+The original review head differs at eight DMX readbacks: four entries into the muted group and four exits. All other recorded fields match.
+Accepted revisions, committed definition versions, instance start times, mixer levels and last-good evaluation fallback verified for all four cases.
