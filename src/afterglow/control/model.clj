@@ -403,15 +403,39 @@
           (identifier? effect-id)
           (assoc :effect-id effect-id :effect-label (target-label effect-id (:name definition))))))))
 
-(defn- history-cell [model history [kind id param :as target]]
-  (let [instance (get-in model [:instances id])
-        schema (get-in instance [:definition :params param])
+(defn- live-scalar-cell [instance param]
+  (let [schema (get-in instance [:definition :params param])
         value (get-in instance [:params param])]
-    (when (and (= :instance-param kind)
-               (= :running (:phase instance))
+    (when (and (= :running (:phase instance))
                (#{:number :integer} (:type schema))
                (params/valid-value? schema value))
-      {:value value :generation (get-in history [:generations target] 0)})))
+      {:type (:type schema) :value value})))
+
+(defn- history-cell [model history [kind id param :as target]]
+  (when (= :instance-param kind)
+    (when-let [cell (live-scalar-cell (get-in model [:instances id]) param)]
+      (assoc cell :generation (get-in history [:generations target] 0)))))
+
+(defn track-parameter-generations
+  "Advance tracked scalar generations across an instance transition outside
+  the command reducer. A parameter can disappear and later return with a new
+  default that equals an earlier sample. Observe the loss of the live cell so
+  undo, cancel and capture cannot claim the new value."
+  [before model]
+  (let [old-instances (:instances before)
+        instances (:instances model)]
+    (reduce-kv (fn [model [kind id param :as target] _]
+                 (let [previous (get old-instances id)
+                       current (get instances id)]
+                   (if (and (= :instance-param kind)
+                            (or (not= (:phase previous) (:phase current))
+                                (not (identical? (:params previous) (:params current)))
+                                (not (identical? (:definition previous) (:definition current))))
+                            (not= (live-scalar-cell previous param) (live-scalar-cell current param)))
+                     (update-in model [:control :edit-history :generations target] inc)
+                     model)))
+               model
+               (get-in model [:control :edit-history :generations] {}))))
 
 (defn- retain-history-generations [history op target]
   (case op

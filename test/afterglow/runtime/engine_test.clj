@@ -212,6 +212,55 @@
       (is (= 0.75 (-> result :assignments first :value))))
     (is (= 1 (get-in show [:instances "a" :effect-version])))))
 
+(deftest compatible-reloads-invalidate-history-for-reintroduced-parameters
+  (let [effect (assoc-in definition [:params :speed] {:type :number :default 0.25})
+        show (-> (control/new-show)
+                 (control! {:op :registry/publish :kind :effects :definition effect})
+                 (control! {:op :cue/put :cue {:id :pulse :effect-id :pulse}})
+                 (control! {:op :cue/launch :cue-id :pulse :launch {:reload-policy :preserve-state}}))
+        id (first (keys (:instances show)))
+        submit (fn [show payload]
+                 (control/apply-command show
+                                        (merge (select-keys show [:show-id :epoch :time-ms])
+                                               {:command-id (str (:revision show)) :source :runtime-test}
+                                               payload)
+                                        {:operator-id :runtime-test}))
+        edit (fn [show gesture action]
+               (let [{:keys [model ack]} (submit show (merge gesture action))]
+                 (is (= :accepted (:status ack)))
+                 model))
+        level {:instance-id id :param :level :control-id :knob-1 :gesture-id :turn-1}
+        speed {:instance-id id :param :speed :control-id :knob-2 :gesture-id :turn-2}
+        undo {:op :history/undo :expected-cursor 1 :expected-history-position 1}
+        reload (fn [show definition time-ms]
+                 (let [published (control! show {:op :registry/publish :kind :effects :definition definition})]
+                   (:model (engine/advance published {:time-ms time-ms} (constantly identity)))))
+        completed (-> show
+                      (edit level {:op :gesture/begin})
+                      (edit level {:op :gesture/sample :sequence 1 :value 0.6})
+                      (edit level {:op :gesture/end :last-sequence 1}))
+        preserved (reload completed (assoc effect :version 2 :name "Pulse updated") 10)
+        valid-undo (submit preserved undo)
+        opened (-> preserved
+                   (edit speed {:op :gesture/begin})
+                   (edit speed {:op :gesture/sample :sequence 1 :value 0.4}))
+        removed (reload opened (assoc effect :version 3 :params {}) 20)
+        restored (reload removed (assoc effect :version 4 :params {:level {:type :number :default 0.6}
+                                                                   :speed {:type :number :default 0.4}}) 30)
+        saved (control/edit-history-snapshot restored)
+        ended (submit restored (assoc speed :op :gesture/end :last-sequence 1))
+        stale-undo (submit restored undo)]
+    (is (= :accepted (get-in valid-undo [:ack :status])))
+    (is (= 0.5 (get-in valid-undo [:model :instances id :params :level])))
+    (is (= [2 3 4] (mapv #(get-in % [:instances id :effect-version]) [preserved removed restored])))
+    (is (= {} (get-in removed [:instances id :params])))
+    (is (= {:level 0.6 :speed 0.4} (get-in restored [:instances id :params])))
+    (is (= 1 (:cursor saved)))
+    (is (= :history-conflict (get-in ended [:ack :discarded])))
+    (is (empty? (get-in ended [:model :control :edit-history :open])))
+    (is (= :history-conflict (get-in stale-undo [:ack :code])))
+    (is (identical? restored (:model stale-undo)))))
+
 (deftest compile-shared-definitions-once-per-frame
   (let [compiled (atom [])
         show (model (instance "a") (instance "b" :order 1))]
