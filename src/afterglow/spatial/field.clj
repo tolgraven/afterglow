@@ -147,7 +147,7 @@
             opts (beam/volume-options prepared optical sampling origins)
             read-row (or values {})
             receive (if emissions
-                      #(beam/observed-contribution % volume sampling opts)
+                      (beam/observed-volume-reader volume sampling opts)
                       #(beam/contribution % (read-row (:id %)) volume sampling opts))
             aims (volatile! (transient {}))
             add-beam (fn [weights source]
