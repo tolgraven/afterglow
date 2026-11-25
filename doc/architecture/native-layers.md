@@ -82,6 +82,17 @@ writes in the current frame.
 
 ### Reordering active instances
 
+To set a running instance's priority directly, submit
+`{:op :instance/set-priority :instance-id source-id :priority 4.5}`. The
+priority can be any finite number. The instance joins the end of that tier,
+after peers already there and before later launches in the tier. An active
+compound layer moves together, including release tails, in its current member
+order. Once the whole layer is in a tier, repeating that priority leaves its
+position alone. The receipt includes `:render-priority` and the new
+`:instance-ids` order. Launch IDs, original
+priorities, effect state and timing stay intact. To choose the initial priority
+on a new launch, supply `:launch {:priority 4.5}`.
+
 Submit `{:op :instance/move-after :instance-id source-id :after-instance-id
 target-id :expected-revision captured-revision}` through the show owner. Use the
 instance IDs and revision captured from the committed view. The owner rejects

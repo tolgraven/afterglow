@@ -183,6 +183,28 @@
      :events (if (seq changed-tiers) [{:type :instances/reordered :instance-ids ids}] [])
      :result {:instance-ids ids}}))
 
+(defn- with-render-priority [instance priority]
+  (if (zero? (compare (:priority instance) priority))
+    (dissoc instance :render-priority)
+    (assoc instance :render-priority priority)))
+
+(defn- set-active-priority [model {:keys [instance-id priority]}]
+  (let [source (running-instance! model instance-id)
+        _ (require! (params/finite-number? priority) :invalid-priority "Priority must be finite")
+        before (instance-order/ordered model)
+        unit? (partial same-unit? source)
+        members (filterv unit? before)
+        in-tier? #(zero? (compare priority (instance-order/effective-priority %)))
+        after (if (every? in-tier? members)
+                before
+                (let [[earlier later] (split-with #(not (pos? (compare (instance-order/effective-priority %) priority)))
+                                                  (remove unit? before))
+                      moved (mapv #(with-render-priority % priority) members)]
+                  (into (into (vec earlier) moved) later)))
+        result (commit-order model before after)]
+    (update result :result assoc :instance-id instance-id
+            :render-priority (instance-order/effective-priority (get-in result [:model :instances instance-id])))))
+
 (defn- move-after [model {:keys [instance-id after-instance-id]}]
   (let [source (running-instance! model instance-id)
         target (running-instance! model after-instance-id)
@@ -206,10 +228,7 @@
                 "The target compound layer has interleaved members")
       (let [after (if (and (not= before after)
                            (not (zero? (compare (instance-order/effective-priority source) target-priority))))
-                    (assoc after (+ (count prefix) (count target-run))
-                           (if (zero? (compare (:priority source) target-priority))
-                             (dissoc source :render-priority)
-                             (assoc source :render-priority target-priority)))
+                    (assoc after (+ (count prefix) (count target-run)) (with-render-priority source target-priority))
                     after)]
         (update (commit-order model before after)
                 :result assoc :instance-id instance-id :after-instance-id after-instance-id)))))
@@ -355,6 +374,7 @@
       (require! effect :unknown-effect "Effect is not published")
       (cond-> (launch-instance model command cue effect)
         cue (update :model pages/record-launch (:cue-id command))))
+    :instance/set-priority (set-active-priority model command)
     :instance/move-after (move-after model command)
     :instances/shuffle (shuffle-instances model command)
     :instance/end
@@ -684,11 +704,14 @@
   rather than replay commands after receipts have been evicted. Restart changes
   epoch and drops active instances and their edit history.
 
+  :instance/set-priority takes a running :instance-id and finite :priority. The
+  instance or its active native layer appends to the requested tier. The
+  receipt includes the selected instance's effective :render-priority.
   :instance/move-after takes :instance-id and :after-instance-id. Standalone
   moves can change effective priority. Compound members move together within
   one tier. :instances/shuffle takes a signed 64-bit :seed and shuffles running
   standalone slots within each effective tier.
-  Both return committed :instance-ids in render input order. Capture
+  All three return committed :instance-ids in render input order. Capture
   :expected-revision when the operation depends on a previously displayed order.
 
   :effect-selection/toggle takes :control (:solo or :mute), a :selector,

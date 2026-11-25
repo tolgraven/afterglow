@@ -12,7 +12,9 @@
   "Translate {:path string :args vector} using a path->mapping map and an explicit
   command envelope. Unknown paths return nil. Supported mappings contain :op and
   its fixed target (:cue-id, :instance-id, :param), plus optional :launch/:force?.
-  Launch/end take no args, parameter/master/blackout set take exactly one arg.
+  Launch/end take no args. A launch with :priority-arg? true takes one finite
+  priority and uses it as :launch :priority. Parameter, priority, master and
+  blackout set take exactly one arg.
   The caller assigns unique IDs and logical time; no IDs or time are fabricated."
   [mappings {:keys [path args] :as message} envelope]
   (when-not (and (map? mappings) (map? message) (string? path)
@@ -26,17 +28,27 @@
                    (finite? (:time-ms envelope)) (not (neg? (:time-ms envelope))))
       (invalid! "OSC command requires an explicit identity, epoch, source and logical time"
                 {:path path}))
-    (let [set-op? (#{:param/set :master/set :blackout/set} op)
-          expected (if set-op? 1 0)
+    (let [launch-priority? (and (= :cue/launch op) (true? (:priority-arg? mapping)))
+          priority? (or launch-priority? (= :instance/set-priority op))
+          expected (if (or priority? (#{:param/set :master/set :blackout/set} op)) 1 0)
           value (first args)]
       (when-not (= expected (count args))
         (invalid! "Wrong OSC argument count" {:path path :expected expected :actual (count args)}))
+      (when (and priority? (not (finite? value)))
+        (invalid! "OSC priority must be finite" {:path path :value value}))
       (merge (select-keys envelope [:command-id :show-id :epoch :source :time-ms
                                     :expected-revision :gesture-id])
              (case op
                :cue/launch
                (do (when-not (some? cue-id) (invalid! "Cue mapping requires :cue-id" {:path path}))
-                   (cond-> {:op op :cue-id cue-id} launch (assoc :launch launch)))
+                   (when (and launch-priority? (some? launch) (not (map? launch)))
+                     (invalid! "Launch options must be a map" {:path path}))
+                   (cond-> {:op op :cue-id cue-id}
+                     launch (assoc :launch launch)
+                     launch-priority? (assoc-in [:launch :priority] value)))
+               :instance/set-priority
+               (do (when-not (some? instance-id) (invalid! "Priority mapping requires :instance-id" {:path path}))
+                   {:op op :instance-id instance-id :priority value})
                :instance/end
                (do (when-not (some? instance-id) (invalid! "End mapping requires :instance-id" {:path path}))
                    (cond-> {:op op :instance-id instance-id}
