@@ -1,5 +1,5 @@
 (ns afterglow.control.devices.push-3-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.model :as model]
             [afterglow.control.pages :as pages]
             [afterglow.control.devices.push-3 :as push]
@@ -33,9 +33,9 @@
         device (session/create
                  {:session-id "push3-capture-test" :profile (push/profile (merge options profile-options))
                   :display (:display profile-options)
-                  :model! #(deref show) :now-ms! (constantly 0)
+                  :model! #(deref show) :now-ms! (or (:now-ms! profile-options) (constantly 0))
                   :dispatch! (fn [command]
-                               (let [result (model/apply-command @show command)]
+                               (let [result (model/apply-command @show command (:authority profile-options))]
                                  (swap! log conj command) (reset! show (:model result)) result))
                   :midi {:open! #(do (reset! receive %) :capture)
                          :send! (fn [_ _] (throw (ex-info "Push 3 must not emit unverified bytes" {})))
@@ -247,6 +247,189 @@
             (is (= (+ fine 0.01) (level))))))
       (is (empty? (:errors (session/snapshot device))))
       (finally (session/close! device)))))
+
+(deftest momentary-encoders-own-independent-samples-and-restore-on-their-own-lifts
+  (let [now (atom 0)
+        settings {:layout (-> layout
+                             (assoc-in [:encoders :count] {:channel 2 :controller 21})
+                             (assoc-in [:encoder-touches :count] {:channel 2 :note 10}))
+                  :encoder-bindings (assoc (:encoder-bindings options) :count {:param :count})
+                  :button-bindings {:right :shift}
+                  :temporary-encoder-modifier :shift :operator-gestures? true
+                  :authority {:operator-id :push-3-test} :now-ms! #(deref now)}
+        {:keys [show log receive device]} (harness settings)]
+    (try
+      (swap! show assoc :rig {:fixtures [{:id :light :channels {:pan [1 2]}}]})
+      (swap! show assoc-in [:registry :effects :wash :outputs] {:pan {:op :param :key :level}})
+      (session/open! device)
+      (@receive [0x93 12 100])
+      (let [id (first (keys (:instances @show)))
+            params #(get-in @show [:instances id :params])
+            history #(get-in @show [:control :edit-history])]
+        (@receive [0xb4 23 127])
+        (@receive [0x92 9 127])
+        (@receive [0x92 10 127])
+        (@receive [0x92 9 127])
+        (@receive [0xb2 19 1])
+        (@receive [0xb2 21 1])
+        (is (= (+ 0.5 (/ 1.0 65535)) (:level (params))))
+        (is (= 6 (:count (params))))
+        (is (= 2 (count (:open (history)))))
+        (@receive [0xb4 23 0])
+        (@receive [0xb2 19 1])
+        (is (= (+ 0.5 (/ 1.0 65535) 0.01) (:level (params))))
+        (@receive [0x92 9 0])
+        (@receive [0xb2 19 1])
+        (is (= {:level 0.5 :count 6} (params)))
+        (@receive [0x82 10 0])
+        (is (= {:level 0.5 :count 5} (params)))
+        (is (= [:level :count] (mapv :control-id (filter #(= :gesture/cancel (:op %)) @log))))
+        (is (every? #(= {:adapter :push-3 :session-id "push3-capture-test"} (:source %)) @log))
+        (is (empty? (:open (history))))
+        (is (= [0 0] ((juxt :cursor :position) (history))))
+        (reset! now 210)
+        (@receive [0x92 9 127])
+        (@receive [0xb2 19 1])
+        (@receive [0x82 9 0])
+        (is (= 0.51 (:level (params))))
+        (is (= [1 1] ((juxt :cursor :position) (history))))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(deftest momentary-encoder-fails-closed-without-an-admitted-touch
+  (doseq [[label overrides expected-rejection]
+          [["missing touch capture" {:layout (dissoc layout :encoder-touches) :launch? true} nil]
+           ["missing selected instance" {} nil]
+           ["untrusted host" {:launch? true :authority nil} :operator-required]
+           ["unsupported schema" {:launch? true :encoder-bindings {:level {:param :flag}}} nil]]]
+    (testing label
+      (let [{:keys [show log receive device]}
+            (harness (merge {:temporary-encoder-modifier :right :operator-gestures? true
+                             :authority {:operator-id :push-3-test}} overrides))]
+        (try
+          (swap! show assoc-in [:registry :effects :wash :params :flag] {:type :boolean :default false})
+          (session/open! device)
+          (when (:launch? overrides) (@receive [0x93 12 100]))
+          (@receive [0xb4 23 127])
+          (is (= [0 0] (get-in (session/snapshot device) [:local :origin])))
+          (@receive [0x92 9 127])
+          (when expected-rejection
+            (is (= expected-rejection (get-in (session/snapshot device) [:last-ack :code]))))
+          (@receive [0xb2 19 12])
+          (when (= label "missing selected instance")
+            (@receive [0x93 12 100])
+            (@receive [0x92 9 127])
+            (@receive [0xb4 23 0])
+            (@receive [0xb2 19 12]))
+          (@receive [0x82 9 0])
+          (is (not-any? #(#{:param/set :gesture/sample} (:op %)) @log))
+          (is (empty? (get-in @show [:control :edit-history :open])))
+          (is (empty? (:errors (session/snapshot device))))
+          (finally (session/close! device))))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (push/profile (assoc options :temporary-encoder-modifier :right))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (push/profile (assoc options :temporary-encoder-modifier :unknown :operator-gestures? true)))))
+
+(deftest epoch-adoption-blocks-a-still-held-temporary-encoder-until-lift
+  (let [now (atom 0)
+        {:keys [show log receive device]}
+        (harness {:temporary-encoder-modifier :right :operator-gestures? true
+                  :authority {:operator-id :push-3-test} :now-ms! #(deref now)})]
+    (try
+      (session/open! device)
+      (@receive [0x93 12 100])
+      (@receive [0xb4 23 127])
+      (@receive [0x92 9 127])
+      (@receive [0xb2 19 1])
+      (@receive [0xb4 23 0])
+      (is (= 0.51 (get-in @show [:instances "0:1" :params :level])))
+      (reset! show (assoc (initial-model) :epoch 1))
+      (@receive [0x93 12 100])
+      (@receive [0x92 9 127])
+      (@receive [0xb2 19 14])
+      (@receive [0x82 9 0])
+      (@receive [0xb2 19 14])
+      (is (= 0.5 (get-in @show [:instances "1:1" :params :level])))
+      (is (= [:cue/launch] (mapv :op (filter #(= 1 (:epoch %)) @log))))
+      (reset! now 210)
+      (@receive [0xb2 19 1])
+      (is (= 0.51 (get-in @show [:instances "1:1" :params :level])))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))))
+
+(deftest temporary-lift-remains-physical-when-reconciliation-adopts-a-new-show
+  (doseq [replace-on [:touch :lift :after-lift]]
+    (let [now (atom 1000)
+          replace? (atom false)
+          {:keys [show log receive device]}
+          (harness {:temporary-encoder-modifier :right :operator-gestures? true
+                    :authority {:operator-id :push-3-test} :now-ms! #(deref now)})
+          replacement (assoc (initial-model) :epoch 1)
+          device (update-in device [:options :profile :reconcile]
+                           (fn [reconcile]
+                             (fn [state model]
+                               (if (compare-and-set! replace? true false)
+                                 (do (reset! show replacement)
+                                     {:state state :refresh-model? true})
+                                 (reconcile state model)))))]
+      (try
+        (session/open! device)
+        (@receive [0x93 12 100])
+        (@receive [0xb4 23 127])
+        (when (= :touch replace-on)
+          (reset! now 10)
+          (reset! replace? true))
+        (@receive [0x92 9 127])
+        (if (= :touch replace-on)
+          (@receive [0x93 12 100])
+          (@receive [0xb2 19 1]))
+        (@receive [0xb4 23 0])
+        (when (= :lift replace-on)
+          (reset! now 10)
+          (reset! replace? true))
+        (when (= :touch replace-on)
+          (@receive [0xb2 19 12])
+          (is (= 0.5 (get-in @show [:instances "1:1" :params :level]))))
+        (@receive [0x82 9 0])
+        (when (= :after-lift replace-on)
+          (reset! now 10)
+          (reset! show replacement))
+        (when-not (= :touch replace-on)
+          (@receive [0x93 12 100]))
+        (@receive [0xb2 19 1])
+        (is (nil? (get-in (session/snapshot device) [:local :encoder-touch-modes :level])))
+        (is (= 0.5 (get-in @show [:instances "1:1" :params :level])))
+        (is (= [:cue/launch] (mapv :op (filter #(= 1 (:epoch %)) @log))))
+        (reset! now 211)
+        (@receive [0xb2 19 1])
+        (is (= 0.51 (get-in @show [:instances "1:1" :params :level])))
+        (is (empty? (:errors (session/snapshot device))))
+        (finally (session/close! device))))))
+
+(deftest mpe-fixed-encoder-controls-restore-with-and-without-cue-gestures
+  (doseq [cue-gestures? [false true]]
+    (let [{:keys [show log receive device]}
+          (harness {:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1]}
+                    :cue-gestures? cue-gestures? :mpe-note-cells {40 [0 0]}
+                    :temporary-encoder-modifier :right :operator-gestures? true
+                    :authority {:operator-id :push-3-test}})]
+      (try
+        (session/open! device)
+        (@receive [0x91 40 100])
+        (let [id (first (keys (:instances @show)))
+              level #(get-in @show [:instances id :params :level])
+              baseline (level)]
+          (is (number? baseline))
+          (@receive [0xb4 23 127])
+          (@receive [0x92 9 127])
+          (@receive [0xb2 19 1])
+          (is (= (+ baseline 0.01) (level)))
+          (session/suspend! device)
+          (is (= baseline (level)))
+          (is (= 1 (count (filter #(= :gesture/cancel (:op %)) @log))))
+          (is (empty? (:errors (session/snapshot device)))))
+        (finally (session/close! device))))))
 
 (deftest tethered-display-follows-captured-controls-and-mpe-selection
   (doseq [[profile-options note] [[{} [0x93 12 100]]

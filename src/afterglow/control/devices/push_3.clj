@@ -4,6 +4,7 @@
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.codecs.push-3 :as codec]
             [afterglow.control.codecs.mpe :as mpe-codec]
+            [afterglow.control.devices.encoder-gesture :as encoder-gesture]
             [afterglow.control.devices.mpe :as mpe]
             [afterglow.control.devices.push-cue-gesture :as gesture]
             [afterglow.control.devices.push-launch :as launch]
@@ -28,8 +29,10 @@
   (when-not condition (throw (ex-info message (assoc data :type ::invalid-options)))))
 
 (defn- reset-interactions [state]
-  (assoc (targets/clear-selection state) :pads {} :holds {} :buttons #{} :touches #{}
-         :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
+  (assoc (dissoc (targets/clear-selection state) :encoder-gestures :encoder-releases :encoder-touch-modes
+                 :temporary-release-tails :temporary-release-time-ms)
+         :pads {} :holds {} :buttons #{} :touches #{} :selected-instance nil :selected-cue nil
+         :selection-token nil :shift-patch nil :last-display nil))
 
 (defn- cue-at [state model [x y]]
   (let [[left bottom] (:origin state)
@@ -95,27 +98,71 @@
 (defn- shift-held? [options state]
   (some #(= :shift (get-in options [:button-bindings %])) (:buttons state)))
 
-(defn- encoder [options state event model]
-  (let [{:keys [target param step]} (get-in options [:encoder-bindings (:control-id event)])
-        delta (:delta event) fine? (boolean (shift-held? options state))]
+(defn- temporary-modifier-held? [{:keys [temporary-encoder-modifier] :as options} state]
+  (if (= :shift temporary-encoder-modifier)
+    (shift-held? options state)
+    (contains? (:buttons state) temporary-encoder-modifier)))
+
+(defn- release-encoder [state control-id time-ms]
+  (let [mode (get-in state [:encoder-touch-modes control-id])
+        touched? (contains? (:touches state) control-id)
+        state (cond-> (update state :touches disj control-id)
+                mode (update :encoder-touch-modes dissoc control-id)
+                (= :temporary mode) (encoder-gesture/start-temporary-tail control-id time-ms))]
+    (encoder-gesture/release state control-id time-ms touched?)))
+
+(defn- touch-encoder [options state {:keys [control-id pressed?]} model envelope]
+  (let [mode (get-in state [:encoder-touch-modes control-id])
+        touched? (or (contains? (:touches state) control-id) (= :temporary mode))]
+    (cond
+      (= pressed? touched?) {:state state}
+      (not pressed?) (release-encoder state control-id (:time-ms envelope))
+      :else
+      (let [{:keys [param]} (get-in options [:encoder-bindings control-id])
+            instance-id (:selected-instance state)
+            temporary? (and param (temporary-modifier-held? options state))
+            state (cond-> (update state :touches conj control-id)
+                    (and param (:temporary-encoder-modifier options))
+                    (assoc-in [:encoder-touch-modes control-id] (if temporary? :temporary :ordinary))
+                    (contains? (:temporary-release-tails state) control-id)
+                    (update :temporary-release-tails dissoc control-id))]
+        (if (and (:operator-gestures? options) param (numeric-parameter model instance-id param))
+          (encoder-gesture/start state control-id
+                                 {:instance-id instance-id :param param :encoder control-id}
+                                 envelope (boolean temporary?))
+          {:state state})))))
+
+(defn- turn-parameter [state model instance-id param step delta fine?]
+  (if-not fine?
+    (let [command (parameter-command model instance-id param
+                    (fn [value [low high] schema]
+                      (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0)))))))]
+      {:state state :commands (if command [command] [])})
+    (if-let [{:keys [instance schema value]} (numeric-parameter model instance-id param)]
+      (let [[cache bits] (edit/patch-step (:shift-patch state) model instance param)
+            schema (cond-> schema step (assoc :step step))
+            next-value (edit/edit schema value delta {:fine? true :dmx-bits bits})]
+        {:state (assoc state :shift-patch cache)
+         :commands (if (= value next-value) [] [{:op :param/set :instance-id instance-id :param param :value next-value}])})
+      {:state state})))
+
+(defn- encoder [options state {:keys [control-id delta]} model envelope]
+  (let [{:keys [target param step]} (get-in options [:encoder-bindings control-id])
+        fine? (boolean (shift-held? options state))
+        active (encoder-gesture/active state control-id)
+        mode (get-in state [:encoder-touch-modes control-id])]
     (cond
       (zero? delta) {:state state}
       (= target :master)
       (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
         {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
-      (not fine?)
-      (let [command (parameter-command model (:selected-instance state) param
-                      (fn [value [low high] schema]
-                        (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0)))))))]
-        {:state state :commands (if command [command] [])})
-      :else
-      (if-let [{:keys [instance schema value]} (numeric-parameter model (:selected-instance state) param)]
-        (let [[cache bits] (when fine? (edit/patch-step (:shift-patch state) model instance param))
-              schema (cond-> schema step (assoc :step step))
-              next-value (edit/edit schema value delta {:fine? fine? :dmx-bits bits})]
-          {:state (cond-> state cache (assoc :shift-patch cache))
-           :commands (if (= value next-value) [] [{:op :param/set :instance-id (:id instance) :param param :value next-value}])})
-        {:state state}))))
+      active (encoder-gesture/edit state active
+               #(turn-parameter state model (:instance-id active) (:param active) step delta fine?))
+      (or (= :temporary mode)
+          (and (nil? mode) (temporary-modifier-held? options state))
+          (contains? (:temporary-release-tails state) control-id)
+          (encoder-gesture/after-release? state control-id (:time-ms envelope))) {:state state}
+      :else (turn-parameter state model (:selected-instance state) param step delta fine?))))
 
 (defn- expression [options state event model]
   (let [poly? (= :poly-pressure (:type event))
@@ -137,7 +184,7 @@
         state (cond-> (update state :buttons (if down? conj disj) id)
                 (and (not down?) (= :shift (get-in options [:button-bindings id]))) (dissoc :shift-patch))
         [x y] (:origin state)]
-    (if (and down? (not previously-down?))
+    (if (and down? (not previously-down?) (not= id (::dedicated-modifier options)))
       (let [action (get-in options [:button-bindings id])]
         (if (display/action? action) {:state (display/apply-action state model action)}
         (case action
@@ -153,19 +200,20 @@
       {:state state})))
 
 (defn- input [options state event model envelope]
-  (case (:type event)
-     :pad (let [key (:gesture-key event)]
-           (cond
-             (contains? (:picker-pads state) key)
-             {:state (if (:pressed? event) state (targets/release-pad state key))}
-             (not (:pressed? event)) (release-pad state key envelope)
-             (:target-picker state) {:state (targets/pad state key (:control-id event))}
-             :else (targets/launch state (press-pad options state event model envelope))))
-    :encoder (encoder options state event model)
-    :encoder-touch {:state (update state :touches (if (:pressed? event) conj disj) (:control-id event))}
-    (:poly-pressure :mono-pressure :touch-strip) (expression options state event model)
-    :button (button options state event model)
-    {:state state}))
+  (let [state (encoder-gesture/observe-temporary-tails state (:time-ms envelope))]
+    (case (:type event)
+      :pad (let [key (:gesture-key event)]
+             (cond
+               (contains? (:picker-pads state) key)
+               {:state (if (:pressed? event) state (targets/release-pad state key))}
+               (not (:pressed? event)) (release-pad state key envelope)
+               (:target-picker state) {:state (targets/pad state key (:control-id event))}
+               :else (targets/launch state (press-pad options state event model envelope))))
+      :encoder (encoder options state event model envelope)
+      :encoder-touch (touch-encoder options state event model envelope)
+      (:poly-pressure :mono-pressure :touch-strip) (expression options state event model)
+      :button (button options state event model)
+      {:state state})))
 
 (defn- gesture-result [state result]
   (let [next-gesture (:state result)
@@ -247,13 +295,41 @@
               (and accepted? token (= token (get-in state [:pads key :token]))) (assoc-in [:pads key :instance-id] (:instance-id ack)))
      :commands (:commands hold)}))
 
+(defn- modifier-ids [{:keys [temporary-encoder-modifier button-bindings]}]
+  (case temporary-encoder-modifier
+    nil #{}
+    :shift (into #{} (keep (fn [[id action]] (when (= :shift action) id))) button-bindings)
+    #{temporary-encoder-modifier}))
+
+(defn- reset-encoder-model [options reset-model state]
+  ;; A fresh show drops the gesture and its target. Held temporary touches need
+  ;; their physical lift before a detent may edit the new selection.
+  (let [physical (select-keys (encoder-gesture/reset-ownership state)
+                              [:encoder-touch-modes :temporary-release-tails])
+        held-modifiers (into #{} (filter (modifier-ids options)) (:buttons state))]
+    (cond-> (merge (reset-model state) physical)
+      (seq held-modifiers) (assoc :buttons held-modifiers))))
+
+(defn- stale-encoder-input [options modifiers state {:keys [type control-id pressed?]} time-ms]
+  (cond
+    (and (= :encoder-touch type) (not pressed?)
+         (= :temporary (get-in state [:encoder-touch-modes control-id])))
+    (:state (release-encoder (encoder-gesture/observe-temporary-tails state time-ms) control-id time-ms))
+    (and (= :encoder-touch type) pressed?
+         (get-in options [:encoder-bindings control-id :param])
+         (temporary-modifier-held? options state))
+    (assoc-in state [:encoder-touch-modes control-id] :temporary)
+    (and (= :button type) (contains? modifiers control-id))
+    (update state :buttons (if pressed? conj disj) control-id)
+    :else state))
+
 (defn- user-profile
   "Construct a pure profile from a captured :layout. Explicit :user-mode? true
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
   :step n} or {:target :master}; :button-bindings maps IDs to semantic actions.
   :pressure-param and :touch-strip-param opt into expression parameter control."
-  [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings]
+  [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings temporary-encoder-modifier]
     :or {page-id :main encoder-bindings {} button-bindings {}} :as options}]
   (valid! (true? user-mode?) "Manually enable Push 3 User Mode before connecting" {})
   (valid! (#{:poly-aftertouch :mono-aftertouch} expression-mode)
@@ -274,6 +350,15 @@
                        (#{:shift :blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)
                        (and (::gesture options) (= action (get-in options [::gesture :gesture-modifier])))))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
+    (when (some? temporary-encoder-modifier)
+      (let [ids (modifier-ids options)
+            members (::mpe-members options)]
+        (valid! (and (true? (:operator-gestures? options))
+                     (keyword? temporary-encoder-modifier) (seq ids)
+                     (every? #(and (contains? (:buttons layout) %)
+                                   (not (contains? members (get-in layout [:buttons % :channel])))) ids))
+                "Temporary encoder edits require operator gestures and a captured User Mode button"
+                {:temporary-encoder-modifier temporary-encoder-modifier})))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
     (when (contains? options :launch-mode)
@@ -286,7 +371,7 @@
                :decode (partial codec/decode compiled)
                :input (partial input options)
                :ack acknowledge
-               :reset-model reset-model
+               :reset-model (partial reset-encoder-model options reset-model)
                :stop (fn [state _model envelope _disconnected?]
                        {:state (reset-model state)
                         :commands (bindings/release-holds (:holds state) envelope)})}
@@ -432,19 +517,91 @@
     (cond-> {:state next-state}
       (not= view (:last-display controls)) (assoc :display view))))
 
+(defn- with-encoder-gestures [{:keys [ack advance reconcile stop] :as profile}
+                              {:keys [layout encoder-bindings expression-mode temporary-encoder-modifier]
+                               :as options}]
+  (let [mpe? (= :mpe expression-mode)
+        member-channels (::mpe-members options)
+        layout-codec (when mpe? (codec/compile-layout layout))
+        modifiers (modifier-ids options)
+        fixed-control (fn [event]
+                        (let [control (if (and mpe? event) (codec/decode layout-codec event) event)]
+                          (when-not (contains? member-channels (:channel control)) control)))
+        controls (if mpe? :controls identity)
+        lift (fn [state result]
+               (if (and mpe? result)
+                 (update result :state #(assoc state :controls %))
+                 result))
+        paired-encoders (filter (fn [[id binding]]
+                                  (and (:param binding) (contains? (:encoder-touches layout) id)))
+                                encoder-bindings)]
+    (assoc profile
+           :capabilities (update-in (:capabilities profile) [:controls] into
+                                    (cond-> #{:operator-gestures}
+                                      temporary-encoder-modifier (conj :temporary-encoder-edits)))
+           :operator-gestures? true
+           :gesture-end-limit (count paired-encoders)
+           :ack (fn [state command receipt]
+                  (if (#{:gesture/begin :gesture/sample :gesture/end :gesture/cancel} (:op command))
+                    (lift state (encoder-gesture/acknowledge (controls state) command receipt))
+                    (ack state command receipt)))
+           :resume-gesture-begins (fn [state model ending-controls event]
+                                    ;; In MPE mode session input is raw. Only fixed
+                                    ;; control channels can lift an encoder touch.
+                                    (let [control (fixed-control event)
+                                          lifting (when (and (= :encoder-touch (:type control))
+                                                             (not (:pressed? control)))
+                                                    (:control-id control))]
+                                      (lift state (encoder-gesture/resume-begins
+                                                    (controls state) model ending-controls lifting))))
+           :stale-input (fn [state event envelope]
+                          (let [physical (stale-encoder-input options modifiers (controls state)
+                                                              (fixed-control event) (:time-ms envelope))]
+                            (:state (lift state {:state physical}))))
+           :reconcile (fn [state model]
+                        (let [{resolved :state commands :commands} (encoder-gesture/reconcile (controls state))
+                              changed? (not (identical? (controls state) resolved))
+                              state-result (lift state {:state resolved})]
+                          (cond-> (or (when reconcile (reconcile (:state state-result) model))
+                                      (when changed? state-result))
+                            (seq commands) (update :commands #(into commands %))
+                            changed? (assoc :refresh-model? true))))
+           :advance (fn [state model envelope]
+                      (let [result (when advance (advance state model envelope))
+                            next-state (or (:state result) state)
+                            surface (controls next-state)
+                            observed (encoder-gesture/observe-temporary-tails surface (:time-ms envelope))
+                            retries (encoder-gesture/retry-due {:state observed} (:time-ms envelope))]
+                        (if (or (not (identical? surface observed)) (seq (:commands retries)))
+                          (-> (merge result (lift next-state {:state (:state retries)}))
+                              (update :commands (fnil into []) (:commands retries)))
+                          result)))
+           :stop (fn [state model envelope disconnected?]
+                   (let [{resolved :state} (encoder-gesture/reconcile (controls state))
+                         latest (:state (lift state {:state resolved}))]
+                     (assoc (stop latest model envelope disconnected?)
+                            :gesture-ends (encoder-gesture/detached-terminals resolved)))))))
+
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
   MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates.
   :cue-gestures? true opts into shared tap/hold policy. :hold-ms sets its deadline;
   bind a captured button to :cue-gesture or the configured :gesture-modifier.
+  :operator-gestures? true groups touched scalar encoder edits for a trusted host.
+  :temporary-encoder-modifier is :shift or a captured logical button ID. For
+  :shift, map a captured button to the existing :shift action. Bind a touch
+  note and turn CC to the same logical encoder ID to use temporary edits.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
-  (when (contains? options :cue-gestures?)
-    (valid! (boolean? (:cue-gestures? options)) "Cue gesture opt-in must be boolean" {}))
+  (doseq [key [:cue-gestures? :operator-gestures?] :when (contains? options key)]
+    (valid! (boolean? (get options key)) "Gesture opt-in must be boolean" {:option key}))
   (let [grid (launch/grid options)
         mpe? (= :mpe (:expression-mode options))
+        modifier (:temporary-encoder-modifier options)
         options (cond-> (assoc options ::grid grid)
+                  mpe? (assoc ::mpe-members (set (get-in options [:zone :member-channels])))
+                  (and modifier (not= :shift modifier)) (assoc ::dedicated-modifier modifier)
                   (:cue-gestures? options)
                   (assoc ::gesture (gesture/configure
                                      (cond-> (assoc options :axes (if mpe? #{:strike :pressure :glide :slide}
@@ -457,19 +614,21 @@
                   mpe? (mpe-profile options)
                   :else (user-profile options))]
     (cond-> (launch/with-grid profile grid (:launch-receipt options))
-      (:display options) (assoc :feedback (partial display-feedback options)))))
+      (:display options) (assoc :feedback (partial display-feedback options))
+      (:operator-gestures? options) (with-encoder-gestures options))))
 
 (defn connect!
   "Explicitly open an injected MIDI transport. Manual session/suspend! and
   session/resume! provide handoff; User itself cannot be mapped in User Mode.
-  A display must be an explicitly tagged Push 3 semantic transport. Cue
-  gestures use the supplied refresh schedule, or an owned 10 ms cadence."
+  A display must be an explicitly tagged Push 3 semantic transport. Cue and
+  operator gestures use the supplied refresh schedule, or an owned 10 ms cadence."
   [options]
   (when-let [display (:display options)]
     (valid! (and (= :push-3 (:device display)) (= :view (:input display))
                  (every? #(fn? (get display %)) [:open! :render! :close!]))
             "Choose a tagged Push 3 display transport" {}))
   (session/open! (session/create (cond-> (assoc options :profile (profile options))
-                                    (and (:cue-gestures? options) (not (contains? options :schedule!)))
+                                    (and (or (:cue-gestures? options) (:operator-gestures? options))
+                                         (not (contains? options :schedule!)))
                                     (assoc :schedule! (transports/scheduler (get options :refresh-ms 10)))
                                     (and (:transport options) (not (:midi options))) (assoc :midi (:transport options))))))

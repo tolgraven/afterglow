@@ -86,6 +86,20 @@ within each message family. There is no default numeric address map.
      :pressure-param :level}))
 ```
 
+For a trusted host such as Tolglow, set `:operator-gestures? true` to group each
+touched scalar encoder edit. Give its touch note and turn CC the same logical
+ID in the captured layout. Set `:temporary-encoder-modifier` to a captured
+button ID or to `:shift` when a captured button is bound to `:shift`. Hold the
+modifier before touching the encoder. A temporary edit changes the live value
+while the encoder is held and restores the original value on encoder lift,
+including when the modifier was released first. A dedicated modifier ID
+consumes that button's input. Shift retains its fine adjustment while held.
+The same setup works with configured MPE when the fixed controls use channels
+outside the zone's member channels. Virtual recordings cover the software
+path. Qualification on a physical Push 3 needs MIDI input recorded from the
+actual User port, including both edges of the modifier and the encoder touch,
+turn and lift.
+
 In Poly/Mono Aftertouch mode, pad cells follow the page's cue launch mode;
 default persistent cues toggle, held cues release their exact activation, and
 one-shots use the model's finite-duration rules. Repeated note-on and CC-down

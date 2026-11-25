@@ -181,8 +181,9 @@
     (when (seq (:gesture-ends result))
       ;; At most one detached end per control. A new begin waits for that end.
       (let [ends (:gesture-ends session)
-            pending (into @ends (map (juxt (comp :control-id :command) identity)) (:gesture-ends result))]
-        (when (> (count pending) gesture-end-limit)
+            pending (into @ends (map (juxt (comp :control-id :command) identity)) (:gesture-ends result))
+            limit (get-in session [:options :profile :gesture-end-limit] gesture-end-limit)]
+        (when (> (count pending) limit)
           (throw (ex-info "Device teardown emitted too many gesture ends" {})))
         (reset! ends pending)
         (retry-gesture-ends! session)))
