@@ -37,9 +37,16 @@ frame where the candidate first takes over, immediately before that step first
 runs, on the same worker that evaluates the instance. `advance` is pure, so the
 call is outside any `swap!` or CAS retry; the function must not perform IO, read
 clocks or own RNG. Definitions stay data: the migration lives on the compiled
-step, never in the registry. Paused instances defer the reload and its migration.
+step, never in the registry. `with-state-migration` returns a direct unary
+step (no variadic wrapper) that keeps the step's other metadata. Paused
+instances defer the reload and its migration.
 
-A missing migration, a function result, or a recoverable exception from the
+The result must be plain EDN: nil, booleans, strings, characters, keywords,
+symbols, UUIDs, instants, finite numbers and maps, vectors, sets or lists of
+those. Functions, records, host or mutable objects (atoms, arrays, Java
+collections), lazy sequences and NaN/infinite floats are rejected.
+
+A missing migration, a non-EDN result, or a recoverable exception from the
 function is a `:reload-fault` with `:stage :migrate`, `:effect-version` (the
 rejected version) and `:from-version`. Its first cause carries
 `{:type :afterglow.runtime.engine/state-migration-failed :path [:state-migration]}`
@@ -51,7 +58,14 @@ unchanged. The quarantined migration is not retried every frame; a newer version
 or `:instance/retry` tries again from the last good state. Interruption,
 cancellation and VM errors propagate unchanged.
 
-Control validates `:reload-policy` on cue publication and on launch.
+Control validates `:reload-policy` on cue publication and on launch. An explicit
+`nil` policy, as found in older documents, means the default `:pinned`.
+
+Every path that advances a model must use a compiler that attaches the same
+migrations, or a `:migrate` instance faults there and diverges from live.
+`replay/record` and `replay/replay` evaluate with the caller's compiler, so a
+recording replays only with that compiler; a compiler without the migration
+reports `::replay/mismatch`.
 
 `:instance/retry` is an ordinary idempotent command addressed to the current
 instance and epoch. It retries with retained parameters/state/time. A failed

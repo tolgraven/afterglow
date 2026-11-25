@@ -130,7 +130,8 @@
       (require! effect :unknown-effect "Cue refers to an unknown effect or version")
       (require! (params/finite-number? (get definition :priority 0))
                 :invalid-definition "Priority must be finite")
-      (when (contains? definition :reload-policy)
+      ;; An explicit nil policy predates validation and means the default, :pinned.
+      (when (some? (:reload-policy definition))
         (require! (reload-policies (:reload-policy definition)) :invalid-definition
                   "Unknown reload policy" {:path [:reload-policy] :reload-policy (:reload-policy definition)}))
       (check-params! (get effect :params {}) (get definition :params {}))

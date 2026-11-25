@@ -3,6 +3,7 @@
   (:require [afterglow.runtime.engine :as engine]
             [afterglow.runtime.executor :as executor]
             [afterglow.control.model :as control]
+            [afterglow.runtime.replay :as replay]
             [clojure.test :refer [deftest is testing]]))
 
 (def definition
@@ -131,7 +132,7 @@
 (deftest missing-or-invalid-migrations-are-reload-faults
   (doseq [[label migrations message]
           [["no migration" {} "The new definition declares no state migration"]
-           ["function result" {[:pulse 2] (fn [_ _ _ _] inc)} "A state migration must return state data, not a function"]]]
+           ["function result" {[:pulse 2] (fn [_ _ _ _] inc)} "A state migration must return plain EDN state data"]]]
     (testing label
       (let [show (model {:effects {:pulse (assoc definition :version 2) :other other}}
                         (instance "x" :reload-policy :migrate))
@@ -169,9 +170,43 @@
                       (catch Throwable caught caught))]
       (is (identical? error thrown)))))
 
-(deftest attaching-a-non-function-is-rejected
+(defrecord Legacy [frames])
+
+(deftest non-portable-migration-results-are-reload-faults
+  (doseq [[label value] [["atom" {:frames (atom 1)}] ["record" (->Legacy 1)] ["lazy sequence" {:frames (range)}]
+                         ["NaN" {:frames ##NaN}] ["array" {:frames (long-array 2)}] ["function" {:frames inc}]
+                         ["host object" (java.util.ArrayList.)]]]
+    (testing label
+      (let [show (model {:effects {:pulse (assoc definition :version 2) :other other}}
+                        (instance "x" :reload-policy :migrate))
+            result (engine/advance show {:time-ms 5} (compiler {[:pulse 2] (fn [_ _ _ _] value)}))
+            instance (get-in result [:model :instances "x"])]
+        (is (= [1 :migrate "A state migration must return plain EDN state data"]
+               [(:effect-version instance) (get-in instance [:reload-fault :stage])
+                (get-in instance [:reload-fault :message])])))))
+  (let [show (model {:effects {:pulse (assoc definition :version 2) :other other}}
+                    (instance "x" :reload-policy :migrate))
+        value {:n 1 :r 1/3 :d 2.5M :s #{:a} :l '(1 2) :u #uuid "00000000-0000-0000-0000-000000000001"
+               :t #inst "2026-01-01" :c \a :sym 'x :nested [{"k" nil}]}
+        result (engine/advance show {:time-ms 5} (compiler {[:pulse 2] (fn [_ _ _ _] value)}))]
+    (is (= (assoc value :frames 1) (get-in result [:model :instances "x" :state])))))
+
+(deftest attaching-keeps-a-direct-unary-step-and-its-metadata
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a function"
-                        (engine/with-state-migration (step definition) {:op :rename}))))
+                        (engine/with-state-migration (step definition) {:op :rename})))
+  (let [migrate (fn [state _ _ _] state)
+        base (with-meta (step definition) {::tag :kept})
+        attached (engine/with-state-migration base migrate)
+        again (engine/with-state-migration attached frames->ticks)]
+    (is (not (instance? clojure.lang.RestFn attached)) "No variadic applyTo wrapper on the frame path")
+    (is (= :kept (::tag (meta attached))))
+    (is (identical? migrate (engine/state-migration attached)))
+    (is (identical? frames->ticks (engine/state-migration again)))
+    (is (identical? (.-step ^afterglow.runtime.engine.MigratingStep attached)
+                    (.-step ^afterglow.runtime.engine.MigratingStep again)) "Reattaching never nests wrappers")
+    (is (= :kept (::tag (meta (vary-meta attached assoc ::other 1)))))
+    (is (= (base {:instance {:id "a" :params {:level 1}} :assignments [] :state {}})
+           (attached {:instance {:id "a" :params {:level 1}} :assignments [] :state {}})))))
 
 (defn- command! [show payload]
   (control/apply-command show (merge {:command-id (str (:revision show) (:op payload))
@@ -190,8 +225,50 @@
         frame (engine/advance (:model v2) {:time-ms 0}
                               (compiler {[:pulse 2] (fn [state _ _ _] (assoc state :migrated? true))}))]
     (is (= :rejected (get-in rejected [:ack :status])))
+    (is (= :accepted (get-in (command! show {:op :cue/put :cue {:id :legacy :effect-id :pulse :reload-policy nil}})
+                             [:ack :status]))
+        "An explicit nil policy from older data still means :pinned")
+    (is (= :pinned (let [put (:model (command! show {:op :cue/put :cue {:id :legacy :effect-id :pulse :reload-policy nil}}))
+                         launched (command! put {:op :cue/launch :cue-id :legacy})]
+                     (get-in launched [:model :instances (get-in launched [:ack :instance-id]) :reload-policy]))))
     (is (= {:path [:reload-policy] :reload-policy :migrate-later} (get-in rejected [:ack :details])))
     (is (= :accepted (get-in launched [:ack :status])))
     (is (= :rejected (get-in bad-launch [:ack :status])))
     (is (= :migrate (get-in launched [:model :instances id :reload-policy])))
     (is (= {:migrated? true :frames 1} (get-in frame [:model :instances id :state])))))
+
+(def replay-fixtures
+  [{:id :left :position [0.0 1.0 0.0] :universe 1 :address 1
+    :channels {:red 1 :green 2 :blue 3 :white 4} :rgbw-policy :none}])
+
+(defn- replay-compiler [migrations]
+  (fn [definition]
+    (let [compiled (fn [context]
+                     (-> context
+                         (update-in [:state :frames] (fnil inc 0))
+                         (update :assignments conj {:target-id :left :attribute :white :blend :replace
+                                                    :value (* 0.1 (:version definition))})))]
+      (if-let [migrate (get migrations (:version definition))]
+        (engine/with-state-migration compiled migrate)
+        compiled))))
+
+(deftest replay-uses-the-callers-migrating-compiler
+  (let [command (fn [id op fields] {:kind :command :command (merge {:command-id id :show-id :recorded :epoch 0
+                                                                      :source {:adapter :test} :op op} fields)})
+        at (fn [t] {:kind :frame :frame {:time-ms (double t)} :clock {:time-ms (double t) :beat (/ t 500.0)}})
+        steps [(command :effect :registry/publish {:kind :effects :definition {:id :pulse :version 1 :params {}}})
+               (command :cue :cue/put {:cue {:id :pulse :effect-id :pulse :reload-policy :migrate}})
+               (command :launch :cue/launch {:cue-id :pulse :time-ms 0.0})
+               (at 0)
+               (command :v2 :registry/publish {:kind :effects :definition {:id :pulse :version 2 :params {}}})
+               (at 20)]
+        live (replay-compiler {2 (fn [state _ _ _] (assoc state :migrated true))})
+        show (control/new-show {:show-id :recorded :rig {:fixtures replay-fixtures}})
+        {:keys [recording model]} (replay/record show steps live)
+        instance (first (vals (:instances model)))]
+    (is (= [2 {:frames 2 :migrated true}] [(:effect-version instance) (:state instance)]))
+    (is (= (count steps) (:verified-steps (replay/replay recording live))))
+    (testing "a compiler without the migration diverges and replay reports it"
+      (is (= ::replay/mismatch
+             (try (replay/replay recording (replay-compiler {})) nil
+                  (catch clojure.lang.ExceptionInfo e (:type (ex-data e)))))))))

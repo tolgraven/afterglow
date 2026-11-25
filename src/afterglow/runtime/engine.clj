@@ -63,7 +63,7 @@
                                          (get instance :release-duration-ms 0))))))
     (fail! ::invalid-duration "Instance deadline exceeds finite logical time"
            {:instance-id id}))
-  (when-not (control/reload-policies (get instance :reload-policy :pinned))
+  (when-not (control/reload-policies (or (:reload-policy instance) :pinned))
     (fail! ::invalid-reload-policy "Unknown instance reload policy" {:instance-id id}))
   (doseq [field [:duration :release-duration] :when (contains? instance field)]
     (when (seq (musical-time/validate-duration (get instance field)))
@@ -106,6 +106,17 @@
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
 
+(deftype MigratingStep [step meta-map]
+  ;; Delegates the one-argument step call directly. Plain vary-meta on a fn
+  ;; returns a variadic RestFn that goes through applyTo on every frame.
+  clojure.lang.IFn
+  (invoke [_ context] (step context))
+  (applyTo [_ args] (.applyTo ^clojure.lang.IFn step args))
+  clojure.lang.IMeta
+  (meta [_] meta-map)
+  clojure.lang.IObj
+  (withMeta [_ m] (MigratingStep. step m)))
+
 (defn with-state-migration
   "Attach a pure state migration to a compiled step. A :migrate reload calls
   (migrate old-state old-version new-version context) once, at the frame where
@@ -116,7 +127,8 @@
   [step migrate]
   (when-not (or (fn? migrate) (var? migrate))
     (fail! ::invalid-state-migration "A state migration must be a function" {}))
-  (vary-meta step assoc ::state-migration migrate))
+  (let [inner (if (instance? MigratingStep step) (.-step ^MigratingStep step) step)]
+    (MigratingStep. inner (assoc (meta step) ::state-migration migrate))))
 
 (defn state-migration
   "Return the state migration attached to a compiled step, or nil."
@@ -366,6 +378,20 @@
       (when-not (faults/recoverable? error) (throw error))
       {:error error})))
 
+(defn- portable-state?
+  "Plain EDN only: no functions, records, mutable/host objects, lazy or
+  unbounded sequences, or non-finite floating-point numbers."
+  [value]
+  (cond
+    (or (nil? value) (boolean? value) (string? value) (char? value)
+        (keyword? value) (symbol? value) (uuid? value) (inst? value)) true
+    (or (integer? value) (ratio? value) (decimal? value)) true
+    (float? value) (Double/isFinite (double value))
+    (record? value) false
+    (map? value) (every? (fn [[k v]] (and (portable-state? k) (portable-state? v))) value)
+    (or (vector? value) (set? value) (list? value)) (every? portable-state? value)
+    :else false))
+
 (defn- migrate-prepared
   "Run a pending :migrate transform for the candidate definition. Returns the
   prepared lifecycle with migrated state, or a :migrate fault diagnostic."
@@ -389,8 +415,8 @@
                             (throw (ex-info "State migration failed"
                                             {:type ::state-migration-failed :path [:state-migration]
                                              :from-version from-version :to-version to-version} error))))]
-        (when (fn? migrated)
-          (fail! ::invalid-migrated-state "A state migration must return state data, not a function"
+        (when-not (portable-state? migrated)
+          (fail! ::invalid-migrated-state "A state migration must return plain EDN state data"
                  {:path [:state-migration] :from-version from-version :to-version to-version}))
         {:prepared (-> prepared
                        (dissoc :migration)
