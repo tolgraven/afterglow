@@ -1,5 +1,5 @@
 (ns afterglow.control.devices.push-2-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.display :as display]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.session-test :as fixture]
@@ -123,6 +123,118 @@
           (old-receive [0x80 0 0])
           (old-receive [0xb0 71 1])
           (is (= before (admitted-commands h)))))
+      (finally (finish! h)))))
+
+(deftest encoder-commands-cannot-cross-an-epoch-between-input-and-dispatch
+  (doseq [[op event] [[:gesture/begin [0x90 0 127]]
+                      [:gesture/sample [0xb0 71 1]]
+                      [:gesture/end [0x80 0 0]]]]
+    (testing (str op)
+      (let [{:keys [session show after-model-read complete-sample] :as h} (pending-sample-harness)]
+        (try
+          (let [id (launch! h 37)
+                ;; A trusted host may initialize a new epoch with captured instances.
+                replacement (model/new-show (update @show :epoch inc))]
+            (when (not= :gesture/begin op)
+              (receive! h [0x90 0 127]))
+            (when (= :gesture/end op)
+              (receive! h [0xb0 71 1])
+              (@complete-sample)
+              (session/refresh! session))
+            (let [before (admitted-commands h)]
+              (reset! after-model-read #(reset! show replacement))
+              (receive! h event)
+              (is (= before (admitted-commands h))))
+            (when (= :gesture/sample op)
+              (is (nil? @complete-sample)))
+            (is (nil? (get-in @show [:control :edit-history])))
+            (is (= 0.5 (:level (values h id))))
+            (is (= (:epoch @show) (:epoch (session/snapshot session))))
+            (is (= 128 (count (:palettes (local h))))))
+          (finally (finish! h)))))))
+
+(deftest encoder-release-keeps-ownership-until-the-end-is-acknowledged
+  (doseq [outcome [:exception :rejected :deferred-rejection :deferred-acceptance]]
+    (testing (name outcome)
+      (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+            apply! (:dispatch! options)
+            ends (atom [])
+            completion (promise)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (and (= :gesture/end (:op command)) (= 1 (count (swap! ends conj command))))
+                                (case outcome
+                                  :exception (throw (ex-info "end dispatch interrupted" {}))
+                                  :rejected {:status :rejected :code :dispatch-busy}
+                                  {:status :pending :completion completion})
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (is (nil? (:touched-parameter (view h))))
+            (is (= {:mode :off} (:last-touch-strip (local h))))
+            (receive! h [0xb0 71 1])
+            (is (= 0.51 (:level (values h id))))
+            (is (= 1 (count (:open (history)))))
+            (when (= :deferred-rejection outcome)
+              (deliver completion {:status :rejected :code :dispatch-busy}))
+            (session/close! device true)
+            (if (= :deferred-acceptance outcome)
+              (do
+                (is (= 1 (count @ends)))
+                (deliver completion (:ack (apply! (first @ends)))))
+              (is (= 2 (count @ends))))
+            (is (= #{1} (set (map :last-sequence @ends))))
+            (is (= 1 (:cursor (history))))
+            (is (empty? (:open (history))))
+            (is (= (if (= :exception outcome) ["end dispatch interrupted"] [])
+                   (:errors (session/snapshot device)))))
+          (finally (session/close! device true)))))))
+
+(deftest encoder-detents-and-touch-strip-share-one-scalar-gesture
+  (let [h (gesture-harness push-operator nil)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0xe0 0 0])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (let [[begin detent strip final-detent end :as commands] (rest (admitted-commands h))
+              history (get-in @(:show h) [:control :edit-history])]
+          (is (= [:gesture/begin :gesture/sample :gesture/sample :gesture/sample :gesture/end]
+                 (mapv :op commands)))
+          (is (= 1 (count (set (map :gesture-id [begin detent strip final-detent end])))))
+          (is (= [[1 0.51] [2 0.0] [3 0.01]] (mapv (juxt :sequence :value) [detent strip final-detent])))
+          (is (= 3 (:last-sequence end)))
+          (is (= 0.01 (:level (values h id))))
+          (is (= {:target [:instance-param id :level] :before 0.5 :after 0.01}
+                 (select-keys (get-in history [:nodes (:cursor history)]) [:target :before :after])))
+          (is (empty? (:open history)))))
+      (finally (finish! h)))))
+
+(deftest touch-strip-keeps-ordinary-editing-for-a-different-target
+  (let [h (gesture-harness push-operator nil)]
+    (try
+      (let [original (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (let [selected (launch! h 36)]
+          (receive! h [0x90 0 127])
+          (receive! h [0xe0 0 0])
+          (is (= {:op :param/set :instance-id selected :param :level :value 0.0}
+                 (select-keys (peek (admitted-commands h)) [:op :instance-id :param :value])))
+          (is (= 0.0 (:level (values h selected))))
+          (is (= 0.51 (:level (values h original))))
+          (receive! h [0x80 0 0])
+          (is (= [:cue/launch :gesture/begin :gesture/sample :cue/launch :param/set :gesture/end]
+                 (mapv :op (admitted-commands h))))))
       (finally (finish! h)))))
 
 (deftest scalar-encoder-touch-pins-the-target-through-selection-and-commits-once

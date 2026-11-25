@@ -9,7 +9,8 @@
   "Create an inert session. Required options: :session-id, :profile, :model!
   (snapshot fn), :dispatch! (command -> result/ack synchronously), :now-ms!.
   Grid cue launch/release and opted-in operator gestures may return queue
-  receipts. A pending gesture carries its final :completion promise. Profiles
+  receipts. Gesture commands carry the captured :show-id and :epoch. A pending
+  gesture carries its final :completion promise. Profiles
   reconcile receipts before input and feedback. A reconciliation that observes
   a newer owner commit can request a fresh snapshot with :refresh-model? true.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
@@ -75,15 +76,25 @@
         (let [envelope (envelope! session)
               scheduled-launch? (grid-launch? template)
               timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
-              stale? (and timed-cue? (some #(and (contains? template %)
-                                                (not= (get template %) (get envelope %)))
-                                          [:show-id :epoch]))
+              gesture? (and (:operator-gestures? profile)
+                            (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
+              stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
+                         (and timed-cue? (some #(and (contains? template %)
+                                                     (not= (get template %) (get envelope %)))
+                                               [:show-id :epoch])))
               command (cond-> (merge template envelope)
                         (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
-              response (if stale? {:status :rejected :reason :stale-epoch} (dispatch! command))
+              response (cond
+                         stale? {:status :rejected :reason :stale-epoch}
+                         (and gesture? (= :gesture/end (:op command)))
+                         ;; Preserve feedback and continue releasing other controls.
+                         (try (dispatch! command)
+                              (catch Exception error
+                                (record-error! session error)
+                                {:status :rejected :reason :dispatch-error}))
+                         :else (dispatch! command))
               ack (or (:ack response) response)
-              pending-gesture? (and (:operator-gestures? profile) (= :pending (:status ack))
-                                    (#{:gesture/begin :gesture/sample :gesture/end} (:op command))
+              pending-gesture? (and gesture? (= :pending (:status ack))
                                     (instance? clojure.lang.IPending (:completion ack)))]
           (when-not (or (#{:accepted :rejected} (:status ack))
                         (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack)))
