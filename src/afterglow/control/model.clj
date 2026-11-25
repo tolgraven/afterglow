@@ -521,6 +521,49 @@
         (assoc-in [:control :history-order] (vec (drop remove-count order)))
         (update-in [:control :history] #(apply dissoc (assoc % id entry) evicted)))))
 
+(defn- admit-command [model command authority operation]
+  (try
+    (require! (map? command) :invalid-command "Command must be a map")
+    (require! (identifier? (:command-id command)) :invalid-command "Command needs a stable ID")
+    (require! (= (:show-id model) (:show-id command)) :wrong-show "Command targets a different show")
+    (require! (= (:epoch model) (:epoch command)) :stale-epoch "Show epoch changed")
+    (require! (some? (:source command)) :invalid-command "Command needs a source")
+    (let [operator-id (when (edit-history-operation? (:op command))
+                        (let [id (:operator-id authority)]
+                          (require! (identifier? id) :operator-required "Edit history requires a trusted operator")
+                          id))]
+      (if-let [cached (get-in model [:control :history (:command-id command)])]
+        (do
+          (require! (= command (:command cached)) :command-id-conflict "Command ID reused with different data")
+          (require! (= operator-id (:operator-id cached))
+                    :command-id-conflict "Command ID reused with different operator")
+          {:model model :events [] :ack (:ack cached)})
+        (do
+          (when (contains? command :expected-revision)
+            (require! (= (:revision model) (:expected-revision command))
+                      :stale-revision "Show revision changed"))
+          (when (contains? command :time-ms) (time! model command))
+          (let [{next-model :model events :events result :result}
+                (if operator-id (apply-history-operation model command operator-id)
+                    (track-external-write model command (operation model command)))
+                updated (cond-> (update next-model :revision inc)
+                          (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
+                ack (merge (receipt updated command :accepted) result)
+                remembered (remember updated command ack operator-id)
+                remembered (if (contains? model ::events/pending)
+                             (events/collect remembered :control
+                               {:kind :command :id (or operator-id (get-in command [:source :adapter])
+                                                       (get-in command [:source :type]) (:source command))}
+                               events)
+                             remembered)]
+            {:model remembered :events (vec events) :ack ack}))))
+    (catch clojure.lang.ExceptionInfo e
+      (if-let [code (:control/error (ex-data e))]
+        {:model model :events []
+         :ack (assoc (receipt model command :rejected) :code code :message (.getMessage e)
+                     :details (:details (ex-data e)))}
+        (throw e)))))
+
 (defn apply-command
   "Apply one command atomically as data. Accepted writes increment revision.
   Rejected commands return the identical model and a structured ack. Duplicate
@@ -537,45 +580,12 @@
   Ordinary :param/set keeps its original validation and numeric representation.
   Generation tracking compares canonical model values using Clojure equality."
   ([model command] (apply-command model command nil))
-  ([model command authority]
-   (try
-     (require! (map? command) :invalid-command "Command must be a map")
-     (require! (identifier? (:command-id command)) :invalid-command "Command needs a stable ID")
-     (require! (= (:show-id model) (:show-id command)) :wrong-show "Command targets a different show")
-     (require! (= (:epoch model) (:epoch command)) :stale-epoch "Show epoch changed")
-     (require! (some? (:source command)) :invalid-command "Command needs a source")
-     (let [operator-id (when (edit-history-operation? (:op command))
-                         (let [id (:operator-id authority)]
-                           (require! (identifier? id) :operator-required "Edit history requires a trusted operator")
-                           id))]
-       (if-let [cached (get-in model [:control :history (:command-id command)])]
-         (do
-           (require! (= command (:command cached)) :command-id-conflict "Command ID reused with different data")
-           (require! (= operator-id (:operator-id cached))
-                     :command-id-conflict "Command ID reused with different operator")
-           {:model model :events [] :ack (:ack cached)})
-         (do
-           (when (contains? command :expected-revision)
-             (require! (= (:revision model) (:expected-revision command))
-                       :stale-revision "Show revision changed"))
-           (when (contains? command :time-ms) (time! model command))
-           (let [{next-model :model events :events result :result}
-                 (if operator-id (apply-history-operation model command operator-id)
-                     (track-external-write model command (apply-operation model command)))
-                 updated (cond-> (update next-model :revision inc)
-                           (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
-                 ack (merge (receipt updated command :accepted) result)
-                 remembered (remember updated command ack operator-id)
-                 remembered (if (contains? model ::events/pending)
-                              (events/collect remembered :control
-                                {:kind :command :id (or operator-id (get-in command [:source :adapter])
-                                                        (get-in command [:source :type]) (:source command))}
-                                events)
-                              remembered)]
-             {:model remembered :events (vec events) :ack ack}))))
-     (catch clojure.lang.ExceptionInfo e
-       (if-let [code (:control/error (ex-data e))]
-         {:model model :events []
-          :ack (assoc (receipt model command :rejected) :code code :message (.getMessage e)
-                      :details (:details (ex-data e)))}
-         (throw e))))))
+  ([model command authority] (admit-command model command authority apply-operation)))
+
+(defn apply-domain-command
+  "Admit a host's pure [model command] operation through the shared receipt,
+  epoch and revision checks without supplying trusted operator authority.
+  The operation returns :model, :events and optional :result, or throws an
+  ExceptionInfo with :control/error. The host dispatches its own operation IDs."
+  [model command operation]
+  (admit-command model command nil operation))

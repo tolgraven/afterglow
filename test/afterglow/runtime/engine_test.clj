@@ -393,3 +393,35 @@
           frozen (engine/instance-lifecycle show {:time-ms 500 :beat 0} held)]
       (is (= :running (get-in frozen [:instance :phase])))
       (is (false? (:expired? frozen))))))
+
+(deftest external-opacity-factors-are-owned-by-the-frame-and-preserve-source-order
+  (let [plain (instance "plain" :system {:opacity 0.5})
+        native (instance "native" :priority 1 :system {:opacity 0.5}
+                         :source {:native-layer {:id :compound :member 0 :opacity 0.75}})
+        show (model native plain)
+        compile-step (fn [_] (fn [context]
+                               (-> context
+                                   (assoc :state {:opacity (get-in context [:instance :system :opacity])
+                                                  :private-factor? (contains? (:frame context) ::engine/opacity-factors)})
+                                   (update :assignments conj {:target-id :pixel :attribute :dimmer :value 0.8}))))
+        baseline (engine/advance show {:time-ms 0} compile-step)
+        unity (engine/advance show {:time-ms 0 ::engine/opacity-factors {"plain" 1, "native" 1.0}} compile-step)
+        frame {:time-ms 0 ::engine/opacity-factors {"plain" 0.5, "native" 0.25}}
+        mixed (engine/advance show frame compile-step)
+        reversed (engine/advance show frame compile-step (fn [f prepared] (reverse (mapv f prepared))))
+        [plain-block native-block] (:contributions mixed)]
+    (is (= (:contributions baseline) (:contributions unity)))
+    (is (= (:contributions mixed) (:contributions reversed)))
+    (is (= (:model baseline) (:model mixed) (:model reversed)))
+    (is (= {:opacity 0.5 :private-factor? false} (get-in mixed [:model :instances "plain" :state])))
+    (is (= "plain" (get-in plain-block [:source :instance-id])))
+    (is (== 0.25 (get-in plain-block [:assignments 0 :opacity])))
+    (is (= "native" (get-in native-block [:source :instance-id])))
+    (is (= {:id :compound :member 0 :opacity 0.75 :member-opacity 0.125} (:native-layer native-block)))
+    (let [zero (engine/advance show {:time-ms 0 ::engine/opacity-factors {"plain" 0, "native" 0}} compile-step)]
+      (is (= [{:id :compound :member 0 :opacity 0.75 :member-opacity 0.0}]
+             (mapv :native-layer (:contributions zero)))))
+    (doseq [invalid [nil {"plain" nil} {"plain" Double/NaN} {"plain" 1.01} {"gone" 0.1}]]
+      (let [code (try (engine/advance show {:time-ms 0 ::engine/opacity-factors invalid} compile-step)
+                      (catch clojure.lang.ExceptionInfo error (:type (ex-data error))))]
+        (is (= ::engine/invalid-opacity-factors code))))))
