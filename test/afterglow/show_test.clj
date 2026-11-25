@@ -130,3 +130,14 @@
     ;; Install the old layout without admission checks to exercise blackout on an existing conflict.
     (swap! (:fixtures *show*) assoc :old-fixture (channels/patch-fixture old-fixture 1 1 (constantly 0)))
     (is (= [[1 512 {1 255, 4 255} nil]] (capture-blackout show/blackout-show)))))
+
+(deftest legacy-blackout-sends-valid-packets-with-invalid-slot-indexes
+  (with-show (show/show :universes [1 2])
+    (show/patch-fixture! :lamp {:name "Inverted dimmer" :channels [(channels/dimmer 1 :inverted-from 0)]} 1 4)
+    (let [old-fixture {:name "Older fixture with invalid offsets"
+                       :channels [(assoc (channels/dimmer 1 :inverted-from 0) :offset 0)
+                                  (assoc (channels/dimmer 3 :inverted-from 0) :fine-offset 0)
+                                  (assoc (channels/dimmer 1 :inverted-from 0) :offset 513)]}]
+      (swap! (:fixtures *show*) assoc :old-fixture (channels/patch-fixture old-fixture 1 1 (constantly 0))))
+    (is (= [[1 512 {4 255} nil] [2 512 {} nil]]
+           (capture-blackout show/blackout-show)))))

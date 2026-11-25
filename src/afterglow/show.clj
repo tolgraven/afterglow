@@ -475,19 +475,21 @@
 
 (defn blackout-show
   "Sends a dark DMX packet for each universe associated with [[*show*]].
-  Slots owned by a single fully inverted dimmer or color emitter use its
-  off encoding. Other slots, including overlaps in an invalid patch, are
-  zero. A running show can overwrite these values with its next frame."
+  Slots owned by a single fully inverted dimmer or color emitter with valid
+  addresses use its off encoding. Other slots, including overlaps in an invalid
+  patch, are zero. A running show can overwrite these values with its next frame."
   []
   {:pre [(some? *show*)]}
   (let [buffers (create-buffers *show*)
         channels (mapcat :channels (chan/expand-heads (vals @(:fixtures *show*))))
+        valid-index? #(and (integer? %) (<= 0 % 511))
         slot-owners (frequencies (for [{:keys [universe index fine-index]} channels
                                       slot [index fine-index]
-                                      :when (some? slot)]
+                                      :when (valid-index? slot)]
                                   [universe slot]))]
-    (doseq [{:keys [type inverted-from] :as channel} channels
-            :when (and (#{:dimmer :color} type) (number? inverted-from) (zero? inverted-from))]
+    (doseq [{:keys [type inverted-from index fine-index] :as channel} channels
+            :when (and (#{:dimmer :color} type) (number? inverted-from) (zero? inverted-from)
+                       (valid-index? index) (or (nil? fine-index) (valid-index? fine-index)))]
       (channel-fx/apply-channel-value buffers channel 0))
     (doseq [[[universe index] owners] slot-owners
             :when (> owners 1)
