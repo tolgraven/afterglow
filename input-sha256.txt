@@ -1,0 +1,3 @@
+be4fccdcd61fa06b3144d66dd3801e1899b90c59b0d642cc1f2889259c915112  /workspace/artifacts/afterglow-reactive-effect-settling-534/trace.csv
+828c68c645ac86bc5e1060cd53c7b73512441b0148df584776dec290eaf5b706  baseline/afterglow/runtime/keyframes/values.clj
+33bfeee7e9c7093fd2e5d2a3b060f81e2b03319938e3e87367cf616fc130bb35  primitive-bounds.patch

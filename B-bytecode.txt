@@ -1,0 +1,21 @@
+<init> ()V
+  call clojure/lang/AFunction <init> ()V
+invokeStatic (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+  call clojure/lang/Var getRawRoot ()Ljava/lang/Object;
+  call clojure/lang/IFn invoke (Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+  call clojure/lang/RT intCast (J)I
+  call clojure/lang/RT nth (Ljava/lang/Object;ILjava/lang/Object;)Ljava/lang/Object;
+  call clojure/lang/RT intCast (J)I
+  call clojure/lang/RT nth (Ljava/lang/Object;ILjava/lang/Object;)Ljava/lang/Object;
+  call clojure/lang/RT doubleCast (Ljava/lang/Object;)D
+  call clojure/lang/RT doubleCast (Ljava/lang/Object;)D
+  call clojure/lang/Util equiv (JJ)Z
+  call clojure/lang/RT intCast (J)I
+  call java/lang/Double isFinite (D)Z
+  call clojure/lang/Numbers lte (DD)Z
+  call clojure/lang/Numbers lte (DD)Z
+  call clojure/lang/Numbers inc (J)J
+invoke (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+  call afterglow/runtime/keyframes/values$valid_column_QMARK_ invokeStatic (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+<clinit> ()V
+  call clojure/lang/RT var (Ljava/lang/String;Ljava/lang/String;)Lclojure/lang/Var;
