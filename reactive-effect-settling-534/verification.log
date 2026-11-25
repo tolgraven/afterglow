@@ -1,0 +1,82 @@
+{:settled-beat 2.125, :settled-preview 0.35, :released-base "554ec20ec56621dae7f94209b50cb2c5c6e2c621", :frames 369, :calculations 3, :calculation-frames [0 16 36], :stable-frames 300, :settled-dmx-byte 89, :output :in-memory, :extra-calculations-during-hold 0, :source-commit "51877247dc7eae616cb857a987c07682741c81f2", :stable-elapsed-ms 140312.5, :afterglow-head "a4936fd5d48c57a3b2971d1d9772b855a6b2edd3", :settled-frame 68, :last-beat 282.75, :fixture {:universe 1, :slot 1}}
+
+Testing afterglow.reactive-test
+2026-11-25T05:27:28.026Z e4d1af81bf82 WARN [afterglow.reactive:170] - Reactive handler failed {:stage :subscription, :id :afterglow.reactive-test/a, :message "Reactive dependency cycle"}
+                                      ...
+                      clojure.core/map/fn           core.clj:2774
+                                      ...
+                   clojure.test/test-vars           test.clj: 731
+                                      ...
+                clojure.test/test-vars/fn           test.clj: 735
+                                      ...
+            clojure.test/test-vars/fn{x2}           test.clj: 735
+                    clojure.test/test-var           test.clj: 717
+                 clojure.test/test-var/fn           test.clj: 717
+               afterglow.reactive-test/fn  reactive_test.clj: 550
+              afterglow.reactive/publish!       reactive.clj: 692
+              afterglow.reactive/publish!       reactive.clj: 709
+      afterglow.reactive/publish-current!       reactive.clj: 645
+             afterglow.reactive/transact!       reactive.clj: 152
+          afterglow.reactive/transact!/fn       reactive.clj: 152
+   afterglow.reactive/publish-current!/fn       reactive.clj: 659
+        afterglow.reactive/evaluate-node!       reactive.clj: 349
+     afterglow.reactive/evaluate-node!/fn       reactive.clj: 350
+ afterglow.reactive/evaluate-node!/fn{x2}       reactive.clj: 352
+      afterglow.reactive/subscribe/fn{x2}       reactive.clj: 535
+           afterglow.reactive-test/fn{x2}  reactive_test.clj: 549
+                       clojure.core/deref           core.clj:2341
+afterglow.reactive/context/fn/reify/deref       reactive.clj: 465
+                       clojure.core/deref           core.clj:2341
+        afterglow.reactive.Reaction/deref       reactive.clj:  70
+         afterglow.reactive/read-reaction       reactive.clj: 377
+             afterglow.reactive/transact!       reactive.clj: 145
+      afterglow.reactive/read-reaction/fn       reactive.clj: 378
+           afterglow.reactive/dependency!       reactive.clj: 124
+                 afterglow.reactive/fail!       reactive.clj:  79
+clojure.lang.ExceptionInfo: Reactive dependency cycle
+    path: [[:subscription [:afterglow.reactive-test/a]]
+       [:subscription [:afterglow.reactive-test/b]]]
+    type: :afterglow.reactive/cycle
+
+
+2026-11-25T05:27:29.396Z e4d1af81bf82 WARN [afterglow.reactive:170] - Reactive handler failed {:stage :effect-handler, :id :afterglow.reactive-test/self-remove, :message "Change reactive graph structure only between owner batches"}
+                                   ...
+                   clojure.core/map/fn           core.clj:2774
+                                   ...
+                clojure.test/test-vars           test.clj: 731
+                                   ...
+             clojure.test/test-vars/fn           test.clj: 735
+                                   ...
+         clojure.test/test-vars/fn{x2}           test.clj: 735
+                 clojure.test/test-var           test.clj: 717
+              clojure.test/test-var/fn           test.clj: 717
+            afterglow.reactive-test/fn  reactive_test.clj: 292
+        afterglow.reactive-test/fn{x2}  reactive_test.clj: 293
+           afterglow.reactive/publish!       reactive.clj: 690
+   afterglow.reactive/publish-current!       reactive.clj: 645
+          afterglow.reactive/transact!       reactive.clj: 152
+       afterglow.reactive/transact!/fn       reactive.clj: 152
+afterglow.reactive/publish-current!/fn       reactive.clj: 660
+      afterglow.reactive/run-watchers!       reactive.clj: 610
+   afterglow.reactive/run-watchers!/fn       reactive.clj: 611
+        afterglow.reactive-test/fn{x2}  reactive_test.clj: 290
+           afterglow.reactive/unwatch!       reactive.clj: 562
+afterglow.reactive/outside-evaluation!       reactive.clj:  97
+              afterglow.reactive/fail!       reactive.clj:  79
+clojure.lang.ExceptionInfo: Change reactive graph structure only between owner batches
+    type: :afterglow.reactive/mutation-during-evaluation
+
+
+
+Testing afterglow.runtime.keyframes-test
+
+Testing afterglow.runtime.engine-test
+
+Testing afterglow.render.frame-test
+
+Testing afterglow.render.layers-test
+
+Testing afterglow.render.presentation-test
+
+Ran 167 tests containing 1654 assertions.
+0 failures, 0 errors.
