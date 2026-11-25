@@ -111,6 +111,24 @@
 (defn- encoder-control-id [note]
   (keyword "push-2" (str "encoder-" note)))
 
+(defn- observe-temporary-release-tails [state time-ms]
+  (if-let [tails (:temporary-release-tails state)]
+    (let [deadlines (if (:temporary-release-time-ms state) tails (update-vals tails #(+ time-ms %)))
+          active (into {} (filter (fn [[_ deadline]] (> deadline time-ms))) deadlines)]
+      (if (seq active)
+        (assoc state :temporary-release-tails active :temporary-release-time-ms time-ms)
+        (dissoc state :temporary-release-tails :temporary-release-time-ms)))
+    state))
+
+(defn- reset-encoder-epoch [state]
+  ;; Physical suppression can outlive the show. Carry only the remaining
+  ;; time of each temporary tail until the next envelope supplies its new clock.
+  (cond-> (dissoc state :encoder-gestures :encoder-releases :temporary-release-time-ms)
+    (:encoder-touch-modes state)
+    (update :encoder-touch-modes #(into {} (filter (comp #{:temporary} val)) %))
+    (:temporary-release-time-ms state)
+    (update :temporary-release-tails update-vals #(- % (:temporary-release-time-ms state)))))
+
 (defn- gesture-command [gesture op]
   (assoc (select-keys gesture [:show-id :epoch :control-id :gesture-id :instance-id :param]) :op op))
 
@@ -136,7 +154,8 @@
   (let [captured-mode (get-in state [:encoder-touch-modes note])
         temporary? (= :temporary (or captured-mode mode))
         state (cond-> state
-                (and (< note 8) mode (nil? captured-mode)) (assoc-in [:encoder-touch-modes note] mode))]
+                (and (< note 8) mode (nil? captured-mode)) (assoc-in [:encoder-touch-modes note] mode)
+                (contains? (:temporary-release-tails state) note) (update :temporary-release-tails dissoc note))]
     (if-let [selection (case note
                          8 {:target :master :encoder note}
                          9 {:target :tempo :encoder note}
@@ -173,6 +192,7 @@
   (let [control-id (encoder-control-id note)
         gesture (get-in state [:encoder-gestures control-id])
         mode (get-in state [:encoder-touch-modes note])
+        time-ms (:time-ms envelope)
         end (when-not (:released? gesture) (end-encoder-gesture gesture))
         ;; A settled predecessor can disappear before input clears its retouch.
         retouch? (or (:retouch gesture)
@@ -182,15 +202,23 @@
                           (update :touch-order #(vec (remove #{note} %))))
                 mode (update :encoder-touch-modes dissoc note)
                 (:retouch gesture) (update-in [:encoder-gestures control-id] dissoc :retouch)
-                (or retouch? (= :waiting (:status gesture)) (= :temporary mode))
-                (assoc-in [:encoder-releases control-id] (:time-ms envelope)))]
+                (or retouch? (= :waiting (:status gesture)))
+                (assoc-in [:encoder-releases control-id] time-ms)
+                (= :temporary mode)
+                (-> (assoc-in [:temporary-release-tails note] (+ time-ms encoder-release-tail-ms))
+                    (assoc :temporary-release-time-ms time-ms)))]
     (cond
       end {:state (-> state
                       (assoc-in [:encoder-gestures control-id :released?] true)
-                      (assoc-in [:encoder-releases control-id] (:time-ms envelope)))
+                      (assoc-in [:encoder-releases control-id] time-ms))
            :commands [end]}
       (and gesture (not (:released? gesture))) {:state (update state :encoder-gestures dissoc control-id)}
       :else {:state state})))
+
+(defn- release-stale-encoder-touch [state {:keys [type note]} {:keys [time-ms] :as envelope}]
+  (if (and (= :note-off type) (= :temporary (get-in state [:encoder-touch-modes note])))
+    (:state (release-encoder (observe-temporary-release-tails state time-ms) note envelope))
+    state))
 
 (defn- page-control [state model direction]
   (if (:shift? state)
@@ -321,6 +349,7 @@
     (cond
       gesture (edit-encoder-gesture state model gesture delta :relative)
       (= :temporary (get-in state [:encoder-touch-modes note])) {:state state}
+      (contains? (:temporary-release-tails state) note) {:state state}
       ;; An unlabelled trailing detent must not change a just-committed edit.
       (and released-at (< (- (:time-ms envelope) released-at) encoder-release-tail-ms)) {:state state}
       :else (edit-parameter state model (parameter-at state model note) delta :relative))))
@@ -528,13 +557,13 @@
                  :commands commands}))))))))
 
 (defn- feedback [device-id timeout-ms batch-size state model envelope]
-  (let [state (selected-state state model)
+  (let [time (:time-ms envelope)
+        state (observe-temporary-release-tails (selected-state state model) time)
         alive (set (keys (:instances model)))
         state (-> state (update :parameter-banks #(select-keys % alive))
                   (update :components #(into {} (filter (fn [[[id _] _]] (alive id))) %)))
         touch (touched state model)
         schema (get-in model [:instances (:instance-id touch) :definition :params (:param touch)])
-        time (:time-ms envelope)
         waiting? (:awaiting-led-ack? state)
         timed-out? (and waiting? (>= (- time (:last-led-at-ms state time)) timeout-ms))
         state (cond
@@ -602,7 +631,8 @@
 
 (defn- stop [device-id state _model envelope disconnected?]
   {:state (cond-> (assoc (dissoc (targets/clear-selection state) :grid-selection :grid-presses
-                                :encoder-gestures :encoder-releases :encoder-touch-modes)
+                                :encoder-gestures :encoder-releases :encoder-touch-modes
+                                :temporary-release-tails :temporary-release-time-ms)
                  :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                  :last-touch-strip nil :display-buttons #{}
                  :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
@@ -781,7 +811,8 @@
               {:state (assoc state :palette-start-ms (:time-ms envelope))
                :midi [(codec/palette-request device-id 0)]})
      :input (fn [state event model envelope]
-              (let [control (when (and (:ready? state) (= :control-change (:type event))) (:controller event))
+              (let [state (observe-temporary-release-tails state (:time-ms envelope))
+                    control (when (and (:ready? state) (= :control-change (:type event))) (:controller event))
                     down? (and control (pos? (:raw-value event)))
                     cc (when down? control)
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
@@ -804,8 +835,7 @@
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
      :reset-model #(reset-active-grid
-                     (assoc (dissoc (targets/clear-selection %) :grid-selection :grid-presses
-                                    :encoder-gestures :encoder-releases :encoder-touch-modes)
+                     (assoc (dissoc (reset-encoder-epoch (targets/clear-selection %)) :grid-selection :grid-presses)
                            :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                            :temporary-encoder-modifier-down? false :pressed-pads #{} :pad-instances {}))
@@ -828,6 +858,7 @@
                           (assoc-in [:pad-instances note] (:instance-id ack)))
                  :commands (:commands hold)})))}
       grid launch-receipt)
+      (some? modifier) (assoc :stale-input release-stale-encoder-touch)
       (true? operator-gestures?) with-encoder-gestures)))
 
 (defn connect!

@@ -13,6 +13,8 @@
   gesture carries its final :completion promise. Profiles
   reconcile receipts before input and feedback. A reconciliation that observes
   a newer owner commit can request a fresh snapshot with :refresh-model? true.
+  Optional :stale-input [local event envelope] can retain physical input state
+  when reconciliation changes the show identity. It returns local state only.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
@@ -277,9 +279,11 @@
                        model (model!)]
                    (adopt-epoch! session model)
                    (let [reconciled (reconcile! session model event)]
-                     (when (= (show-identity model) (show-identity reconciled))
+                     (if (= (show-identity model) (show-identity reconciled))
                        (enact! session ((:input profile) (:local @(:state session)) event
-                                        reconciled (envelope! session reconciled)))))
+                                        reconciled (envelope! session reconciled)))
+                       (when-let [stale-input (:stale-input profile)]
+                         (update-state! session update :local stale-input event (envelope! session reconciled)))))
                    (refresh-session! session false)))))
            (catch Exception error
              (record-error! session error)
