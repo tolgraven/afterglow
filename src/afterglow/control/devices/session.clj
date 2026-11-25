@@ -73,7 +73,7 @@
 
 (defn- dispatch-command! [session template]
   (let [{:keys [dispatch! profile]} (:options session)
-        ;; Admission time and show identity are assigned here, including delayed releases.
+        ;; Use current admission time for deferred releases while checking captured show identity.
         envelope (envelope! session)
         scheduled-launch? (grid-launch? template)
         timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
@@ -81,10 +81,13 @@
                       (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
         detached (when (and gesture? (= :gesture/begin (:op template)))
                    (get-in @(:gesture-ends session) [(:control-id template) :command]))
-        stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
-                   (and timed-cue? (some #(and (contains? template %)
-                                               (not= (get template %) (get envelope %)))
-                                         [:show-id :epoch])))
+        captured-order? (= :instance/move-after (:op template))
+        stale? (or (and (or gesture? captured-order?)
+                        (not= (show-identity template) (show-identity envelope)))
+                   (and (or timed-cue? (= :instance/end (:op template)))
+                        (some #(and (contains? template %)
+                                    (not= (get template %) (get envelope %)))
+                              [:show-id :epoch])))
         command (cond-> (merge template envelope)
                   (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
         response (cond

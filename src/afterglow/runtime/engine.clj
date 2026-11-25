@@ -9,6 +9,7 @@
             [afterglow.runtime.keyframes :as keyframes]
             [afterglow.time :as musical-time]
             [afterglow.control.model :as control]
+            [afterglow.control.instance-order :as instance-order]
             [afterglow.control.params :as params]
             [afterglow.control.system :as system]))
 
@@ -35,6 +36,7 @@
                  (map? (:params instance)) (contains? instance :state)
                  (finite-number? (:priority instance))
                  (integer? (:order instance)) (not (neg? (:order instance)))
+                 (instance-order/valid-render-position? instance)
                  (nonnegative-number? (:started-at-ms instance))
                  (#{:running :releasing} (:phase instance)))
     (fail! ::invalid-instance "Invalid runtime instance" {:instance-id id}))
@@ -500,7 +502,7 @@
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
          prepared (mapv (partial prepare-isolated model clock snapshot)
-                        (sort-by (juxt :priority :order :id) (vals (:instances model))))
+                        (instance-order/ordered model))
          definitions (distinct (map :program
                                     (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
                                                                   (get-in % [:instance :fault :effect-version])))
@@ -509,12 +511,12 @@
                     (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
                     keyframes/with-rig-positions)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
-         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :state]) :step identity) prepared)
+         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :render-priority :render-order :state])
+                                   :step identity) prepared)
          evaluations (vec (map-work (partial evaluate-isolated snapshot compiled factors) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
-         evaluations (vec (sort-by (juxt #(get-in % [:instance :priority])
-                                         #(get-in % [:instance :order]) :id) evaluations))]
+         evaluations (vec (sort-by (comp instance-order/sort-key :instance) evaluations))]
      (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
                             :last-frame-beat (:beat clock) :frame-number frame-number)
                snapshot descriptors evaluations))))

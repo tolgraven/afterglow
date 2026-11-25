@@ -2,9 +2,12 @@
   "Pure device-independent projections. Local focus, menus and raw protocol
   buffers belong to adapters; these views describe committed show state."
   (:require [afterglow.control.categories :as categories]
+            [afterglow.control.instance-order :as instance-order]
             [afterglow.control.pages :as pages]))
 
-(defn active-instances [model]
+(defn active-instances
+  "Priority and launch order for cue grids and latest-launch lookup."
+  [model]
   (->> (:instances model) vals (sort-by (juxt :priority :order :id)) vec))
 
 (defn cue-view
@@ -63,11 +66,11 @@
           :groups (categories/group-view model)
           :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
                                                    :started-at-ms :release-at-ms :duration-ms
-                                                   :priority :order :phase :launch-mode])
+                                                   :priority :order :render-priority :render-order :phase :launch-mode])
                                   :categories (categories/definition-categories (:definition %))
                                   :system (merge {:opacity 1.0 :paused? false}
                                                  (select-keys (:system %) [:opacity :paused? :attack :release])))
-                           (active-instances model))}))
+                           (instance-order/ordered model))}))
 
 (defn diff-view
   "Return changed and removed top-level values. A transport adds epoch and
