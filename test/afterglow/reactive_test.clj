@@ -679,19 +679,16 @@
         ((:close! healthy)))
       (finally (reactive/close! sys)))))
 
-(deftest exact-cycle-boundaries-use-floor-across-numeric-representations
+(defn- assert-cycle-samples [interval positions]
   (let [sys (reactive/create-system {})
         calls (LinkedBlockingQueue.)]
     (try
       (reactive/reg-cofx! sys ::reading
-                          {:mode :background :interval {:cycles 1/5} :cycle-position (fn [db] (:position db))
+                          {:mode :background :interval {:cycles interval} :cycle-position (fn [db] (:position db))
                            :sample (fn [db] (.offer calls (:position db)))})
       (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
       (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
-        (doseq [[position expected] [[-7/10 true] [-601/1000 false] [-3/5 true] [-599/1000 false]
-                                     [-1E-400M true] [0 true] [599/1000 true] [3/5 true]
-                                     [0.60M false] [0.61 false] [0.6 true] [3/5 true]
-                                     [(Math/nextDown 0.8) false] [0.8 true] [4/5 false]]]
+        (doseq [[position expected] positions]
           (testing (str "cycle position " position)
             (is (= (when expected position)
                    (some (fn [_]
@@ -700,6 +697,22 @@
                          (range (if expected 150 3)))))))
         (close!))
       (finally (reactive/close! sys)))))
+
+(deftest exact-cycle-boundaries-use-floor-across-numeric-representations
+  (assert-cycle-samples 1/5 [[-7/10 true] [-601/1000 false] [-3/5 true] [-599/1000 false]
+                             [-1E-400M true] [0 true] [599/1000 true] [3/5 true]
+                             [0.60M false] [0.61 false] [0.6 true] [3/5 true]
+                             [(Math/nextDown 0.8) false] [0.8 true] [4/5 false]]))
+
+(deftest exact-cycle-buckets-handle-underflowed-decimal-positions
+  (let [half-min (.divide (BigDecimal. Double/MIN_VALUE) 2M)
+        interval (rationalize (- half-min 1E-350M))
+        position (- half-min 1E-351M)
+        tiny (BigDecimal. BigInteger/ONE Integer/MAX_VALUE)]
+    (is (= Double/MIN_VALUE (double interval)))
+    (is (zero? (double position)))
+    (assert-cycle-samples interval [[tiny true] [0 false] [position true] [interval false]
+                                    [(- tiny) true] [(- interval) false] [(- position) true]])))
 
 (deftest cycle-projection-linkage-errors-are-isolated-at-acquisition-and-publication
   (let [reported (atom [])

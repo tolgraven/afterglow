@@ -128,10 +128,18 @@
   (when (and (not= bucket @timer) (submit! manager entry db))
     (vreset! timer bucket)))
 
+(defn- decimal-magnitude-below-interval? [^BigDecimal position interval]
+  (let [magnitude (.abs position)]
+    (neg? (if (ratio? interval)
+            (.compareTo (.multiply magnitude (bigdec (denominator interval)))
+                        (bigdec (numerator interval)))
+            (.compareTo magnitude (bigdec interval))))))
+
 (defn- cycle-bucket [position cycles]
   (let [bucket (if (and (rational? position) (rational? cycles))
-                 (if (zero? (double position))
-                   ;; An exact position that rounds to zero is smaller than the validated interval.
+                 (if (and (decimal? position) (zero? (double position))
+                          (decimal-magnitude-below-interval? position cycles))
+                   ;; Keep very small decimal positions at their original scale.
                    (if (neg? position) -1 0)
                    (let [quotient (/ (rationalize position) (rationalize cycles))
                          whole (quot quotient 1)]
