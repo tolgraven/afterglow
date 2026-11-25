@@ -689,3 +689,61 @@
     (doseq [targets [nil 1 [:left :left] [:left nil]]]
       (is (= :invalid-targets (get-in (model/apply-command m (command m {:op :effect/launch :effect-id :wash
                                                                         :launch {:targets targets}})) [:ack :code]))))))
+
+(deftest domain-command-uses-the-shared-receipts-and-event-batch
+  (let [base (events/begin (model/new-show))
+        cmd (command base {:op :example/set :value 1 :expected-revision 0})
+        changed {:type :example/changed :value 1}
+        operation (fn [m {:keys [value]}]
+                    (when (neg? value)
+                      (throw (ex-info "Invalid value" {:control/error :invalid-value})))
+                    {:model (assoc-in m [:settings :example] value)
+                     :events [changed] :result {:value value}})
+        result (model/apply-domain-command base cmd operation)
+        updated (:model result)
+        duplicate (model/apply-domain-command updated cmd operation)]
+    (is (= {:status :accepted :revision 1 :value 1}
+           (select-keys (:ack result) [:status :revision :value])))
+    (is (= 1 (get-in updated [:settings :example])))
+    (is (= [changed] (mapv :event (events/pending updated))))
+    (is (= (:ack result) (:ack duplicate)))
+    (is (identical? updated (:model duplicate)))
+    (is (= [] (:events duplicate)))
+    (doseq [[code m c] [[:wrong-show base (assoc cmd :show-id :other)]
+                        [:stale-epoch base (assoc cmd :epoch 1)]
+                        [:stale-revision updated (assoc cmd :command-id :new)]
+                        [:command-id-conflict updated (assoc cmd :value 2)]
+                        [:invalid-value base (assoc cmd :value -1)]]]
+      (let [rejected (model/apply-domain-command m c operation)]
+        (is (= code (get-in rejected [:ack :code])))
+        (is (identical? m (:model rejected)))))))
+
+(deftest host-domain-admission-preserves-an-open-operator-gesture
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        gesture (knob id :level :interleaved)
+        started (operator! show (assoc gesture :op :gesture/begin))
+        cmd (command started {:op :example/set :value 0.5})
+        operation (fn [m {:keys [value]}] {:model (assoc-in m [:settings :example] value)})
+        mixed (model/apply-domain-command started cmd operation)
+        mixed-model (:model mixed)
+        sample (operator-command mixed-model
+                                 (assoc gesture :op :gesture/sample :sequence 1 :value 0.8
+                                        :source {:adapter :guest :operator-id "studio-panel"}))
+        forged (model/apply-domain-command
+                 mixed-model sample
+                 (fn [& _] (throw (AssertionError. "Reserved history operations must use owner admission"))))
+        sampled (model/apply-command mixed-model sample studio-operator)
+        ended (operator! (:model sampled) (assoc gesture :op :gesture/end :last-sequence 1))
+        undo (operator! ended {:op :history/undo :expected-cursor 1})]
+    (is (= :accepted (get-in mixed [:ack :status])))
+    (is (= 0.5 (get-in mixed-model [:settings :example])))
+    (is (= (get-in started [:control :edit-history])
+           (get-in mixed-model [:control :edit-history])))
+    (is (= :operator-required (get-in forged [:ack :code])))
+    (is (identical? mixed-model (:model forged)))
+    (is (= :accepted (get-in sampled [:ack :status])))
+    (is (= 0.8 (get-in ended [:instances id :params :level])))
+    (is (= 0.6 (get-in undo [:instances id :params :level])))
+    (is (= 0.5 (get-in undo [:settings :example])))
+    (is (= (:ack mixed) (:ack (model/apply-domain-command undo cmd operation))))))
