@@ -32,23 +32,29 @@
 
 (def ^:private shift-address {:channel 0 :controller 49})
 
-(defn- default-accent [{:keys [layout button-bindings] :as options}]
+(defn- factory-button [{:keys [layout button-bindings] :as options} name address]
   (let [{:keys [buttons encoders]} layout
         members (::mpe-members options)]
     (when (and (map? layout) (or (some #(and (map? %) (seq %)) (vals layout)) (seq (:mpe-note-cells options)))
                (map? (get layout :buttons {})) (map? (get layout :encoders {}))
                (map? (get options :button-bindings {})))
-      (let [captured (if (contains? buttons :accent) :accent
-                         (some (fn [[id address]] (when (= accent-address address) id)) buttons))]
+      (let [captured (if (contains? buttons name) name
+                         (some (fn [[id capture]] (when (= address capture) id)) buttons))]
         (cond
           captured (when (and (not (contains? button-bindings captured))
                               (not (contains? members (get-in buttons [captured :channel]))))
-                     {:layout layout :temporary-encoder-modifier captured})
-          (or (contains? members (:channel accent-address))
-              (contains? button-bindings :accent)
-              (some #{accent-address} (vals encoders))) nil
-          :else {:layout (assoc-in layout [:buttons :accent] accent-address)
-                 :temporary-encoder-modifier :accent})))))
+                     [captured layout])
+          (or (contains? members (:channel address))
+              (contains? button-bindings name)
+              (some #{address} (vals encoders))) nil
+          :else [name (assoc-in layout [:buttons name] address)])))))
+
+(defn- shift-options [{:keys [button-bindings] :as options}]
+  (if (and (map? button-bindings) (some #{:shift} (vals button-bindings)))
+    options
+    (if-let [[id layout] (factory-button options :shift shift-address)]
+      (-> options (assoc :layout layout) (assoc-in [:button-bindings id] :shift))
+      options)))
 
 (defn- encoder-modifier-options [{:keys [operator-gestures? temporary-encoder-modifier button-bindings] :as options}]
   (when (some? temporary-encoder-modifier)
@@ -60,7 +66,9 @@
                (= :shift (get button-bindings temporary-encoder-modifier))
                (= shift-address (get-in options [:layout :buttons temporary-encoder-modifier]))
                (and (= :accent temporary-encoder-modifier) (not (get-in options [:layout :buttons :accent])))))
-    (merge (dissoc options :temporary-encoder-modifier) (default-accent options) {::default-accent? true})
+    (if-let [[id layout] (factory-button options :accent accent-address)]
+      (assoc options :layout layout :temporary-encoder-modifier id)
+      (dissoc options :temporary-encoder-modifier))
     options))
 
 (defn- reset-interactions [state]
@@ -388,13 +396,12 @@
                      (not (contains? members (get-in layout [:buttons temporary-encoder-modifier :channel]))))
                 "Temporary encoder edits require operator gestures and a captured User Mode button"
                 {:temporary-encoder-modifier temporary-encoder-modifier})
-        (when-not (::default-accent? options)
-          (doseq [id (paired-parameter-encoders layout encoder-bindings)
-                  section [:encoder-touches :encoders]
-                  :let [channel (get-in layout [section id :channel])]]
-            (valid! (not (contains? members channel))
-                    "Temporary encoder touch and turn require fixed User Mode channels outside MPE members"
-                    {:id id :layout-section section :channel channel})))))
+        (doseq [id (paired-parameter-encoders layout encoder-bindings)
+                section [:encoder-touches :encoders]
+                :let [channel (get-in layout [section id :channel])]]
+          (valid! (not (contains? members channel))
+                  "Temporary encoder touch and turn require fixed User Mode channels outside MPE members"
+                  {:id id :layout-section section :channel channel}))))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
     (when (contains? options :launch-mode)
@@ -623,7 +630,8 @@
   bind a captured button to :cue-gesture or the configured :gesture-modifier.
   :operator-gestures? true groups touched scalar encoder edits for a trusted host.
   Accent is the default temporary modifier. A captured logical button ID can
-  override it. Legacy :shift settings select Accent so Shift stays fine.
+  override it. Legacy :shift settings select Accent. Shift defaults to fine
+  adjustment when its factory address is available and no Shift is mapped.
   Bind a touch note and turn CC to the same logical encoder ID for temporary edits.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
@@ -640,7 +648,7 @@
                                        mpe? (assoc :default-launch-mode :held)
                                        (:pressure-param options) (update :param-mappings
                                                                         #(merge {(:pressure-param options) :pressure} %))))))
-        options (encoder-modifier-options options)
+        options (encoder-modifier-options (shift-options options))
         profile (cond
                   (and mpe? (::gesture options)) (mpe-gesture-profile options)
                   mpe? (mpe-profile options)
