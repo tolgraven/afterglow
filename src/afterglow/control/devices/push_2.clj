@@ -163,8 +163,9 @@
         end (when-not (:released? gesture) (end-encoder-gesture gesture))
         state (cond-> (-> state (update :touches dissoc note)
                           (update :touch-order #(vec (remove #{note} %))))
-                (:retouch gesture) (-> (update-in [:encoder-gestures control-id] dissoc :retouch)
-                                       (assoc-in [:encoder-releases control-id] (:time-ms envelope))))]
+                (:retouch gesture) (update-in [:encoder-gestures control-id] dissoc :retouch)
+                (or (:retouch gesture) (= :waiting (:status gesture)))
+                (assoc-in [:encoder-releases control-id] (:time-ms envelope)))]
     (cond
       end {:state (-> state
                       (assoc-in [:encoder-gestures control-id :released?] true)
@@ -525,12 +526,15 @@
     {:state (update state :encoder-gestures dissoc control-id)}))
 
 (defn- acknowledge-encoder [state {:keys [op control-id gesture-id sequence time-ms] :as command}
-                            {:keys [status code reason completion]}]
+                            {:keys [status code reason completion detached-gesture]}]
   (let [path [:encoder-gestures control-id]
         gesture (get-in state path)
         failure (or code reason)]
     (cond
       (not= gesture-id (:gesture-id gesture)) {:state state}
+
+      (and (= :gesture/begin op) (= :gesture-end-pending failure) detached-gesture)
+      {:state (assoc-in state path (assoc gesture :status :waiting :waiting-for detached-gesture))}
 
       (= :gesture/end op)
       (cond
@@ -583,10 +587,32 @@
               result))
           result (sort-by :control-id (vals (:encoder-gestures state)))))
 
+(defn- detached-gesture-open? [model {:keys [instance-id param] :as detached}]
+  (let [owner (get-in model [:control :edit-history :open [:instance-param instance-id param]])
+        identity-fields [:control-id :gesture-id]]
+    (= (select-keys detached identity-fields) (select-keys owner identity-fields))))
+
+(defn- resume-gesture-begins [state model ending-controls event]
+  ;; Reconciliation sees a decoded lift before the normal input clears its touch.
+  (let [lifting (when (= :note-off (:type event)) (encoder-control-id (:note event)))
+        ready? (fn [{:keys [status control-id encoder waiting-for]}]
+                 (and (= :waiting status) (not= control-id lifting)
+                      (contains? (:touches state) encoder)
+                      (not (contains? ending-controls control-id))
+                      (not (detached-gesture-open? model waiting-for))))
+        gestures (filter ready? (vals (:encoder-gestures state)))]
+    (when (seq gestures)
+      (reduce (fn [{:keys [state commands]} gesture]
+                (let [resumed (begin-encoder-gesture state (dissoc gesture :status :waiting-for))]
+                  {:state (:state resumed) :commands (into commands (:commands resumed))}))
+              {:state state :commands []}
+              (sort-by :control-id gestures)))))
+
 (defn- with-encoder-gestures [profile]
   (let [{:keys [feedback reconcile stop]} profile]
     (assoc profile
            :operator-gestures? true
+           :resume-gesture-begins resume-gesture-begins
            :feedback (fn [state model envelope]
                        (let [result (feedback state model envelope)]
                          (if (and (get-in result [:state :ready?]) (nil? (:lifecycle result)))

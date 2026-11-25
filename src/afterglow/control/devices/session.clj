@@ -79,6 +79,8 @@
         timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
         gesture? (and (:operator-gestures? profile)
                       (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
+        detached (when (and gesture? (= :gesture/begin (:op template)))
+                   (get-in @(:gesture-ends session) [(:control-id template) :command]))
         stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
                    (and timed-cue? (some #(and (contains? template %)
                                                (not= (get template %) (get envelope %)))
@@ -87,9 +89,8 @@
                   (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
         response (cond
                    stale? {:status :rejected :reason :stale-epoch}
-                   (and gesture? (= :gesture/begin (:op command))
-                        (contains? @(:gesture-ends session) (:control-id command)))
-                   {:status :rejected :reason :dispatch-busy}
+                   detached {:status :rejected :code :gesture-end-pending
+                             :detached-gesture (select-keys detached [:show-id :epoch :control-id :gesture-id :instance-id :param])}
                    (and gesture? (= :gesture/end (:op command)))
                    ;; Preserve feedback and continue releasing other controls.
                    (try (dispatch! command)
@@ -185,16 +186,18 @@
                       (update-state! session assoc :status :failed))
       nil)))
 
-(defn- reconcile! [session model]
-  (if-let [reconcile (get-in session [:options :profile :reconcile])]
-    (let [result (reconcile (:local @(:state session)) model)]
+(defn- reconcile! [session model event]
+  (let [{:keys [resume-gesture-begins reconcile]} (get-in session [:options :profile])
+        resumed (when resume-gesture-begins
+                  (resume-gesture-begins (:local @(:state session)) model (set (keys @(:gesture-ends session))) event))]
+    (enact! session resumed)
+    (let [result (when reconcile (reconcile (:local @(:state session)) model))]
       (enact! session result)
-      (if (or (:refresh-model? result) (seq (:commands result)))
+      (if (or (:refresh-model? result) (seq (:commands result)) (seq (:commands resumed)))
         (let [model ((get-in session [:options :model!]))]
           (adopt-epoch! session model)
           model)
-        model))
-    model))
+        model))))
 
 (defn- close-resource! [session kind]
   (when-let [handle (get @(:resources session) kind)]
@@ -264,7 +267,7 @@
                  (let [_ (retry-gesture-ends! session)
                        model (model!)]
                    (adopt-epoch! session model)
-                   (let [reconciled (reconcile! session model)]
+                   (let [reconciled (reconcile! session model event)]
                      (when (= (show-identity model) (show-identity reconciled))
                        (enact! session ((:input profile) (:local @(:state session)) event
                                         reconciled (envelope! session reconciled)))))
@@ -304,7 +307,7 @@
         (let [{:keys [profile model!]} (:options session)
               model (model!)]
           (adopt-epoch! session model)
-          (let [model (reconcile! session model)]
+          (let [model (reconcile! session model nil)]
             (when-let [feedback (:feedback profile)]
               (let [local (:local @(:state session))]
                 (enact! session (feedback local (feedback-model session local model) (envelope! session))))))))

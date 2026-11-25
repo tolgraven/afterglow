@@ -662,6 +662,86 @@
       (is (empty? (:pending-gesture-ends (session/snapshot device))))
       (finally (session/close! device true)))))
 
+(deftest a-reopened-encoder-waits-for-the-exact-detached-end-while-held
+  (doseq [scenario [:held :lifted :lift-during-settlement :new-epoch]]
+    (testing (name scenario)
+      (let [{:keys [show options now callbacks] :as h}
+            (fixture/harness {:profile (push/profile {:operator-gestures? true})} push-operator)
+            apply! (:dispatch! options)
+            delegated (atom [])
+            end-command (atom nil)
+            during-read (atom nil)
+            completion (promise)
+            device (session/create
+                     (assoc options
+                            :model! (fn []
+                                      (let [snapshot @show]
+                                        (when-let [settle! (first (reset-vals! during-read nil))]
+                                          (settle!))
+                                        snapshot))
+                            :dispatch! (fn [command]
+                                         (swap! delegated conj command)
+                                         (if (and (= :gesture/end (:op command))
+                                                  (compare-and-set! end-command nil command))
+                                           {:status :pending :completion completion}
+                                           (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            settle! #(deliver completion (:ack (apply! (assoc @end-command :time-ms @now))))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)
+                old-receive (peek @callbacks)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (session/reconnect! device)
+            (fixture/ready! h)
+            (let [before (count @delegated)]
+              (receive! h [0x90 0 127])
+              (receive! h [0x90 0 127])
+              (receive! h [0xb0 71 10])
+              (is (= before (count @delegated))))
+            (let [waiting (get-in (local h) [:encoder-gestures :push-2/encoder-0])
+                  gesture-id (:gesture-id waiting)]
+              (is (= :waiting (:status waiting)))
+              (is (= (select-keys @end-command [:show-id :epoch :control-id :gesture-id :instance-id :param])
+                     (:waiting-for waiting)))
+              (is (not= (:gesture-id @end-command) gesture-id))
+              (reset! now 100)
+              (case scenario
+                :held
+                (do (settle!)
+                    (old-receive [0xb0 71 10])
+                    ;; The first detent can observe the receipt without a prior refresh.
+                    (receive! h [0xb0 71 1])
+                    (receive! h [0x80 0 0])
+                    (receive! h [0x80 0 0]))
+                :lifted
+                (do (receive! h [0x80 0 0])
+                    (settle!)
+                    (session/refresh! device)
+                    (receive! h [0xb0 71 10]))
+                :lift-during-settlement
+                (do (reset! during-read settle!)
+                    (receive! h [0x80 0 0])
+                    (receive! h [0xb0 71 10]))
+                :new-epoch
+                (do (swap! show #(model/new-show (update % :epoch inc)))
+                    (settle!)
+                    (session/refresh! device)))
+              (is (empty? (:pending-gesture-ends (session/snapshot device))))
+              (is (empty? (:encoder-gestures (local h))))
+              (is (empty? (:open (history))))
+              (let [commands (filter #(= gesture-id (:gesture-id %)) @delegated)]
+                (if (= :held scenario)
+                  (do (is (= [:gesture/begin :gesture/sample :gesture/end] (mapv :op commands)))
+                      (is (every? #(= [:main 0 id :level] ((juxt :show-id :epoch :instance-id :param) %)) commands))
+                      (is (= 2 (:cursor (history))))
+                      (is (= 0.52 (:level (values h id)))))
+                  (do (is (empty? commands))
+                      (is (= (when-not (= :new-epoch scenario) 1) (:cursor (history))))
+                      (is (= 0.51 (:level (values h id)))))))))
+          (finally (session/close! device true)))))))
+
 (deftest push-feedback-indexes-running-cues-once-for-the-display-and-pads
   (let [h (harness) calls (atom 0) active views/active-instances]
     (try
