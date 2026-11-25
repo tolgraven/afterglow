@@ -89,7 +89,8 @@
   ;; enable to start the nREPL server when the application launches
   ;; :env {:repl-port 16002}
 
-  :aliases {"test-pure" ["with-profile" "+test" "run" "-m" "afterglow.test-runner" "pure"]
+  :aliases {"check-definition-spacing" ["run" "-m" "definition-spacing"]
+            "test-pure" ["with-profile" "+test" "run" "-m" "afterglow.test-runner" "pure"]
             "test-parity" ["with-profile" "+test" "run" "-m" "afterglow.test-runner" "parity"]}
   :profiles {:dev     {:source-paths ["dev"]
                        :prep-tasks ^:replace ["javac" "compile"]
