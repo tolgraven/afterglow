@@ -318,36 +318,47 @@
       (:aim :direction) (vec3? value)
       (level? value))))
 
-(defn- validate-assignment! [fixture target-id attribute value blend assignment hdr?]
-  (when-not (and (map? assignment) fixture
-                 (keyword? attribute) (#{:replace :max :add} blend)
-                 (assignment-value? attribute value (and hdr? (::emission-channels fixture))) (unit? (:opacity assignment 1)))
-    (fail! "Invalid assignment target, attribute, blend or value" {:assignment assignment}))
-  (when (and (= attribute :color) (not (::rgb? fixture)))
-    (fail! "Color assignment requires red, green and blue channels" {:target-id target-id}))
-  (when-not (contains? (::supported fixture) attribute)
-    (fail! "Fixture does not implement assigned attribute" {:target-id target-id :attribute attribute}))
-  (when (and (contains? geometric-attributes attribute) (not= :replace blend))
-    (fail! "Geometry assignments require :replace blend" {:target-id target-id :attribute attribute})))
+(defn- validate-assignment!
+  ([fixture target-id attribute value blend assignment hdr?]
+   (when-not (map? assignment)
+     (fail! "Invalid assignment target, attribute, blend or value" {:assignment assignment}))
+   (validate-assignment! fixture target-id attribute value blend (:opacity assignment 1) assignment hdr?))
+  ([fixture target-id attribute value blend opacity assignment hdr?]
+   (when-not (and fixture (keyword? attribute) (#{:replace :max :add} blend)
+                  (assignment-value? attribute value (and hdr? (::emission-channels fixture))) (unit? opacity))
+     ;; A typed row needs an assignment map only when reporting an invalid value.
+     (fail! "Invalid assignment target, attribute, blend or value"
+            {:assignment (or assignment {:target-id target-id :attribute attribute :value value
+                                         :blend blend :opacity opacity})}))
+   (when (and (= attribute :color) (not (::rgb? fixture)))
+     (fail! "Color assignment requires red, green and blue channels" {:target-id target-id}))
+   (when-not (contains? (::supported fixture) attribute)
+     (fail! "Fixture does not implement assigned attribute" {:target-id target-id :attribute attribute}))
+   (when (and (contains? geometric-attributes attribute) (not= :replace blend))
+     (fail! "Geometry assignments require :replace blend" {:target-id target-id :attribute attribute}))))
+
+(defn- merge-general-value!
+  [^objects targets ^objects geometry-sources source fixture target-id attribute value blend opacity hdr?]
+  (when (pos? opacity)
+    (let [index (int (::index fixture))
+          attributes (or (aget targets index) (transient {}))
+          previous (get attributes attribute)
+          blended (blend-field fixture attribute previous value blend opacity)]
+      (when-not (assignment-value? attribute blended (and hdr? (::emission-channels fixture)))
+        (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
+      (aset targets index (assoc! attributes attribute blended))
+      (when (and geometry-sources (geometric-attributes attribute))
+        ;; Nil deliberately clears an earlier attributed write. An unattributed
+        ;; replacement must not blame the effect that it superseded.
+        (aset geometry-sources index (assoc (aget geometry-sources index) attribute source))))))
 
 (defn- merge-general-assignments!
   [patch ^objects targets assignments ^objects geometry-sources source]
-  (let [by-id (:by-id patch)]
+  (let [by-id (:by-id patch), hdr? (::hdr? patch)]
     (doseq [{:keys [target-id attribute value blend opacity] :or {blend :replace opacity 1} :as assignment} assignments]
       (let [fixture (get by-id target-id)]
-        (validate-assignment! fixture target-id attribute value blend assignment (::hdr? patch))
-        (when (pos? opacity)
-          (let [index (int (::index fixture))
-                attributes (or (aget targets index) (transient {}))
-                previous (get attributes attribute)
-                blended (blend-field fixture attribute previous value blend opacity)]
-            (when-not (assignment-value? attribute blended (and (::hdr? patch) (::emission-channels fixture)))
-              (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
-            (aset targets index (assoc! attributes attribute blended))
-            (when (and geometry-sources (geometric-attributes attribute))
-              ;; Nil deliberately clears an earlier attributed write. An unattributed
-              ;; replacement must not blame the effect that it superseded.
-              (aset geometry-sources index (assoc (aget geometry-sources index) attribute source)))))))))
+        (validate-assignment! fixture target-id attribute value blend assignment hdr?)
+        (merge-general-value! targets geometry-sources source fixture target-id attribute value blend opacity hdr?)))))
 
 (defn- persist-assignments! [^objects targets]
   (dotimes [index (alength targets)]
@@ -1174,22 +1185,24 @@
 
                          :else targets)))) #{} blocks))
 
-(defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} ^booleans general]
-  ;; A large pixel batch may have only a few geometric targets. Scan the mask
-  ;; with a primitive index, retaining only selected row indices. Assignment
-  ;; maps remain streamed in row order, including repeated/reordered IDs.
-  (let [row-count (count target-ids)
-        rows (loop [row 0, selected (transient [])]
-               (if (< row row-count)
-                 (let [index (if target-indices (aget ^ints target-indices row) (int row))]
-                   (recur (inc row)
-                          (if (and (aget general index)
-                                   (or (nil? opacities) (pos? (aget ^doubles opacities row))))
-                            (conj! selected row) selected)))
-                 (persistent! selected)))]
-    (for [row rows, {:keys [attribute] :as column} columns]
-      {:target-id (nth target-ids row) :attribute attribute :blend blend :opacity (if opacities (aget ^doubles opacities row) opacity)
-       :value (column-value column row)})))
+(defn- merge-general-batch!
+  [patch targets {:keys [target-ids target-indices columns blend opacity ::layers/opacities]}
+   ^booleans general geometry-sources source]
+  ;; Preserve row and column order, even when a batch visits a fixture twice.
+  (let [fixtures (:fixtures patch), hdr? (::hdr? patch), column-count (count columns)]
+    (dotimes [row (count target-ids)]
+      (let [index (if target-indices (aget ^ints target-indices row) (int row))]
+        (when (aget general index)
+          (let [row-opacity (if opacities (aget ^doubles opacities row) opacity)]
+            (when (or (nil? opacities) (pos? row-opacity))
+              (let [fixture (nth fixtures index)
+                    target-id (nth target-ids row)]
+                (dotimes [column-index column-count]
+                  (let [{:keys [attribute] :as column} (nth columns column-index)
+                        value (column-value column row)]
+                    (validate-assignment! fixture target-id attribute value blend row-opacity nil hdr?)
+                    (merge-general-value! targets geometry-sources source fixture target-id attribute
+                                          value blend row-opacity hdr?)))))))))))
 
 (defn- geometry-source-storage [patch blocks]
   (when (some #(some? (:source %)) blocks)
@@ -1387,8 +1400,7 @@
                 (merge-general-assignments! patch assigned (get groups true) sources (:source block)))
               :batch
               (do (merge-packed-batches! patch values present [(:compiled block)] general)
-                  (merge-general-assignments! patch assigned (expand-general-rows (:compiled block) general)
-                                             sources (:source block))))))
+                  (merge-general-batch! patch assigned (:compiled block) general sources (:source block))))))
         (persist-assignments! assigned)
         ;; Mark zero-opacity targets too: their absent attributes and history use
         ;; the same reference path. Each target is packed once into private output.
