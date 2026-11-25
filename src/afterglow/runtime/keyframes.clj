@@ -5,6 +5,7 @@
             [afterglow.runtime.faults :as faults]
             [afterglow.runtime.keyframes.observations :as observations]
             [afterglow.runtime.keyframes.values :as values]
+            [afterglow.runtime.reuse :as reuse]
             [afterglow.time :as time]))
 
 (defn predictable
@@ -25,6 +26,48 @@
 
 (defn predictable? [step] (boolean (::sampler (meta step))))
 
+(defn- reactive-inputs [context paths]
+  (let [inputs (select-keys (get-in context [:frame :reactive-inputs]) paths)]
+    (when (= (count inputs) (count paths))
+      (when-not (reuse/immutable-inputs? inputs)
+        (throw (ex-info "Declared reactive inputs must be bounded immutable values" {})))
+      inputs)))
+
+(defn- reactive-contributions [calculate inputs hdr?]
+  (let [result (calculate inputs)]
+    (when-not (and (map? result) (every? #{:assignments :contributions} (keys result))
+                   (vector? (:assignments result [])))
+      (throw (ex-info "A dependency-driven effect must return only native contributions" {})))
+    (let [blocks (:contributions (runtime/append-contributions (merge {:assignments []} result) []))]
+      (if-let [retained (reuse/retained-output blocks)]
+        (values/reactive-blocks retained hdr?)
+        (throw (ex-info "Dependency-driven output must fit the bounded native value schema" {}))))))
+
+(defn dependency-driven
+  "Bind a pure effect to named values in the owner's :reactive-inputs frame map.
+  The calculation receives only those values, plus any immutable data captured
+  at compile time, and returns :assignments and/or :contributions. Optional
+  :transition {:beats n} moves from the last committed result on the private
+  beat clock. Missing dependencies produce no output until they are available."
+  [{:keys [inputs transition] :as options} calculate]
+  (when-not (and (map? options) (every? #{:inputs :transition} (keys options))
+                 (fn? calculate) (vector? inputs) (seq inputs) (every? keyword? inputs)
+                 (= (count inputs) (count (distinct inputs)))
+                 (or (nil? transition)
+                     (and (map? transition) (= #{:beats} (set (keys transition)))
+                          (time/finite-number? (:beats transition)) (pos? (:beats transition)))))
+    (throw (ex-info "Dependency-driven effects require named inputs and an optional positive beat interval"
+                    {:options options})))
+  (with-meta
+    (fn [context]
+      (if-let [captured (reactive-inputs context inputs)]
+        (runtime/append-contributions context (reactive-contributions calculate captured (get-in context [:frame :hdr?])))
+        context))
+    {::reactive {:options options :calculate calculate}}))
+
+(defn dependency-driven? [step]
+  (boolean (::reactive (meta step))))
+
 (defn with-inputs
   "Preprocess current and projected contexts through the same input middleware.
   Preserve time-invariance only for a transform that leaves certified inputs
@@ -35,12 +78,15 @@
    (let [run (comp step transform)
          info (meta step)
          sample (::sampler info)
-         invariant (when preserve-time-invariance? (::time-invariant info))]
+         invariant (when preserve-time-invariance? (::time-invariant info))
+         reactive (::reactive info)]
      (if info
        (with-meta run (cond-> (dissoc info ::time-invariant)
                         sample (assoc ::sampler (comp sample transform))
                         invariant (assoc ::time-invariant
-                                         (update invariant :prepare #(if % (comp % transform) transform)))))
+                                         (update invariant :prepare #(if % (comp % transform) transform)))
+                        reactive (assoc ::reactive
+                                        (update reactive :prepare #(if % (comp % transform) transform)))))
        run))))
 
 (defn- positive-duration? [duration]
@@ -271,13 +317,67 @@
             (constant-window window (when same-inputs? usable) sample ctx)
             (fresh-window window usable same-inputs? sample ctx)))))))
 
-(defn evaluate
-  "Run either a real step or a lightweight interpolation; all cached results
-  travel through the committed frame, so failed or timed-out evaluations cannot
-  advance any other instance. External progress comes from the live private context.
-  Mark steps reading :transport-clock with ::transport-clock? metadata so a
-  seek, pause offset or shared meter change refreshes their sampled endpoints."
-  [step ctx]
+(defn- settle [window]
+  (-> window (dissoc ::interpolation :discrete?)
+      (assoc :settled? true :progress 1.0 :result (:target window))))
+
+(defn- reactive-sample [window now hdr?]
+  (let [{:keys [start end origin target]} window]
+    (cond
+      (:settled? window) window
+      (>= now end) (settle window)
+      (<= now start) window
+      :else (let [progress (/ (- (rationalize now) (rationalize start))
+                              (- (rationalize end) (rationalize start)))
+                  [left right] (::interpolation window)
+                  result (if (:discrete? window)
+                           (if (< progress 1/2) origin target)
+                           (values/blend left right progress hdr? true))]
+              (assoc window :progress (double progress) :result result)))))
+
+(defn- reactive-window [base prior result clock fixtures]
+  (let [span (get-in base [:options :transition :beats])
+        beats (:beat clock)
+        end (when (and span (time/finite-number? beats)) (+' beats span))
+        origin (or (:result prior) result)
+        window (assoc base :origin origin :target result :result origin :origin-clock clock)]
+    (if (and prior end (time/finite-number? end) (> end beats))
+      (let [aligned (try
+                      (values/endpoints origin result fixtures :linear)
+                      (catch clojure.lang.ExceptionInfo error
+                        (when-not (= ::values/invalid-sampler (:type (ex-data error)))
+                          (throw error))))]
+        (assoc window :unit :beats :span span :start beats :end end
+               :target-clock (clock-at clock :beats end) :progress 0.0 :settled? false
+               ::interpolation aligned :discrete? (nil? aligned)))
+      (settle (assoc window :origin result :target-clock clock)))))
+
+(defn- evaluate-reactive [{:keys [options calculate prepare]} ctx]
+  (let [{:keys [frame instance]} ctx
+        input-context (if prepare (prepare (sample-input ctx)) ctx)]
+    (when (get-in instance [:definition :keyframes])
+      (throw (ex-info "Dependency-driven effects cannot also declare predictive keyframes" {})))
+    (if-let [inputs (reactive-inputs input-context (:inputs options))]
+      (let [clock (time/frame-clock frame)
+            now (:beat clock)
+            fixtures (:fixtures frame)
+            hdr? (:hdr? frame)
+            base {:mode :dependency-driven :epoch (:epoch frame) :rig fixtures
+                  :signature [(:show-id frame) (:effect-version instance) (:started-at-ms instance) (:started-at-beat instance)
+                              (:targets instance) hdr? options]
+                  :options options :inputs inputs :beat now}
+            prior (get-in frame [:keyframes (:id instance)])
+            prior (when (and (= :dependency-driven (:mode prior)) (= (:epoch prior) (:epoch frame))
+                             (identical? (:rig prior) fixtures) (= (:signature prior) (:signature base))
+                             (or (nil? now) (nil? (:beat prior)) (>= now (:beat prior))))
+                    prior)
+            window (if (and prior (.equals ^Object inputs (:inputs prior)))
+                     (assoc (if (time/finite-number? now) (reactive-sample prior now hdr?) prior) :beat now)
+                     (reactive-window base prior (call ctx false #(reactive-contributions calculate inputs hdr?)) clock fixtures))]
+        (assoc ctx :contributions (:result window) ::window window))
+      ctx)))
+
+(defn- evaluate-predictive [step ctx]
   (let [{:keys [frame instance]} ctx sampler (::sampler (meta step))
         options (get-in instance [:definition :keyframes])
         adaptive (get-in frame [:keyframe-intervals (:id instance)])
@@ -303,12 +403,23 @@
           result))
       (call ctx (boolean eligible?) #(step ctx)))))
 
+(defn evaluate
+  "Run either a real step or a lightweight interpolation; all cached results
+  travel through the committed frame, so failed or timed-out evaluations cannot
+  advance any other instance. External progress comes from the live private context.
+  Mark steps reading :transport-clock with ::transport-clock? metadata so a
+  seek, pause offset or shared meter change refreshes their sampled endpoints."
+  [step ctx]
+  (if-let [reactive (::reactive (meta step))]
+    (evaluate-reactive reactive ctx)
+    (evaluate-predictive step ctx)))
+
 (defn inspect
   "Inspect one head/attribute without sending the complete field to a display.
   Each endpoint is a vector of writes in the effect's native assignment order."
   [window target attribute]
   (when window
-    (cond-> (select-keys window [:unit :start :end :span :origin-clock :target-clock :progress :forecast-failed?])
+    (cond-> (select-keys window [:mode :settled? :unit :start :end :span :origin-clock :target-clock :progress :forecast-failed?])
       (and target attribute)
       (merge (update-vals (select-keys window [:origin :target :result])
                           #(values/read-values % target attribute))))))

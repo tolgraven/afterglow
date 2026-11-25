@@ -23,7 +23,7 @@
 (def window-keys [:unit :span :start :end :inputs :options :origin-clock :target-clock :progress])
 
 (defn freeze [window]
-  (when (and window (not (:forecast-failed? window)))
+  (when (and window (not (:forecast-failed? window)) (not= :dependency-driven (:mode window)))
     (let [encode #(values/map-columns pack %)]
       (assoc (with-meta (select-keys window window-keys) nil)
              :origin (encode (:origin window)) :target (encode (:target window))))))

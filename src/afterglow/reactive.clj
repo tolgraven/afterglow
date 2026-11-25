@@ -631,7 +631,16 @@
       (when (not= marker (get-in state [:cofx-snapshot id]))
         (write-state! system (-> state (assoc-in [:cofx-snapshot id] marker) (mark-dependents [:cofx id])))))))
 
-(defn- publish-current! [system]
+(defn- frame-inputs [bindings sources nodes]
+  (into {}
+        (keep (fn [[name [kind id]]]
+                (case kind
+                  :source (when (contains? sources id) [name (get sources id)])
+                  :subscription (let [node (get nodes [:subscription id])]
+                                  (when (:available? node) [name (:value node)])))))
+        bindings))
+
+(defn- publish-current! [system bindings]
   (let [before @(:state system)
        result (transact! system
                          (fn []
@@ -649,8 +658,10 @@
                                (when-let [[id _] (first (sort-by (comp :order val) (filter (comp :dirty? val) (:nodes (state-of system)))))]
                                  (evaluate-node! system id) (recur)))
                              (run-watchers! system)
-                             {:generation (:generation (state-of system)) :changed-sources (vec (sort-by str changed))
-                              :values (into {} (map (fn [[id node]] [id (:value node)]) (:nodes (state-of system))))})))]
+                             (let [{:keys [generation nodes]} (state-of system)]
+                               (cond-> {:generation generation :changed-sources (vec (sort-by str changed))
+                                        :values (into {} (map (fn [[id node]] [id (:value node)]) nodes))}
+                                 (some? bindings) (assoc :inputs (frame-inputs bindings captured nodes)))))))]
    ;; Watch callbacks observe an already committed batch, never a partial DAG.
    (let [committed (state-of system)]
      (doseq [[id node] (:nodes committed)
@@ -669,16 +680,33 @@
 (defn publish!
   "Freeze source values and commit a complete derived/action batch. With db,
   update the canonical db source first. Changes enqueued by handlers are for the
-  owner's next cycle; source writes during evaluation are seen next publish!."
+  owner's next cycle; source writes during evaluation are seen next publish!.
+  The optional bindings map names source IDs or leased subscription queries as
+  {:alias [:source :id]} or {:alias [:subscription [:query ...]]}. Return their
+  coherent values under :inputs, omitting unavailable signals and keeping nil
+  values. A caller owns query leases through acquire! and closes them when done."
   ([system]
    (binding [*publishing?* true]
-     (locking (:lock system) (publish-current! system))))
+     (locking (:lock system) (publish-current! system nil))))
   ([system db]
+   (publish! system db nil))
+  ([system db bindings]
+   (when-not (or (nil? bindings)
+                 (and (map? bindings)
+                      (every? (fn [[alias binding]]
+                                (and (keyword? alias) (vector? binding) (= 2 (count binding))
+                                     (let [[kind id] binding]
+                                       (case kind
+                                         :source (keyword? id)
+                                         :subscription (and (vector? id) (keyword? (first id)) (registry/portable? id))
+                                         false))))
+                              bindings)))
+     (fail! "Expected named source or subscription bindings" {:type ::invalid-input-bindings}))
    (binding [*publishing?* true]
      (locking (:lock system)
        (try (reset! (db-signal system) db)
             (catch Throwable e (recover! system :source :db nil e)))
-       (publish-current! system)))))
+       (publish-current! system bindings)))))
 
 (defn publish-traced!
   "Publish normally and return named reads and completed watcher deliveries from
