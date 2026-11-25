@@ -16,6 +16,14 @@ These commands enumerate or read standard descriptors without claiming a display
 
 The 16-byte header and single 327,680-byte payload travel as two separate transfers to OUT 0x01. The 160 rows have 960 BGR565 little-endian visible pixels and 64 black padding pixels, then repeating line mask E7 F3 E7 FF. A per-session timer repeats the cached packed frame about 30 times per second. Updating the display content and repeating its last USB frame are independent. A failed or short transfer releases the interface and stops its timer. The USB call timeout is 400 ms per transfer. These fields and the continuous refresh follow a [physical tethered-device descriptor and frame trial](https://github.com/federico-pepe/push-tethered-app/blob/5bb4be81a30989a89084617e3180365dacf0be83/docs/archive/feasibility.md#83-the-frame-test), its [transfer notes](https://github.com/federico-pepe/push-tethered-app/blob/5bb4be81a30989a89084617e3180365dacf0be83/docs/protocol/display.md), and the [manufacturer’s earlier screen format](https://github.com/Ableton/push-interface/blob/5eb352fe3da9d07891efb7447191c03a66d9fbdd/doc/AbletonPush2MIDIDisplayInterface.asc).
 
+## Frame completion
+
+For controls that depend on the visible page, the image sink accepts
+`:render-with-receipt!`. The receipt follows the complete header and payload
+writes for that frame. A frame replaced in the packed buffer or interrupted
+by an output failure earns no receipt. This is a USB transfer completion
+receipt. Panel scanout still belongs to the device.
+
 ## Physical qualification
 
 1. Record controller model, firmware, OS, libusb version, connection mode and the read-only descriptor receipt. Confirm the selected unit’s MIDI and audio ports are visible.

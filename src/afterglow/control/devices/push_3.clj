@@ -32,6 +32,10 @@
 
 (def ^:private shift-address {:channel 0 :controller 49})
 
+(def ^:private variation-actions
+  #{:variation/cycle :variation/ratio-mode :variation/previous-page
+    :variation/next-page :variation/record})
+
 (defn- factory-button [{:keys [layout button-bindings] :as options} name address]
   (let [{:keys [buttons encoders]} layout
         members (::mpe-members options)]
@@ -73,7 +77,8 @@
 
 (defn- reset-interactions [state]
   (assoc (dissoc (targets/clear-selection state) :encoder-gestures :encoder-releases :encoder-touch-modes
-                 :temporary-release-tails :temporary-release-time-ms)
+                 :temporary-release-tails :temporary-release-time-ms :pad-overlay :pad-overlay-pads
+                 :pad-overlay-generation :pad-overlay-frame :pad-overlay-projection :pad-overlay-presented)
          :pads {} :holds {} :buttons #{} :dedicated-modifier-down? false :touches #{}
          :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
 
@@ -312,6 +317,122 @@
                 (assoc result :state (:state (gesture-step options (:state result) {:type :context} model envelope)))))
     (input options state event model envelope)))
 
+(defn- live-pad? [state key]
+  (or (contains? (:pads state) key)
+      (contains? (get-in state [:cue-gesture :pads]) key)
+      (contains? (:picker-pads state) key)))
+
+(defn- browse-overlay [state selection generation]
+  (-> state
+      (assoc :pad-overlay selection :pad-overlay-generation generation)
+      (dissoc :pad-overlay-frame :pad-overlay-presented)))
+
+(defn- overlay-transition [{:keys [pad-overlay button-bindings]}
+                           state event model envelope]
+  (let [selection (:pad-overlay state)
+        change ((:input pad-overlay) selection event model
+                {:presented (:pad-overlay-presented state)
+                 :selected-instance (:selected-instance state)
+                 :record? (some #(= :variation/record (button-bindings %)) (:buttons state))})
+        next-selection (:state change selection)]
+    {:state (if (= selection next-selection) state
+                (browse-overlay state next-selection (:command-id envelope)))
+     :commands (mapv #(merge % (select-keys envelope [:show-id :epoch])) (:commands change))}))
+
+(defn- overlay-mono-input [underlying state event model envelope]
+  (let [channel (:channel event)
+        on-channel? #(= channel (first %))
+        pads (or (get-in state [:cue-gesture :pads]) (:pads state))
+        live (filter (comp on-channel? key) pads)]
+    (cond
+      (some on-channel? (:pad-overlay-pads state)) {:state state}
+      (nil? (:pad-overlay-generation state)) (underlying state event model envelope)
+      (not= 1 (count live)) {:state state}
+      (:cue-gesture state) (underlying state event model envelope)
+      :else (assoc (underlying (assoc state :selected-instance (:instance-id (val (first live))))
+                               event model envelope)
+                   :state state))))
+
+(defn- overlay-input [{:keys [button-bindings] :as options} underlying
+                      state {:keys [type control-id gesture-key pressed?] :as event}
+                      model envelope]
+  (let [active? (some? (:pad-overlay-generation state))
+        captured (:pad-overlay-pads state)
+        action (get button-bindings control-id)]
+    (cond
+      ;; A pad's owner is fixed at note-on, even after leaving the overlay.
+      (and (= :pad type) (contains? captured gesture-key))
+      {:state (cond-> state (not pressed?) (update :pad-overlay-pads disj gesture-key))}
+
+      (and (= :poly-pressure type) (contains? captured gesture-key))
+      {:state state}
+
+      (and (= :pad type) pressed? active? (not (live-pad? state gesture-key)))
+      (let [state (update state :pad-overlay-pads (fnil conj #{}) gesture-key)]
+        (if (and (:pad-overlay-presented state)
+                 (some #(= control-id (:position %)) (get-in state [:pad-overlay-frame :display :cells])))
+          (overlay-transition options state {:type :pad :position control-id} model envelope)
+          {:state state}))
+
+      ;; Channel pressure cannot distinguish a held overlay pad from a live pad.
+      (= :mono-pressure type)
+      (overlay-mono-input underlying state event model envelope)
+
+      (and (= :button type) (variation-actions action))
+      (let [edge? (and pressed? (not (contains? (:buttons state) control-id)))
+            state (set-held-button options state control-id pressed?)]
+        (if (and edge? (not (:target-picker state))
+                 (or (= :variation/cycle action) (:pad-overlay-presented state))
+                 ;; A second cycle during closing must wait for the live view.
+                 (or (not active?) (:pad-overlay state)))
+          (overlay-transition options state {:type :button :action action} model envelope)
+          {:state state}))
+
+      ;; The owner of the visible grid gets its complete interaction.
+      (and active? (= :button type)
+           (or (#{:target-picker :page-left :page-right :page-up :page-down} action)
+               (display/action? action)))
+      {:state (set-held-button options state control-id pressed?)}
+
+      :else (underlying state event model envelope))))
+
+(defn- display-presented [state view]
+  (let [{:keys [generation projection display] :as frame} (::overlay-frame (meta view))]
+    (if (and generation (= frame (:pad-overlay-frame state)))
+      (cond
+        (and projection (= display (:pad-overlay view)) (= :parameters (:display-mode view)))
+        (assoc state :pad-overlay-presented projection)
+        (and (nil? projection) (nil? (:pad-overlay view)))
+        (dissoc state :pad-overlay-generation :pad-overlay-frame)
+        :else (dissoc state :pad-overlay-presented))
+      state)))
+
+(defn- with-pad-overlay [{:keys [input reset-model stale-input] :as profile}
+                         {:keys [button-bindings] :as options}]
+  (let [overlay-button? #(variation-actions (button-bindings %))]
+    (-> profile
+        (update-in [:capabilities :controls] conj :pad-overlay)
+        (assoc :input (partial overlay-input options input)
+               :display-presented display-presented
+               :fence-captured-commands? true
+               :unique-command-prefix? true
+               :reset-model (fn [state]
+                              (cond-> (assoc (reset-model state)
+                                             :pad-overlay-pads (:pad-overlay-pads state)
+                                             :buttons (into #{} (filter overlay-button?) (:buttons state)))
+                                (:pad-overlay-generation state)
+                                (browse-overlay nil (:pad-overlay-generation state))))
+               :stale-input (fn [state {:keys [type control-id pressed? gesture-key] :as event} envelope]
+                              (cond
+                                (and (= :button type) (overlay-button? control-id))
+                                (set-held-button options state control-id pressed?)
+                                (and (= :pad type) (not pressed?))
+                                (update state :pad-overlay-pads disj gesture-key)
+                                (and (= :pad type) (:pad-overlay-generation state))
+                                (update state :pad-overlay-pads (fnil conj #{}) gesture-key)
+                                stale-input (stale-input state event envelope)
+                                :else state))))))
+
 (defn- surface-state [state]
   (if-let [controls (:controls state)]
     (cond-> controls (and (not (:cue-gesture controls)) (get-in state [:mpe :selected-instance]))
@@ -392,7 +513,8 @@
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
                        (#{:shift :blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)
-                       (and (::gesture options) (= action (get-in options [::gesture :gesture-modifier])))))
+                       (and (::gesture options) (= action (get-in options [::gesture :gesture-modifier])))
+                       (and (:pad-overlay options) (variation-actions action))))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
     (when (some? temporary-encoder-modifier)
       (let [members (::mpe-members options)]
@@ -543,7 +665,7 @@
                    (lift (assoc state :mpe initial-mpe)
                          ((:stop surface) (:controls state) model envelope disconnected?))))))
 
-(defn- display-feedback [options state model _]
+(defn- display-feedback [{:keys [pad-overlay layout] :as options} state model envelope]
   (let [controls (surface-state state)
         index (push-view/cue-index model)
         instance (or (get-in model [:instances (:selected-instance controls)])
@@ -554,15 +676,32 @@
                           {:instance-id (:id instance) :param k :component 0})))
                     (sort-by str (:touches controls)))
         selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
-        view (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
-                    :fine? (boolean (shift-held? options controls)))
-        selected (assoc selected :selected-instance (:id instance) :last-display view)
+        projection (when-let [selection (:pad-overlay selected)]
+                     (let [result ((:project pad-overlay) selection model (:pad-overlay-projection selected))]
+                       (when (and (map? (:view result)) (map? (:display result))) result)))
+        selected (if (and (:pad-overlay selected) (nil? projection))
+                   (browse-overlay selected nil (:command-id envelope))
+                   selected)
+        overlay-display (when-let [visible (:display projection)]
+                          (update visible :cells
+                                  #(filterv (comp (partial contains? (:pads layout)) :position) %)))
+        frame (when-let [generation (:pad-overlay-generation selected)]
+                {:generation generation :identity (select-keys model [:show-id :epoch])
+                 :projection (:view projection) :display overlay-display})
+        view (cond-> (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
+                             :fine? (boolean (shift-held? options controls)))
+               overlay-display (assoc :display-mode :parameters :pad-overlay overlay-display)
+               frame (vary-meta assoc ::overlay-frame frame))
+        frame-changed? (not= frame (:pad-overlay-frame controls))
+        selected (cond-> (assoc selected :selected-instance (:id instance) :last-display view)
+                   pad-overlay (assoc :pad-overlay-frame frame :pad-overlay-projection projection)
+                   frame-changed? (dissoc :pad-overlay-presented))
         next-state (if (:controls state)
                      (cond-> (assoc state :controls selected)
                        (not (:cue-gesture controls)) (assoc-in [:mpe :selected-instance] (:id instance)))
                      selected)]
     (cond-> {:state next-state}
-      (not= view (:last-display controls)) (assoc :display view))))
+      (or frame-changed? (not= view (:last-display controls))) (assoc :display view))))
 
 (defn- with-encoder-gestures [{:keys [ack advance reconcile stop] :as profile}
                               {:keys [layout encoder-bindings expression-mode temporary-encoder-modifier]
@@ -639,6 +778,13 @@
   Bind a touch note and turn CC to the same logical encoder ID for temporary edits.
   Optional :parameter-editor takes model, instance, parameter, input and edit
   options. Return {:value value} to edit that parameter or nil for the normal step.
+  A host :pad-overlay {:project f :input f} can use captured :button-bindings
+  for :variation/cycle, :variation/ratio-mode, :variation/previous-page,
+  :variation/next-page and held :variation/record. The projection returns
+  :view for admission and :display for feedback. Input gets the overlay state,
+  a button action or pad position, the live model and presented choice context.
+  The overlay requires Poly or Mono Aftertouch, captured pads, a cycle button
+  and a display which receipts presentation via control.display/presented!.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
   (doseq [key [:cue-gestures? :operator-gestures?] :when (contains? options key)]
@@ -656,14 +802,29 @@
                                        mpe? (assoc :default-launch-mode :held)
                                        (:pressure-param options) (update :param-mappings
                                                                         #(merge {(:pressure-param options) :pressure} %))))))
-        options (encoder-modifier-options (shift-options options))
+        {:keys [pad-overlay layout button-bindings display temporary-encoder-modifier] :as options}
+        (encoder-modifier-options (shift-options options))
+        _ (when pad-overlay
+            (let [buttons (when (map? button-bindings)
+                            (filter (comp variation-actions val) button-bindings))]
+              (valid! (and (not mpe?) (true? (:presentation-receipts? display)) (seq (:pads layout))
+                           (every? ifn? ((juxt :input :project) pad-overlay))
+                           (some #(= :variation/cycle (val %)) buttons)
+                           (not (some #(= (val %) (get-in options [::gesture :gesture-modifier])) buttons))
+                           (every? (fn [[id _]]
+                                     (and (not (#{:accent :shift} id)) (not= id temporary-encoder-modifier)
+                                          (not (#{accent-address shift-address} (get-in layout [:buttons id])))))
+                                   buttons))
+                      "Pad variations require captured pads and dedicated buttons in an aftertouch mode with a presentation receipt"
+                      {:expression-mode (:expression-mode options)})))
         profile (cond
                   (and mpe? (::gesture options)) (mpe-gesture-profile options)
                   mpe? (mpe-profile options)
                   :else (user-profile options))]
     (cond-> (launch/with-grid profile grid (:launch-receipt options))
       (:display options) (assoc :feedback (partial display-feedback options))
-      (:operator-gestures? options) (with-encoder-gestures options))))
+      (:operator-gestures? options) (with-encoder-gestures options)
+      pad-overlay (with-pad-overlay options))))
 
 (defn connect!
   "Explicitly open an injected MIDI transport. Manual session/suspend! and
@@ -676,7 +837,7 @@
                  (every? #(fn? (get display %)) [:open! :render! :close!]))
             "Choose a tagged Push 3 display transport" {}))
   (session/open! (session/create (cond-> (assoc options :profile (profile options))
-                                    (and (or (:cue-gestures? options) (:operator-gestures? options))
+                                    (and (or (:cue-gestures? options) (:operator-gestures? options) (:pad-overlay options))
                                          (not (contains? options :schedule!)))
                                     (assoc :schedule! (transports/scheduler (get options :refresh-ms 10)))
                                     (and (:transport options) (not (:midi options))) (assoc :midi (:transport options))))))

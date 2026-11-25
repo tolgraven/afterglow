@@ -1,7 +1,8 @@
 (ns afterglow.control.devices.session
   "Explicit device I/O shell. Each session serializes its own resource lifecycle;
   show dispatch remains the host coordinator's responsibility. No work starts at
-  namespace load. Profiles are pure transitions; transports are injected maps.")
+  namespace load. Profiles are pure transitions; transports are injected maps."
+  (:require [afterglow.control.display :as presentation]))
 
 (declare receive! refresh! refresh-session! close! suspend! resume!)
 
@@ -17,7 +18,10 @@
   when reconciliation changes the show identity. It returns local state only.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
-  view]. Optional :schedule! takes a refresh callback and returns cancellation.
+  view]. Profiles with :display-presented [local view] observe the most recent
+  completed display receipt. The transport calls control.display/presented!
+  with the final view only after presentation. Optional :schedule! takes a
+  refresh callback and returns cancellation.
   A :feedback-source may supply :open! [], :project! [handle local model] and
   :close! [handle]. Only feedback sees its projection; input always receives
   the committed model. Its handle belongs to the active session. A profile's
@@ -168,12 +172,39 @@
            (catch Exception error
              (throw (ex-info "Device MIDI/input transport failed" {:device/transport-failed :midi} error)))))))
 
+(defn- open-display! [session]
+  (when-let [open! (get-in session [:options :display :open!])]
+    (let [handle (open!)
+          mailbox (when (get-in session [:options :profile :display-presented]) (atom nil))]
+      (swap! (:resources session) #(cond-> (assoc % :display handle)
+                                    mailbox (assoc :display-receipt mailbox))))))
+
+(defn- observe-display! [session]
+  (when-let [observe (get-in session [:options :profile :display-presented])]
+    (when-let [{:keys [sequence receipt view]} (some-> @(:resources session) :display-receipt deref)]
+      (let [position [sequence receipt]]
+        (when (not= position (:display-receipt-position @(:state session)))
+          (update-state! session assoc :display-receipt-position position
+                         :local (observe (:local @(:state session)) view)))))))
+
 (defn- render-display! [session view]
   (when (some? view)
-    (when-let [handle (:display @(:resources session))]
-      (try ((get-in session [:options :display :render!]) handle view)
-           (catch Exception error
-             (throw (ex-info "Device display transport failed" {:device/transport-failed :display} error)))))))
+    (let [{handle :display mailbox :display-receipt} @(:resources session)]
+      (when handle
+        (try
+          (let [sequence (:counter @(:state session))
+                view (if mailbox
+                       (vary-meta view assoc ::presentation/receipt
+                                  (fn [presented]
+                                    (swap! mailbox
+                                           #(if (>= sequence (:sequence % -1))
+                                              {:sequence sequence :view presented
+                                               :receipt (inc (:receipt % 0))}
+                                              %))))
+                       view)]
+            ((get-in session [:options :display :render!]) handle view))
+          (catch Exception error
+            (throw (ex-info "Device display transport failed" {:device/transport-failed :display} error))))))))
 
 (defn- enact! [session result]
   (when result
@@ -213,7 +244,7 @@
 
 (defn- close-resource! [session kind]
   (when-let [handle (get @(:resources session) kind)]
-    (reset! (:resources session) (dissoc @(:resources session) kind))
+    (swap! (:resources session) #(cond-> (dissoc % kind) (= kind :display) (dissoc :display-receipt)))
     (when (= kind :schedule) (update-state! session update :schedule-generation (fnil inc 0)))
     (try (if (= kind :schedule) (handle) ((get-in session [:options kind :close!]) handle))
          (catch Throwable error (record-error! session error)))))
@@ -234,7 +265,7 @@
   [session]
   (locking (:lock session)
     (when (#{:closed :failed} (:status @(:state session)))
-      (let [{:keys [profile midi display model!]} (:options session)
+      (let [{:keys [profile midi model!]} (:options session)
             generation (inc (:generation @(:state session)))]
         (update-state! session assoc :status :opening :generation generation
                        :local (:initial-state profile {}) :epoch (:epoch (model!)) :show-id (:show-id (model!))
@@ -243,9 +274,7 @@
           (when midi
             (let [handle ((:open! midi) #(receive! session generation %))]
               (reset! (:resources session) (assoc @(:resources session) :midi handle))))
-          (when display
-            (let [handle ((:open! display))]
-              (reset! (:resources session) (assoc @(:resources session) :display handle))))
+          (open-display! session)
           (update-state! session assoc :status :active)
           (when-let [start (:start profile)]
             (enact! session (start (:local @(:state session)) (model!) (envelope! session))))
@@ -279,6 +308,7 @@
                  (let [_ (retry-gesture-ends! session)
                        model (model!)]
                    (adopt-epoch! session model)
+                   (observe-display! session)
                    (let [reconciled (reconcile! session model event)]
                      (if (= (show-identity model) (show-identity reconciled))
                        (enact! session ((:input profile) (:local @(:state session)) event
@@ -317,6 +347,7 @@
         (let [{:keys [profile model!]} (:options session)
               model (model!)]
           (adopt-epoch! session model)
+          (observe-display! session)
           (let [model (reconcile! session model nil)
                 result (when-let [advance (when advance? (:advance profile))]
                          (advance (:local @(:state session)) model (envelope! session model)))
@@ -363,11 +394,9 @@
 (defn resume! [session]
   (locking (:lock session)
     (when (= :suspended (:status @(:state session)))
-      (let [{:keys [profile display model!]} (:options session)]
+      (let [{:keys [profile model!]} (:options session)]
         (try
-          (when display
-            (reset! (:resources session)
-                    (assoc @(:resources session) :display ((:open! display)))))
+          (open-display! session)
           (update-state! session assoc :status :active :local (:initial-state profile {}) :failure nil)
           (when-let [start (:start profile)]
             (enact! session (start (:local @(:state session)) (model!) (envelope! session))))

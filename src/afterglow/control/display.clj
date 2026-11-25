@@ -15,6 +15,13 @@
 
 (def parameter-only-capabilities {:modes #{:parameters} :actions #{}})
 
+(defn presented!
+  "Acknowledge the final semantic view after its presentation completes. A
+  transport may call this from its worker. Submission alone earns no receipt."
+  [view]
+  (when-let [receipt (::receipt (meta view))]
+    (receipt (vary-meta view dissoc ::receipt))))
+
 (defn option [state model k default]
   (get state k (get-in model [:settings :controllers :push-display k] default)))
 
