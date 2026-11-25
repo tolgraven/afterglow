@@ -168,7 +168,7 @@
 (defn- priority-tiers [ordered]
   (reduce (fn [tiers instance]
             (update tiers (instance-order/effective-priority instance) (fnil conj []) instance))
-          (sorted-map) ordered))
+          (sorted-map-by instance-order/compare-priority) ordered))
 
 (defn- commit-order [model before after]
   (let [old-tiers (priority-tiers before)
@@ -184,9 +184,12 @@
      :result {:instance-ids ids}}))
 
 (defn- with-render-priority [instance priority]
-  (if (zero? (compare (:priority instance) priority))
+  (if (zero? (instance-order/compare-priority (:priority instance) priority))
     (dissoc instance :render-priority)
     (assoc instance :render-priority priority)))
+
+(defn- compare-instance-priority ^long [instance priority]
+  (instance-order/compare-priority (instance-order/effective-priority instance) priority))
 
 (defn- set-active-priority [model {:keys [instance-id priority]}]
   (let [source (running-instance! model instance-id)
@@ -194,10 +197,10 @@
         before (instance-order/ordered model)
         unit? (partial same-unit? source)
         members (filterv unit? before)
-        in-tier? #(zero? (compare priority (instance-order/effective-priority %)))
+        in-tier? #(zero? (compare-instance-priority % priority))
         after (if (every? in-tier? members)
                 before
-                (let [[earlier later] (split-with #(not (pos? (compare (instance-order/effective-priority %) priority)))
+                (let [[earlier later] (split-with #(not (pos? (compare-instance-priority % priority)))
                                                   (remove unit? before))
                       moved (mapv #(with-render-priority % priority) members)]
                   (into (into (vec earlier) moved) later)))
@@ -215,7 +218,7 @@
     (require! (not (same-unit? source target)) :same-render-unit
               "Choose a different instance or compound layer")
     (when (or (layer-id source) (layer-id target))
-      (require! (every? #(zero? (compare target-priority (instance-order/effective-priority %)))
+      (require! (every? #(zero? (compare-instance-priority % target-priority))
                         (concat moved destination))
                 :priority-mismatch "Compound reordering requires one effective priority tier"))
     (let [kept (remove (partial same-unit? source) before)
@@ -227,7 +230,7 @@
       (require! (= (count destination) (count target-run)) :interleaved-native-layer
                 "The target compound layer has interleaved members")
       (let [after (if (and (not= before after)
-                           (not (zero? (compare (instance-order/effective-priority source) target-priority))))
+                           (not (zero? (compare-instance-priority source target-priority))))
                     (assoc after (+ (count prefix) (count target-run)) (with-render-priority source target-priority))
                     after)]
         (update (commit-order model before after)
