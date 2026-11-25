@@ -76,20 +76,23 @@
 
 (defn- dispatch-command! [session template]
   (let [{:keys [dispatch! profile]} (:options session)
-        ;; Admission time and show identity are assigned here, including delayed releases.
+        ;; Use current admission time for deferred releases while checking captured show identity.
         envelope (envelope! session)
+        op (:op template)
         scheduled-launch? (grid-launch? template)
-        timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
+        timed-cue? (or scheduled-launch? (= :cue/cancel-launch op))
         gesture? (and (:operator-gestures? profile)
-                      (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
-        detached (when (and gesture? (= :gesture/begin (:op template)))
+                      (#{:gesture/begin :gesture/sample :gesture/end} op))
+        detached (when (and gesture? (= :gesture/begin op))
                    (get-in @(:gesture-ends session) [(:control-id template) :command]))
-        stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
-                   (and (or timed-cue? (:fence-captured-commands? profile))
-                        (some #(and (contains? template %)
-                                               (not= (get template %) (get envelope %)))
-                              [:show-id :epoch])))
-        command (cond-> (merge template envelope)
+        exact-identity? (or gesture? (= :instance/move-after op))
+        captured-identity (when (or exact-identity? timed-cue? (= :instance/end op)
+                                    (:fence-captured-commands? profile))
+                            (select-keys template [:show-id :epoch]))
+        stale? (if exact-identity?
+                 (not= (show-identity template) (show-identity envelope))
+                 (some (fn [[field value]] (not= value (get envelope field))) captured-identity))
+        command (cond-> (merge template envelope captured-identity)
                   (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
         response (cond
                    stale? {:status :rejected :reason :stale-epoch}

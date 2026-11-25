@@ -8,6 +8,7 @@
             [afterglow.control.pages :as pages]
             [afterglow.control.views :as views]
             [afterglow.control.display :as display]
+            [afterglow.control.devices.active-cue-grid :as active-grid]
             [afterglow.control.devices.push-launch :as launch]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
@@ -22,7 +23,7 @@
                         :cue-parameter-presets
                         :touch-strip-feedback :master-touch :manual-tempo-encoder
                         :master-encoder :led-diff :palette-restore :display-view
-                        :user-mode-handoff :reconnect}
+                        :active-cue-grid :user-mode-handoff :reconnect}
          :hardware-verified? false))
 
 (defn- decode [device-id raw]
@@ -424,7 +425,9 @@
 (defn display-view
   "Device-independent labels/values. A display transport draws this map."
   [state model]
-  (indexed-display state model (push-view/cue-index model)))
+  (let [grid (active-grid/project (:active-grid state) model)]
+    (cond-> (indexed-display state model (push-view/cue-index model))
+      grid (assoc :active-cue-grid (:view grid)))))
 
 (defn- strip-feedback [state model]
   (if-let [target (system-touch state)]
@@ -451,6 +454,61 @@
                  (take limit))
         (range 64)))
 
+(def ^:private active-grid-buttons {48 :select 88 :reorder})
+
+(defn- reset-active-grid [state]
+  (if-let [{:keys [mode pressed clearing?]} (:active-grid state)]
+    (assoc state :active-grid (cond-> (assoc active-grid/initial-state :pressed pressed)
+                               (or mode clearing?) (assoc :clearing? true)))
+    state))
+
+(defn- mode-lights [[mode source?]]
+  (mapv (fn [[cc button-mode]]
+          [0xb0 cc (cond (not= mode button-mode) 0
+                         (and (= :reorder mode) (not source?)) 64
+                         :else 127)])
+        active-grid-buttons))
+
+(defn- set-active-grid-mode [state mode]
+  (let [current (get-in state [:active-grid :mode])]
+    (cond-> (update state :active-grid active-grid/set-mode mode)
+      (and current (nil? mode)) (assoc-in [:active-grid :clearing?] true)
+      mode (dissoc :target-picker))))
+
+(defn- active-grid-input [state event model]
+  (when-let [{:keys [mode pressed buttons clearing?] :as grid} (:active-grid state)]
+    (when (:ready? state)
+      (let [{:keys [type note controller raw-value]} event
+            control? (= :control-change type)
+            coordinates (when (= :note-on type) (codec/pad-coordinates note))]
+        (cond
+          (and control? (active-grid-buttons controller))
+          (let [down? (pos? raw-value)
+                mode-button (active-grid-buttons controller)
+                state (update-in state [:active-grid :buttons] (fnil (if down? conj disj) #{}) controller)]
+            {:state (if (and down? (not (contains? buttons controller)))
+                      (set-active-grid-mode state (when (not= mode mode-button) mode-button))
+                      state)})
+
+          (and mode control? (#{62 63} controller))
+          {:state (if (pos? raw-value)
+                    (update state :active-grid active-grid/step-page model (if (= controller 62) -1 1))
+                    state)}
+
+          (and (= :note-off type) (contains? pressed note))
+          {:state (assoc state :active-grid (:state (active-grid/release grid note)))}
+
+          (and coordinates (not (contains? (:pressed-pads state) note)))
+          (if clearing?
+            {:state (update-in state [:active-grid :pressed] conj note)}
+            (let [{:keys [handled? selection commands] next-grid :state}
+                  (active-grid/press grid model note coordinates)]
+              (when handled?
+                {:state (cond-> (assoc state :active-grid next-grid)
+                          selection (-> (select-instance (get-in model [:instances (:instance-id selection)]))
+                                        (dissoc :grid-selection)))
+                 :commands commands}))))))))
+
 (defn- feedback [device-id timeout-ms batch-size state model envelope]
   (let [state (selected-state state model)
         alive (set (keys (:instances model)))
@@ -469,36 +527,54 @@
                 timed-out? (-> state (assoc :awaiting-led-ack? false :last-leds {}) (update :led-retries (fnil inc 0)))
                 :else state)
         index (push-view/cue-index model)
-        display (indexed-display state model index)
+        grid (active-grid/project (:active-grid state) model)
+        display (cond-> (indexed-display state model index)
+                  grid (assoc :active-cue-grid (:view grid)))
         display-changed? (not= display (:last-display state))
         state (assoc state :last-display display)
         strip (strip-feedback state model)
         strip-messages (when (and (:ready? state) (nil? (:fault state)))
                          (codec/touch-strip-messages device-id (:last-touch-strip state) strip))
         state (if (some? strip-messages) (assoc state :last-touch-strip strip) state)
-        desired (into {} (for [y (range 8) x (range 8)]
-                           (let [cue (cue-at state model (codec/pad-note x y))]
-                             [[x y] (if-let [{:keys [offset rows]} (:target-picker state)]
-                                      (if (zero? y)
-                                        (case (:kind (get rows (+ offset x)))
-                                          :group [80 180 130] :volume [230 150 65] :fixture [55 130 195] :default [100 100 100] [0 0 0])
-                                        [0 0 0])
-                                      (case (:type schema)
-                                      :color (mapv #(int (Math/round (* 255.0 %))) (parameter-edit/color-grid-value schema x y))
-                                      :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
-                                                  selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
-                                              (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
-                                      (if cue (rgb (views/pad-view model (:id cue) (:by-cue index))) [0 0 0])))])))
+        desired (if grid
+                  (into {} (for [y (range 8) x (range 8)]
+                             [[x y] (if-let [cell (get-in grid [:view :cells (+ x (* 8 y))])]
+                                      (rgb (assoc cell :active? true))
+                                      [0 0 0])]))
+                  (into {} (for [y (range 8) x (range 8)]
+                             (let [cue (cue-at state model (codec/pad-note x y))]
+                               [[x y] (if-let [{:keys [offset rows]} (:target-picker state)]
+                                        (if (zero? y)
+                                          (case (:kind (get rows (+ offset x)))
+                                            :group [80 180 130] :volume [230 150 65] :fixture [55 130 195] :default [100 100 100] [0 0 0])
+                                          [0 0 0])
+                                        (case (:type schema)
+                                          :color (mapv #(int (Math/round (* 255.0 %))) (parameter-edit/color-grid-value schema x y))
+                                          :enum (let [value (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
+                                                      selected (get-in model [:instances (:instance-id touch) :params (:param touch)])]
+                                                  (cond (= ::missing value) [0 0 0] (= selected value) [255 255 255] :else [30 70 120]))
+                                          (if cue (rgb (views/pad-view model (:id cue) (:by-cue index))) [0 0 0])))]))))
+        settled? (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state))
+                      (= desired (:last-leds state)))
+        state (cond-> state
+                (and grid settled?) (update :active-grid #(-> (active-grid/capture % grid) (dissoc :clearing?)))
+                (and (nil? grid) settled? (get-in state [:active-grid :clearing?]))
+                (update :active-grid dissoc :clearing?))
         changes (when (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state)))
                   (next-led-batch desired state batch-size))
         [last-x last-y] (first (peek changes))
-        messages (into (vec strip-messages) (mapcat (fn [[[x y] color]]
+        indicator [(get-in grid [:view :mode]) (boolean (get-in grid [:view :source-instance-id]))]
+        lights (when (and (:ready? state) (nil? (:fault state)) (:active-grid state)
+                          (not= indicator (:last-grid-indicator state)))
+                 (mode-lights indicator))
+        messages (into (into (vec strip-messages) lights) (mapcat (fn [[[x y] color]]
                                (codec/pad-led-messages device-id x y color
                                  (last (get-in state [:palettes (codec/pad-note x y)])))) changes))
         keepalive? (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state))
                         (empty? changes) (>= (- time (:last-led-at-ms state time)) (/ timeout-ms 2)))
         query? (or (seq changes) keepalive?)]
     (cond-> {:state (cond-> state
+                     lights (assoc :last-grid-indicator indicator)
                      (seq changes) (assoc :last-leds (into (:last-leds state) changes)
                                           :led-cursor (mod (inc (+ (* 8 last-x) last-y)) 64))
                      query? (assoc :awaiting-led-ack? true :last-led-at-ms time))
@@ -507,10 +583,11 @@
       (:fault state) (assoc :lifecycle :disconnect))))
 
 (defn- stop [device-id state _model envelope disconnected?]
-  {:state (assoc (dissoc (targets/clear-selection state) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
+  {:state (cond-> (assoc (dissoc (targets/clear-selection state) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
                  :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                  :last-touch-strip nil :display-buttons #{}
                  :touches {} :touch-order [] :shift? false :shift-patch nil :record? false :pressed-pads #{} :pad-instances {})
+            (:active-grid state) (assoc :active-grid active-grid/initial-state :last-grid-indicator nil))
    :gesture-ends (into []
                        (keep (fn [{:keys [pending-end] :as gesture}]
                                (if-let [[command completion] pending-end]
@@ -520,7 +597,8 @@
                        (vals (:encoder-gestures state)))
    :commands (bindings/release-holds (:holds state) envelope)
    :midi (if (or disconnected? (not (:ready? state))) []
-             (into (into [(codec/touch-strip-mode device-id :default)]
+             (into (into (cond-> [(codec/touch-strip-mode device-id :default)]
+                           (:active-grid state) (into (mode-lights nil)))
                          (for [note (range 36 100)] [0x80 note 0]))
                    (map (fn [[index rgbw]] (codec/palette-write device-id index rgbw)))
                    (sort-by key (:palettes state))))})
@@ -644,8 +722,9 @@
   :operator-gestures? true with a trusted host dispatcher to group touched scalar
   encoders. The host must close pending gestures in ingress order using the
   accepted sample sequence. Detents without touch use ordinary control after a
-  short release tail."
-  [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt operator-gestures?]
+  short release tail. :active-cue-grid? enables Select and Duplicate to open
+  separate active instance modes, with Page Left/Right for pagination."
+  [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt operator-gestures? active-cue-grid?]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
@@ -660,7 +739,8 @@
                          :ready? false :pads {} :holds {} :last-leds {} :led-retries 0 :display-buttons #{}
                          :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                          :pressed-pads #{} :pad-instances {}}
-                  display-capabilities (assoc :display-capabilities display-capabilities))]
+                  display-capabilities (assoc :display-capabilities display-capabilities)
+                  (true? active-cue-grid?) (assoc :active-grid active-grid/initial-state))]
     (cond->
      (launch/with-grid
      {:id :push-2 :capabilities capabilities :initial-state initial
@@ -672,20 +752,25 @@
               (let [cc (when (and (:ready? state) (= :control-change (:type event)) (pos? (:raw-value event))) (:controller event))
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
                 (cond
-                  (and target-search (= 111 cc)) {:state (targets/toggle state target-search model)}
+                  (and target-search (= 111 cc))
+                  {:state (targets/toggle (cond-> state (:active-grid state) (set-active-grid-mode nil))
+                                          target-search model)}
                   (and (:target-picker state) (#{62 63} cc)) {:state (targets/page state (if (= cc 62) -1 1))}
                   (and (:target-picker state) cc (<= 20 cc 27)) {:state (targets/choose state (- cc 20))}
                   (contains? (:picker-pads state) (:note event))
                   {:state (if (= :note-off (:type event)) (targets/release-pad state (:note event)) state)}
-                  (and (:target-picker state) x) {:state (targets/pad state (:note event) [x y])}
-                  :else (targets/launch state (input device-id grid (true? operator-gestures?) state event model envelope)))))
+                  :else (or (active-grid-input state event model)
+                            (if (and (:target-picker state) x)
+                              {:state (targets/pad state (:note event) [x y])}
+                              (targets/launch state (input device-id grid (true? operator-gestures?) state event model envelope)))))))
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc (dissoc (targets/clear-selection %) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
+     :reset-model #(reset-active-grid
+                     (assoc (dissoc (targets/clear-selection %) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
                            :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
-                           :pressed-pads #{} :pad-instances {})
+                           :pressed-pads #{} :pad-instances {}))
      :ack (fn [state command ack]
             (if (#{:gesture/begin :gesture/sample :gesture/end} (:op command))
               (acknowledge-encoder state command ack)

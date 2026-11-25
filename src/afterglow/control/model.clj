@@ -3,12 +3,14 @@
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
             [afterglow.control.edit-history :as edit-history]
+            [afterglow.control.instance-order :as instance-order]
             [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.targets :as targets]
             [afterglow.time :as musical-time]
             [afterglow.control.categories :as categories]
-            [afterglow.control.system :as system]))
+            [afterglow.control.system :as system])
+  (:import (java.util SplittableRandom)))
 
 (defn- reject! [code message & [details]]
   (throw (ex-info message {:control/error code :details details})))
@@ -149,6 +151,87 @@
   (or (get-in model [:instances id])
       (reject! :unknown-instance "No active instance has that ID" {:instance-id id})))
 
+(defn- running-instance! [model id]
+  (let [instance (instance! model id)]
+    (require! (= :running (:phase instance)) :instance-not-running
+              "Instance is no longer running" {:instance-id id})
+    instance))
+
+(defn- layer-id [instance]
+  (get-in instance [:source :native-layer :id]))
+
+(defn- same-unit? [instance other]
+  (or (= (:id instance) (:id other))
+      (when-let [layer (layer-id instance)] (= layer (layer-id other)))))
+
+(defn- priority-tiers [ordered]
+  (reduce (fn [tiers instance]
+            (update tiers (instance-order/effective-priority instance) (fnil conj []) instance))
+          (sorted-map) ordered))
+
+(defn- commit-order [model before after]
+  (let [old-tiers (priority-tiers before)
+        changed-tiers (into [] (keep (fn [[priority tier]]
+                                     (when (not= (mapv :id (get old-tiers priority)) (mapv :id tier))
+                                       tier))) (priority-tiers after))
+        ids (mapv :id after)]
+    {:model (reduce (fn [model tier]
+                      (reduce-kv (fn [model rank instance]
+                                   (assoc-in model [:instances (:id instance)] (assoc instance :render-order rank)))
+                                 model tier)) model changed-tiers)
+     :events (if (seq changed-tiers) [{:type :instances/reordered :instance-ids ids}] [])
+     :result {:instance-ids ids}}))
+
+(defn- move-after [model {:keys [instance-id after-instance-id]}]
+  (let [source (running-instance! model instance-id)
+        target (running-instance! model after-instance-id)
+        target-priority (instance-order/effective-priority target)
+        before (instance-order/ordered model)
+        moved (filterv (partial same-unit? source) before)
+        destination (filterv (partial same-unit? target) before)]
+    (require! (not (same-unit? source target)) :same-render-unit
+              "Choose a different instance or compound layer")
+    (when (or (layer-id source) (layer-id target))
+      (require! (every? #(zero? (compare target-priority (instance-order/effective-priority %)))
+                        (concat moved destination))
+                :priority-mismatch "Compound reordering requires one effective priority tier"))
+    (let [kept (remove (partial same-unit? source) before)
+          [prefix from-target] (split-with (complement (partial same-unit? target)) kept)
+          [target-run suffix] (split-with (partial same-unit? target) from-target)
+          after (vec (concat prefix target-run moved suffix))]
+      ;; A native layer renders where its last contributing member appears.
+      ;; A split destination can have another effect after that position.
+      (require! (= (count destination) (count target-run)) :interleaved-native-layer
+                "The target compound layer has interleaved members")
+      (let [after (if (and (not= before after)
+                           (not (zero? (compare (instance-order/effective-priority source) target-priority))))
+                    (assoc after (+ (count prefix) (count target-run))
+                           (if (zero? (compare (:priority source) target-priority))
+                             (dissoc source :render-priority)
+                             (assoc source :render-priority target-priority)))
+                    after)]
+        (update (commit-order model before after)
+                :result assoc :instance-id instance-id :after-instance-id after-instance-id)))))
+
+(defn- shuffle-tier [^SplittableRandom random tier]
+  (let [slots (into [] (keep-indexed (fn [index instance]
+                                      (when (and (= :running (:phase instance)) (nil? (layer-id instance)))
+                                        index))) tier)]
+    (loop [result tier, remaining (count slots)]
+      (if (< remaining 2)
+        result
+        (let [a (nth slots (dec remaining))
+              b (nth slots (.nextInt random remaining))]
+          (recur (assoc result a (nth result b) b (nth result a)) (dec remaining)))))))
+
+(defn- shuffle-instances [model {:keys [seed]}]
+  (require! (and (integer? seed) (<= Long/MIN_VALUE seed Long/MAX_VALUE))
+            :invalid-seed "Seed must be a signed 64-bit integer")
+  (let [random (SplittableRandom. (long seed))
+        before (instance-order/ordered model)
+        after (into [] (mapcat (partial shuffle-tier random)) (vals (priority-tiers before)))]
+    (commit-order model before after)))
+
 (defn- time! [model command]
   (let [time (:time-ms command)]
     (require! (and (nonnegative? time) (>= time (:time-ms model)))
@@ -270,6 +353,8 @@
       (require! effect :unknown-effect "Effect is not published")
       (cond-> (launch-instance model command cue effect)
         cue (update :model pages/record-launch (:cue-id command))))
+    :instance/move-after (move-after model command)
+    :instances/shuffle (shuffle-instances model command)
     :instance/end
     (let [id (:instance-id command)
           instance (instance! model id)
@@ -571,6 +656,13 @@
   payload is rejected. Retry history is bounded, so callers must expire sessions
   rather than replay commands after receipts have been evicted. Restart changes
   epoch and drops active instances and their edit history.
+
+  :instance/move-after takes :instance-id and :after-instance-id. Standalone
+  moves can change effective priority. Compound members move together within
+  one tier. :instances/shuffle takes a signed 64-bit :seed and shuffles running
+  standalone slots within each effective tier.
+  Both return committed :instance-ids in render input order. Capture
+  :expected-revision when the operation depends on a previously displayed order.
 
   Gesture and history operations require an :operator-id from a trusted caller
   in the separate authority argument. This is a public actor identifier for
