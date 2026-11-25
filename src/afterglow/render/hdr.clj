@@ -6,7 +6,9 @@
             [thi.ng.color.core :as color]))
 
 (def emitters (set (keys photometry/emitter-spectrum)))
+
 (def light-attributes (conj emitters :color :dimmer))
+
 (defn- nonnegative? [n] (and (number? n) (Double/isFinite (double n)) (not (neg? n))))
 
 (defn validate!
@@ -32,7 +34,9 @@
 ;; A lane has both a storage offset and a visible RGB basis. Only the selected
 ;; native primary/white lanes receive spill. Invisible UV never radiates a halo.
 (defrecord Lane [attribute slot tint receive])
+
 (defrecord Head [id index position rgb? extract? lamp? physical virtual shutters])
+
 (defn- lanes [attrs slots rgb?]
   (mapv (fn [attribute]
           (let [rgb (second (photometry/emitter-spectrum attribute))

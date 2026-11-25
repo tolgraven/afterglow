@@ -13,6 +13,7 @@
            [afterglow.rhythm MetronomeSnapshot]))
 
 (defonce test-show (atom nil))
+
 (defonce test-snapshot (atom nil))
 
 (defn effects-fixture

@@ -1,5 +1,5 @@
 (ns afterglow.control.devices.push-2-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [afterglow.control.display :as display]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.session-test :as fixture]
@@ -12,7 +12,9 @@
             [afterglow.render.frame-test :refer [assignment bytes-at]]))
 
 (def sine {:signal-id :sine :version 1})
+
 (def saw {:signal-id :saw :version 2})
+
 (def schemas
   {:enabled {:type :boolean :default false}
    :level {:type :number :default 0.5 :bounds [0 1]}
@@ -24,7 +26,9 @@
    :last {:type :number :default 0 :bounds [0 1]}
    :ninth {:type :number :default 0 :bounds [0 1]}
    :tenth {:type :number :default 0 :bounds [0 1]}})
+
 (def order [:enabled :level :count :wave :color :position :span :last :ninth :tenth])
+
 (defn harness
   ([] (harness schemas))
   ([parameter-schemas]
@@ -32,16 +36,771 @@
     (swap! (:show h) assoc-in [:registry :effects :wash :params] parameter-schemas)
     (swap! (:show h) assoc-in [:registry :effects :wash :param-order] order)
     (fixture/ready! h))))
+
 (defn local [h] (:local (session/snapshot (:session h))))
+
 (defn view [h] (push/display-view (local h) @(:show h)))
+
 (defn receive! [h bytes] ((last @(:callbacks h)) bytes))
+
 (defn launch! [h note]
   (receive! h [0x90 note 127])
   (:selected-instance (local h)))
+
 (defn values [h id] (get-in @(:show h) [:instances id :params]))
+
 (defn finish! [h]
   (is (= [] (:errors (session/snapshot (:session h)))))
   (session/close! (:session h)))
+
+(defn- gesture-harness [authority before-command!]
+  (let [{:keys [show log options] :as h} (fixture/harness)
+        device (session/create
+                 (assoc options :profile (push/profile {:operator-gestures? true})
+                                :dispatch! (fn [command]
+                                             (when before-command! (before-command! show command))
+                                             (swap! log conj [:command command])
+                                             (let [result (model/apply-command @show command authority)]
+                                               (reset! show (:model result))
+                                               result))))]
+    (fixture/ready! (assoc h :session device))))
+
+(def ^:private push-operator {:operator-id "push-2-test"})
+
+(defn- admitted-commands [h]
+  (mapv second (filter #(= :command (first %)) @(:log h))))
+
+(defn- pending-sample-harness []
+  (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                     push-operator)
+        apply! (:dispatch! options)
+        after-model-read (atom nil)
+        complete-sample (atom nil)
+        device (session/create
+                 (assoc options
+                        :model! (fn []
+                                  (let [snapshot @show]
+                                    (when-let [after-read (first (reset-vals! after-model-read nil))]
+                                      (after-read))
+                                    snapshot))
+                        :dispatch! (fn [{:keys [op sequence] :as command}]
+                                     (if (and (= :gesture/sample op) (= 1 sequence))
+                                       (let [completion (promise)]
+                                         (reset! complete-sample #(deliver completion (:ack (apply! command))))
+                                         {:status :pending :completion completion})
+                                       (apply! command)))))]
+    (fixture/ready! (assoc h :session device :after-model-read after-model-read
+                            :complete-sample complete-sample :apply! apply!))))
+
+(deftest pending-encoder-sample-reloads-the-edit-basis-before-the-next-detent
+  (let [{:keys [after-model-read complete-sample] :as h} (pending-sample-harness)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (is (= 0.5 (:level (values h id))))
+        ;; Commit after receive! has selected its first snapshot and before reconciliation.
+        (reset! after-model-read @complete-sample)
+        (receive! h [0xb0 71 1])
+        (is (= [[1 0.51] [2 0.52]] (mapv (juxt :sequence :value)
+                                          (filter #(= :gesture/sample (:op %)) (admitted-commands h)))))
+        (receive! h [0x80 0 0])
+        (is (= 0.52 (:level (values h id))))
+        (is (= 0.52 (get-in @(:show h) [:control :edit-history :nodes 1 :after]))))
+      (finally (finish! h)))))
+
+(deftest pending-encoder-reconciliation-discards-input-crossing-an-epoch
+  (let [{:keys [session show callbacks after-model-read complete-sample apply!] :as h} (pending-sample-harness)]
+    (try
+      (let [old-receive (last @callbacks)
+            owner-command! (fn [command]
+                             (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                            {:source {:adapter :test}} command)))]
+        (launch! h 37)
+        (old-receive [0x90 0 127])
+        (old-receive [0xb0 71 1])
+        (reset! after-model-read #(do (@complete-sample)
+                                      (owner-command! {:op :show/restart :command-id "restart"})
+                                      (owner-command! {:op :cue/launch :cue-id :latched :command-id "replacement"})))
+        (old-receive [0xb0 71 1])
+        (is (= :cue/launch (:op (peek (admitted-commands h)))))
+        (is (= (:epoch @show) (:epoch (session/snapshot session))))
+        (is (empty? (:encoder-gestures (local h))))
+        (is (= [0.5] (mapv #(get-in % [:params :level]) (vals (:instances @show)))))
+        (session/close! session true)
+        (fixture/ready! h)
+        (let [before (admitted-commands h)]
+          (old-receive [0x80 0 0])
+          (old-receive [0xb0 71 1])
+          (is (= before (admitted-commands h)))))
+      (finally (finish! h)))))
+
+(deftest encoder-commands-cannot-cross-an-epoch-between-input-and-dispatch
+  (doseq [[op event] [[:gesture/begin [0x90 0 127]]
+                      [:gesture/sample [0xb0 71 1]]
+                      [:gesture/end [0x80 0 0]]]]
+    (testing (str op)
+      (let [{:keys [session show after-model-read complete-sample] :as h} (pending-sample-harness)]
+        (try
+          (let [id (launch! h 37)
+                ;; A trusted host may initialize a new epoch with captured instances.
+                replacement (model/new-show (update @show :epoch inc))]
+            (when (not= :gesture/begin op)
+              (receive! h [0x90 0 127]))
+            (when (= :gesture/end op)
+              (receive! h [0xb0 71 1])
+              (@complete-sample)
+              (session/refresh! session))
+            (let [before (admitted-commands h)]
+              (reset! after-model-read #(reset! show replacement))
+              (receive! h event)
+              (is (= before (admitted-commands h))))
+            (when (= :gesture/sample op)
+              (is (nil? @complete-sample)))
+            (is (nil? (get-in @show [:control :edit-history])))
+            (is (= 0.5 (:level (values h id))))
+            (is (= (:epoch @show) (:epoch (session/snapshot session))))
+            (is (= 128 (count (:palettes (local h))))))
+          (finally (finish! h)))))))
+
+(deftest encoder-release-keeps-ownership-until-the-end-is-acknowledged
+  (doseq [outcome [:exception :rejected :deferred-rejection :deferred-acceptance]]
+    (testing (name outcome)
+      (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+            apply! (:dispatch! options)
+            ends (atom [])
+            completion (promise)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (and (= :gesture/end (:op command)) (= 1 (count (swap! ends conj command))))
+                                (case outcome
+                                  :exception (throw (ex-info "end dispatch interrupted" {}))
+                                  :rejected {:status :rejected :code :dispatch-busy}
+                                  {:status :pending :completion completion})
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (is (nil? (:touched-parameter (view h))))
+            (is (= {:mode :off} (:last-touch-strip (local h))))
+            (receive! h [0xb0 71 1])
+            (is (= 0.51 (:level (values h id))))
+            (is (= 1 (count (:open (history)))))
+            (when (= :deferred-rejection outcome)
+              (deliver completion {:status :rejected :code :dispatch-busy}))
+            (session/close! device true)
+            (if (= :deferred-acceptance outcome)
+              (do
+                (is (= 1 (count @ends)))
+                (deliver completion (:ack (apply! (first @ends)))))
+              (is (= 2 (count @ends))))
+            (is (= #{1} (set (map :last-sequence @ends))))
+            (is (= 1 (:cursor (history))))
+            (is (empty? (:open (history))))
+            (is (= (if (= :exception outcome) ["end dispatch interrupted"] [])
+                   (:errors (session/snapshot device)))))
+          (finally (session/close! device true)))))))
+
+(deftest pending-encoder-end-preserves-the-next-physical-touch
+  (doseq [[held? end-status] [[true :accepted] [false :accepted] [true :rejected]]]
+    (testing (str "retouch held? " held? ", prior end " end-status)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            deferred-end (atom nil)
+            completion (promise)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (and (= :gesture/end (:op command)) (compare-and-set! deferred-end nil command))
+                                {:status :pending :completion completion}
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (receive! h [0x90 0 127])
+            (receive! h [0x90 0 127])
+            (reset! now 250)
+            (when-not held? (receive! h [0x80 0 0]))
+            (receive! h [0xb0 71 1])
+            (is (= 0.51 (:level (values h id))))
+            (deliver completion
+                     (if (= :accepted end-status)
+                       (:ack (apply! (assoc @deferred-end :time-ms @now)))
+                       {:status :rejected :code :dispatch-busy}))
+            ;; The first detent after acknowledgement uses the newly admitted gesture.
+            (receive! h [0xb0 71 1])
+            (when held? (receive! h [0x80 0 0]))
+            (let [gestures (->> (admitted-commands h) (filter :gesture-id) (partition-by :gesture-id))]
+              (is (= (if held? 2 1) (count gestures)))
+              (is (every? #(= [:gesture/begin :gesture/sample :gesture/end] (mapv :op %)) gestures))
+              (when held?
+                (is (= [:main 0 250] ((juxt :show-id :epoch :time-ms) (first (second gestures))))))
+              (is (= (if held? [0.51 0.52] [0.51])
+                     (mapv #(get-in (history) [:nodes % :after]) (range 1 (inc (:cursor (history)))))))
+              (is (empty? (:open (history)))))
+            (doseq [[cursor expected] (if held? [[2 0.51] [1 0.5]] [[1 0.5]])]
+              (let [ack (:ack (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                             {:command-id (str "undo-" cursor) :source :test :op :history/undo
+                                              :expected-cursor cursor :expected-history-position (:position (history))})))]
+                (is (= :accepted (:status ack)))
+                (is (= expected (:level (values h id)))))))
+          (finally (finish! h)))))))
+
+(deftest a-retouch-lift-precedes-settled-end-reconciliation
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        end-command (atom nil)
+        completion (promise)
+        delegated (atom [])
+        competing-begin (atom nil)
+        competing-ack (atom nil)
+        device (session/create
+                 (assoc options
+                        :model! (fn []
+                                  (when-let [command (first (reset-vals! competing-begin nil))]
+                                    (let [{:keys [model ack]} (model/apply-command @show command {:operator-id "other"})]
+                                      (reset! show model)
+                                      (reset! competing-ack ack)))
+                                  @show)
+                        :dispatch! (fn [command]
+                                     (swap! delegated conj command)
+                                     (if (and (= :gesture/end (:op command))
+                                              (compare-and-set! end-command nil command))
+                                       {:status :pending :completion completion}
+                                       (apply! command)))))
+        h (fixture/ready! (assoc h :session device))
+        history #(get-in @show [:control :edit-history])]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (receive! h [0x90 0 127])
+        (is (some? (get-in (local h) [:encoder-gestures :push-2/encoder-0 :retouch])))
+        (deliver completion (:ack (apply! @end-command)))
+        (let [before @delegated]
+          (reset! now 250)
+          (reset! competing-begin {:op :gesture/begin :command-id "other-begin" :source :test
+                                    :show-id :main :epoch 0 :time-ms @now :instance-id id :param :level
+                                    :control-id :other/encoder :gesture-id "other-gesture"})
+          ;; The other operator acts on the model read for the decoded lift.
+          (receive! h [0x80 0 0])
+          (is (= :accepted (:status @competing-ack)))
+          (is (= "other-gesture" (get-in (history) [:open [:instance-param id :level] :gesture-id])))
+          (is (= 250 (get-in (local h) [:encoder-releases :push-2/encoder-0])))
+          (receive! h [0xb0 71 1])
+          (is (= before @delegated))
+          (is (= 1 (:cursor (history))))
+          (is (= 0.51 (:level (values h id))))
+          (is (empty? (:encoder-gestures (local h))))))
+      (finally (finish! h)))))
+
+(deftest held-encoder-retouch-recovers-after-repeated-transient-end-failures
+  (doseq [failure [:busy :deferred-busy :exception]]
+    (testing (name failure)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            attempts (atom [])
+            recovered? (atom false)
+            completion (promise)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (= :gesture/end (:op command))
+                                (let [count (count (swap! attempts conj (:time-ms command)))]
+                                  (cond
+                                    (= 1 count) {:status :pending :completion completion}
+                                    @recovered? (apply! command)
+                                    (= :busy failure) {:status :rejected :code :dispatch-busy}
+                                    (= :deferred-busy failure)
+                                    {:status :pending :completion (deliver (promise) {:status :rejected :code :dispatch-busy})}
+                                    :else (throw (ex-info "end dispatcher unavailable" {}))))
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (receive! h [0x90 0 127])
+            (deliver completion {:status :rejected :code :dispatch-busy})
+            (dotimes [_ 3] (session/refresh! device))
+            (is (= [0 0] @attempts))
+            (reset! now 99)
+            (session/refresh! device)
+            (is (= [0 0] @attempts))
+            (reset! now 100)
+            (dotimes [_ 3] (session/refresh! device))
+            (is (= [0 0 100] @attempts))
+            (reset! recovered? true)
+            (reset! now 199)
+            (session/refresh! device)
+            (is (= [0 0 100] @attempts))
+            (reset! now 200)
+            (session/refresh! device)
+            (is (= [0 0 100 200] @attempts))
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (is (= [0 0 100 200 200] @attempts))
+            (is (= [0.51 0.52] (mapv #(get-in (history) [:nodes % :after]) [1 2])))
+            (is (empty? (:open (history))))
+            (doseq [[cursor expected] [[2 0.51] [1 0.5]]]
+              (let [ack (:ack (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                             {:command-id (str "recover-undo-" cursor) :source :test :op :history/undo
+                                              :expected-cursor cursor :expected-history-position (:position (history))})))]
+                (is (= :accepted (:status ack)))
+                (is (= expected (:level (values h id))))))
+            (is (= (if (= :exception failure) ["end dispatcher unavailable" "end dispatcher unavailable"] [])
+                   (:errors (session/snapshot device)))))
+          (finally (session/close! device true)))))))
+
+(deftest released-encoders-retry-independently-without-a-retouch
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        attempts (atom [])
+        blocked (atom #{:push-2/encoder-0 :push-2/encoder-1})
+        device (session/create
+                 (assoc options :dispatch!
+                        (fn [{:keys [op control-id time-ms] :as command}]
+                          (when (= :gesture/end op) (swap! attempts conj [control-id time-ms]))
+                          (if (and (= :gesture/end op) (contains? @blocked control-id))
+                            {:status :rejected :code :dispatch-busy}
+                            (apply! command)))))
+        history #(get-in @show [:control :edit-history])]
+    (swap! show update-in [:registry :effects :wash]
+           #(-> % (assoc-in [:params :tone] (:level schemas)) (assoc :param-order [:level :tone])))
+    (let [h (fixture/ready! (assoc h :session device))]
+      (try
+        (let [id (launch! h 37)]
+          (doseq [note [0 1]]
+            (receive! h [0x90 note 127])
+            (receive! h [0xb0 (+ 71 note) 1])
+            (receive! h [0x80 note 0])
+            (receive! h [0x80 note 0]))
+          (is (= [0 0] (mapv second @attempts)))
+          (is (= 2 (count (:open (history)))))
+          (reset! now 99)
+          (session/refresh! device)
+          (is (= [0 0] (mapv second @attempts)))
+          (swap! blocked disj :push-2/encoder-1)
+          (reset! now 100)
+          (dotimes [_ 3] (session/refresh! device))
+          (is (= [[:push-2/encoder-0 0] [:push-2/encoder-1 0]
+                  [:push-2/encoder-0 100] [:push-2/encoder-1 100]] @attempts))
+          (is (= [:instance-param id :tone] (get-in (history) [:nodes 1 :target])))
+          (is (= #{[:instance-param id :level]} (set (keys (:open (history))))))
+          (reset! blocked #{})
+          (reset! now 200)
+          (session/refresh! device)
+          (is (= [:push-2/encoder-0 200] (peek @attempts)))
+          (is (= 5 (count @attempts)))
+          (is (= [:instance-param id :level] (get-in (history) [:nodes 2 :target])))
+          (is (empty? (:open (history))))
+          (is (= {:level 0.51 :tone 0.51} (values h id))))
+        (finally (finish! h))))))
+
+(deftest encoder-end-retry-cannot-cross-an-epoch
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        attempts (atom 0)
+        replacement (atom nil)
+        device (session/create
+                 (assoc options
+                        :model! (fn []
+                                  (let [snapshot @show]
+                                    (when-let [new-show (first (reset-vals! replacement nil))]
+                                      (reset! show new-show))
+                                    snapshot))
+                        :dispatch! (fn [command]
+                                     (if (= :gesture/end (:op command))
+                                       (do (swap! attempts inc) {:status :rejected :code :dispatch-busy})
+                                       (apply! command)))))
+        h (fixture/ready! (assoc h :session device))]
+    (try
+      (let [id (launch! h 37)
+            new-show (model/new-show (update @show :epoch inc))]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (reset! now 100)
+        (reset! replacement new-show)
+        (session/refresh! device)
+        (is (= 1 @attempts))
+        (is (= :stale-epoch (get-in (session/snapshot device) [:last-ack :reason])))
+        (is (= 0.5 (:level (values h id))))
+        (is (nil? (get-in @show [:control :edit-history])))
+        (session/refresh! device)
+        (is (empty? (:encoder-gestures (local h)))))
+      (finally (finish! h)))))
+
+(deftest released-retouch-never-starts-and-permanent-rejection-stops-retries
+  (doseq [stopped-by [:release :permanent-rejection]]
+    (testing (name stopped-by)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            attempts (atom 0)
+            recovered? (atom false)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (= :gesture/end (:op command))
+                                (let [attempt (swap! attempts inc)]
+                                  (cond
+                                    @recovered? (apply! command)
+                                    (and (= 2 attempt) (= :permanent-rejection stopped-by))
+                                    {:status :rejected :code :operator-required}
+                                    :else {:status :rejected :code :dispatch-busy}))
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))]
+        (try
+          (launch! h 37)
+          (receive! h [0x90 0 127])
+          (receive! h [0xb0 71 1])
+          (receive! h [0x80 0 0])
+          (receive! h [0x90 0 127])
+          (is (= 2 @attempts))
+          (when (= :release stopped-by)
+            (receive! h [0x80 0 0])
+            (is (= 2 @attempts)))
+          (let [previous-attempts @attempts]
+            (reset! recovered? true)
+            (doseq [time [100 200 300]]
+              (reset! now time)
+              (session/refresh! device))
+            (is (= (if (= :release stopped-by) (inc previous-attempts) previous-attempts) @attempts))
+            (when (= :release stopped-by)
+              (is (= 1 (get-in @show [:control :edit-history :cursor])))
+              (is (empty? (get-in @show [:control :edit-history :open]))))
+            (session/close! device true)
+            (is (= (inc previous-attempts) @attempts)))
+          (is (= [:cue/launch :gesture/begin :gesture/sample :gesture/end]
+                 (mapv :op (admitted-commands h))))
+          (let [history (get-in @show [:control :edit-history])]
+            (is (= 1 (:cursor history)))
+            (is (empty? (:open history))))
+          (finally (finish! h)))))))
+
+(deftest encoder-detents-and-touch-strip-share-one-scalar-gesture
+  (let [h (gesture-harness push-operator nil)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0xe0 0 0])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (let [[begin detent strip final-detent end :as commands] (rest (admitted-commands h))
+              history (get-in @(:show h) [:control :edit-history])]
+          (is (= [:gesture/begin :gesture/sample :gesture/sample :gesture/sample :gesture/end]
+                 (mapv :op commands)))
+          (is (= 1 (count (set (map :gesture-id [begin detent strip final-detent end])))))
+          (is (= [[1 0.51] [2 0.0] [3 0.01]] (mapv (juxt :sequence :value) [detent strip final-detent])))
+          (is (= 3 (:last-sequence end)))
+          (is (= 0.01 (:level (values h id))))
+          (is (= {:target [:instance-param id :level] :before 0.5 :after 0.01}
+                 (select-keys (get-in history [:nodes (:cursor history)]) [:target :before :after])))
+          (is (empty? (:open history)))))
+      (finally (finish! h)))))
+
+(deftest touch-strip-keeps-ordinary-editing-for-a-different-target
+  (let [h (gesture-harness push-operator nil)]
+    (try
+      (let [original (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (let [selected (launch! h 36)]
+          (receive! h [0x90 0 127])
+          (receive! h [0xe0 0 0])
+          (is (= {:op :param/set :instance-id selected :param :level :value 0.0}
+                 (select-keys (peek (admitted-commands h)) [:op :instance-id :param :value])))
+          (is (= 0.0 (:level (values h selected))))
+          (is (= 0.51 (:level (values h original))))
+          (receive! h [0x80 0 0])
+          (is (= [:cue/launch :gesture/begin :gesture/sample :cue/launch :param/set :gesture/end]
+                 (mapv :op (admitted-commands h))))))
+      (finally (finish! h)))))
+
+(deftest scalar-encoder-touch-pins-the-target-through-selection-and-commits-once
+  (let [h (gesture-harness push-operator nil)]
+    (try
+      (let [id (launch! h 37) history #(get-in @(:show h) [:control :edit-history])]
+        (receive! h [0x90 0 127])
+        (receive! h [0x90 0 127])
+        (let [other-id (launch! h 36)]
+          (is (not= id other-id))
+          (dotimes [_ 12] (receive! h [0xb0 71 1]))
+          (is (zero? (:cursor (history))))
+          (is (> (:level (values h id)) 0.5))
+          (is (= 0.5 (:level (values h other-id))))
+          (receive! h [0x90 0 0])
+          (receive! h [0x80 0 0])
+          (receive! h [0xb0 71 1])
+          (is (= 0.5 (:level (values h other-id))))
+          (let [commands (filterv :gesture-id (filter #(= "gesture" (namespace (:op %))) (admitted-commands h)))
+                node (get-in (history) [:nodes (:cursor (history))])]
+            (is (= (into [:gesture/begin] (concat (repeat 12 :gesture/sample) [:gesture/end])) (mapv :op commands)))
+            (is (= (range 1 13) (keep :sequence commands)))
+            (is (= 12 (:last-sequence (peek commands))))
+            (is (= 1 (count (set (map :gesture-id commands)))))
+            (is (= 1 (:cursor (history))))
+            (is (= {:target [:instance-param id :level], :actor "push-2-test", :before 0.5
+                    :after (:level (values h id))}
+                   (select-keys node [:target :actor :before :after]))))
+          (reset! (:now h) 250)
+          (receive! h [0xb0 71 1])
+          (is (= 0.51 (:level (values h other-id))))
+          (is (= :param/set (:op (peek (admitted-commands h)))))))
+      (finally (finish! h)))))
+
+(deftest concurrent-automation-protects-the-canonical-value-and-accepted-sequence
+  (let [automation! (fn [show command]
+                      (when (and (= :gesture/sample (:op command)) (= 2 (:sequence command)))
+                        (let [write (assoc (select-keys command [:show-id :epoch :time-ms :instance-id :param])
+                                           :op :param/set :value 0.25 :command-id "automation" :source {:adapter :routing})]
+                          (reset! show (:model (model/apply-command @show write))))))
+        h (gesture-harness push-operator automation!)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (is (= 0.51 (:level (values h id))))
+        (receive! h [0xb0 71 1])
+        (is (= :history-conflict (:code (:last-ack (session/snapshot (:session h))))))
+        (receive! h [0x80 0 0])
+        (is (= 0.25 (:level (values h id))))
+        (is (= 1 (:last-sequence (peek (admitted-commands h)))))
+        (is (= :history-conflict (:discarded (:last-ack (session/snapshot (:session h))))))
+        (is (= 0 (get-in @(:show h) [:control :edit-history :cursor])))
+        (is (empty? (get-in @(:show h) [:control :edit-history :open]))))
+      (finally (finish! h)))))
+
+(deftest unadmitted-history-and-touchless-input-retain-ordinary-control
+  (let [h (gesture-harness nil nil)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 71 1])
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (is (= 0.52 (:level (values h id))))
+        (is (= [:cue/launch :param/set :gesture/begin :param/set]
+               (mapv :op (admitted-commands h))))
+        (is (nil? (get-in @(:show h) [:control :edit-history]))))
+      (finally (finish! h)))))
+
+(deftest suspend-finishes-only-the-accepted-encoder-edit
+  (let [h (gesture-harness push-operator nil) device (:session h)]
+    (try
+      (let [id (launch! h 36)]
+        (receive! h [0x90 0 127])
+        (receive! h [0x80 0 0])
+        (is (= 0 (get-in @(:show h) [:control :edit-history :cursor])))
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0xb0 59 127])
+        (is (= :suspended (:status (session/snapshot device))))
+        (is (= [:gesture/end :instance/end] (mapv :op (take-last 2 (admitted-commands h)))))
+        (is (= 0.51 (:level (values h id))))
+        (is (= 1 (get-in @(:show h) [:control :edit-history :cursor])))
+        (is (empty? (get-in @(:show h) [:control :edit-history :open]))))
+      (finally (finish! h)))))
+
+(deftest stopped-encoder-end-remains-retryable-without-device-transports
+  (doseq [[lifecycle stop!] [[:suspended session/suspend!] [:closed session/close!]]
+          failure [:dispatch-busy :queue-full :exception]]
+    (testing (str lifecycle " after " failure)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            attempts (atom [])
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (and (= :gesture/end (:op command))
+                                       (= 1 (count (swap! attempts conj command))))
+                                (if (= :exception failure)
+                                  (throw (ex-info "Temporary end failure" {}))
+                                  {:status :rejected :code failure})
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (let [stopped (stop! device)]
+              (is (= lifecycle (:status stopped)))
+              (is (= [:push-2/encoder-0] (:pending-gesture-ends stopped))))
+            (is (= #{[:instance-param id :level]} (set (keys (:open (history))))))
+            (reset! now 99)
+            (session/refresh! device)
+            (is (= [0] (mapv :time-ms @attempts)))
+            (reset! now 100)
+            (dotimes [_ 3] (session/refresh! device))
+            (is (= [0 100] (mapv :time-ms @attempts)))
+            (is (= 1 (count (set (map :gesture-id @attempts)))))
+            (is (empty? (:pending-gesture-ends (session/snapshot device))))
+            (is (empty? (:open (history))))
+            (is (= 1 (:cursor (history))))
+            (is (= 0.51 (:level (values h id)))))
+          (finally (session/close! device true)))))))
+
+(deftest closing-a-pending-end-waits-for-the-receipt-and-retries-once
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        attempts (atom [])
+        completion (promise)
+        device (session/create
+                 (assoc options :dispatch!
+                        (fn [command]
+                          (if (and (= :gesture/end (:op command))
+                                   (= 1 (count (swap! attempts conj command))))
+                            {:status :pending :completion completion}
+                            (apply! command)))))
+        h (fixture/ready! (assoc h :session device))]
+    (try
+      (launch! h 37)
+      (receive! h [0x90 0 127])
+      (receive! h [0xb0 71 1])
+      (receive! h [0x80 0 0])
+      (is (= [:push-2/encoder-0] (:pending-gesture-ends (session/close! device))))
+      (reset! now 200)
+      (session/refresh! device)
+      (is (= [0] (mapv :time-ms @attempts)))
+      (deliver completion {:status :rejected :code :queue-full})
+      (session/refresh! device)
+      (is (= [0] (mapv :time-ms @attempts)))
+      (reset! now 300)
+      (dotimes [_ 3] (session/refresh! device))
+      (is (= [0 300] (mapv :time-ms @attempts)))
+      (is (= 1 (get-in @show [:control :edit-history :cursor])))
+      (is (empty? (get-in @show [:control :edit-history :open])))
+      (is (empty? (:pending-gesture-ends (session/snapshot device))))
+      (finally (session/close! device true)))))
+
+(deftest a-detached-old-epoch-gesture-end-is-discarded-before-dispatch
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        attempts (atom 0)
+        device (session/create
+                 (assoc options :dispatch!
+                        (fn [command]
+                          (if (= :gesture/end (:op command))
+                            (do (swap! attempts inc) {:status :rejected :code :dispatch-busy})
+                            (apply! command)))))
+        h (fixture/ready! (assoc h :session device))]
+    (try
+      (launch! h 37)
+      (receive! h [0x90 0 127])
+      (receive! h [0xb0 71 1])
+      (is (= [:push-2/encoder-0] (:pending-gesture-ends (session/suspend! device))))
+      (swap! show #(model/new-show (update % :epoch inc)))
+      (reset! now 100)
+      (let [replacement @show]
+        (session/refresh! device)
+        (is (identical? replacement @show)))
+      (is (= 1 @attempts))
+      (is (empty? (:pending-gesture-ends (session/snapshot device))))
+      (finally (session/close! device true)))))
+
+(deftest a-reopened-encoder-waits-for-the-exact-detached-end-while-held
+  (doseq [scenario [:held :lifted :lift-during-settlement :new-epoch]]
+    (testing (name scenario)
+      (let [{:keys [show options now callbacks] :as h}
+            (fixture/harness {:profile (push/profile {:operator-gestures? true})} push-operator)
+            apply! (:dispatch! options)
+            delegated (atom [])
+            end-command (atom nil)
+            during-read (atom nil)
+            completion (promise)
+            device (session/create
+                     (assoc options
+                            :model! (fn []
+                                      (let [snapshot @show]
+                                        (when-let [settle! (first (reset-vals! during-read nil))]
+                                          (settle!))
+                                        snapshot))
+                            :dispatch! (fn [command]
+                                         (swap! delegated conj command)
+                                         (if (and (= :gesture/end (:op command))
+                                                  (compare-and-set! end-command nil command))
+                                           {:status :pending :completion completion}
+                                           (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            settle! #(deliver completion (:ack (apply! (assoc @end-command :time-ms @now))))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)
+                old-receive (peek @callbacks)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (session/reconnect! device)
+            (fixture/ready! h)
+            (let [before (count @delegated)]
+              (receive! h [0x90 0 127])
+              (receive! h [0x90 0 127])
+              (receive! h [0xb0 71 10])
+              (is (= before (count @delegated))))
+            (let [waiting (get-in (local h) [:encoder-gestures :push-2/encoder-0])
+                  gesture-id (:gesture-id waiting)]
+              (is (= :waiting (:status waiting)))
+              (is (= (select-keys @end-command [:show-id :epoch :control-id :gesture-id :instance-id :param])
+                     (:waiting-for waiting)))
+              (is (not= (:gesture-id @end-command) gesture-id))
+              (reset! now 100)
+              (case scenario
+                :held
+                (do (settle!)
+                    (old-receive [0xb0 71 10])
+                    ;; The first detent can observe the receipt without a prior refresh.
+                    (receive! h [0xb0 71 1])
+                    (receive! h [0x80 0 0])
+                    (receive! h [0x80 0 0]))
+                :lifted
+                (do (receive! h [0x80 0 0])
+                    (settle!)
+                    (session/refresh! device)
+                    (receive! h [0xb0 71 10]))
+                :lift-during-settlement
+                (do (reset! during-read settle!)
+                    (receive! h [0x80 0 0])
+                    (receive! h [0xb0 71 10]))
+                :new-epoch
+                (do (swap! show #(model/new-show (update % :epoch inc)))
+                    (settle!)
+                    (session/refresh! device)))
+              (is (empty? (:pending-gesture-ends (session/snapshot device))))
+              (is (empty? (:encoder-gestures (local h))))
+              (is (empty? (:open (history))))
+              (let [commands (filter #(= gesture-id (:gesture-id %)) @delegated)]
+                (if (= :held scenario)
+                  (do (is (= [:gesture/begin :gesture/sample :gesture/end] (mapv :op commands)))
+                      (is (every? #(= [:main 0 id :level] ((juxt :show-id :epoch :instance-id :param) %)) commands))
+                      (is (= 2 (:cursor (history))))
+                      (is (= 0.52 (:level (values h id)))))
+                  (do (is (empty? commands))
+                      (is (= (when-not (= :new-epoch scenario) 1) (:cursor (history))))
+                      (is (= 0.51 (:level (values h id)))))))))
+          (finally (session/close! device true)))))))
 
 (deftest push-feedback-indexes-running-cues-once-for-the-display-and-pads
   (let [h (harness) calls (atom 0) active views/active-instances]

@@ -10,10 +10,15 @@
   (mapv double v))
 
 (defn- dot [[x y z] [a b c]] (+ (* x a) (* y b) (* z c)))
+
 (defn- scale [v k] (mapv #(* % k) v))
+
 (defn- add [a b] (mapv + a b))
+
 (defn- sub [a b] (mapv - a b))
+
 (defn- cross [[x y z] [a b c]] [(- (* y c) (* z b)) (- (* z a) (* x c)) (- (* x b) (* y a))])
+
 (defn- magnitude [[x y z]] (Math/hypot (Math/hypot x y) z))
 
 (defn- unit [v]

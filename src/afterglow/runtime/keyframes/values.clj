@@ -6,7 +6,9 @@
             [afterglow.time :as time]))
 
 (def emitters (into #{:dimmer :color} (keys photometry/emitter-spectrum)))
+
 (def geometry #{:aim :direction})
+
 (def continuous (into (into emitters geometry) [:pan :tilt :zoom :focus :beat-ratio]))
 
 (defn- invalid! [reason] (throw (ex-info reason {:type ::invalid-sampler})))

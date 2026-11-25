@@ -6,7 +6,9 @@
   (:import [java.util.concurrent CancellationException Future]))
 
 (def spatial {:level {:op :add :args [{:op :position :axis :x} {:op :param :key :level}]}})
+
 (def env {:params {:level 0.25}})
+
 (defn- levels [result] (vec (get-in result [:outputs :level :values])))
 
 (deftest groups-use-immutable-rig-keys-and-least-recently-used-eviction

@@ -5,12 +5,19 @@
   (:require [afterglow.spatial.geometry :as g]))
 
 (def zero3 [0.0 0.0 0.0])
+
 (def step-ms 5)
+
 (def max-steps 80)
+
 (defn- plus [a b] (mapv + a b))
+
 (defn- minus [a b] (mapv - a b))
+
 (defn- times [a n] (mapv #(* (double %) (double n)) a))
+
 (defn- dot [a b] (reduce + (map * a b)))
+
 (defn- clamp [lo x hi] (min hi (max lo x)))
 
 (defn validate! [{:keys [bounds]} {:keys [radius velocity gravity angular-velocity rotation

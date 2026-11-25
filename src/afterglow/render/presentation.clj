@@ -10,13 +10,19 @@
 (deftype PackedChannel [^long coarseUniverse ^long coarseIndex ^long fineUniverse ^long fineIndex ^boolean inverted ^boolean fade])
 
 (def ^:private emitters (set (keys photometry/emitter-spectrum)))
+
 (def ^:private emission-attributes (conj emitters :dimmer))
+
 (def ^:private continuous (into emission-attributes #{:pan :tilt :focus :zoom}))
 
 (defn- fail! [message data] (throw (ex-info message (assoc data :type ::invalid-presentation))))
+
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
+
 (defn- natural? [x] (and (integer? x) (<= 0 x Long/MAX_VALUE)))
+
 (defn- nonnegative? [x] (and (finite? x) (<= 0 x)))
+
 (defn- unit [x] (max 0.0 (min 1.0 (double x))))
 
 (defn- linear-channel? [attribute channel]

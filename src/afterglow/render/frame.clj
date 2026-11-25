@@ -18,18 +18,26 @@
             [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
+
 (def ^:private extra-emitters (apply dissoc photometry/emitter-spectrum [:red :green :blue :white]))
+
 (def ^:private geometric-attributes #{:aim :direction})
+
 (def ^:private rgb-attributes [:red :green :blue])
 
 ;; Final fields, no mutable buffers: safe to share between render workers/frames.
 (deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot ^boolean coarseRange])
+
 (deftype DenseChannel [^long kind ^long slot ^long compactIndex scatter fallback])
+
 (deftype EmitterTint [attribute ^long slot ^double red ^double green ^double blue])
+
 (deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints])
+
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
    [:emitted-color :vec3 3] [:intensity :number 1] [:aim :vec3 3] [:direction :vec3 3]])
+
 (def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4 :shutter 9})
 
 (defn- packed-number? [value]
@@ -46,8 +54,11 @@
   (and (number? x) (Double/isFinite (double x))))
 
 (defn- unit? [x] (and (finite? x) (<= 0 x) (<= x 1)))
+
 (defn- vec3? [x] (and (vector? x) (= 3 (count x)) (every? finite? x)))
+
 (defn- positive-int? [x] (and (integer? x) (pos? x) (<= x Integer/MAX_VALUE)))
+
 (defn- clamp [x lo hi] (min hi (max lo x)))
 
 (defn- channel-spec [spec]

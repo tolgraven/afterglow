@@ -8,11 +8,17 @@
 
 (def fixture {:id :jet :position [1 2 3] :universe 4 :address 512 :channels {:fog [1 2]}
               :fogger {:flow-m3-min 60 :direction [0 0 -2] :mixing-seconds 4}})
+
 (def room {:width 10 :height 4 :depth 5 :fog-half-life-s 60 :air-changes-per-hour 3})
+
 (def plan (fog/plan room (frame/compile-patch [fixture])))
+
 (def full {4 (assoc (vec (repeat 512 0)) 511 -1) 5 [0]})
+
 (def off {4 (vec (repeat 512 0)) 5 [0]})
+
 (defn near? [a b] (< (abs (- a b)) 1e-8))
+
 (defn total [s] (+ (:mixed-m3 s) (reduce + 0 (map :local-m3 (:sources s)))))
 
 (deftest split-universe-controls-hold-each-byte-independently
@@ -47,6 +53,7 @@
     (is (near? (/ (:mixed-m3 late) 200) (:mixed-density late)))
     (is (thrown? Exception (fog/advance plan late 8499)))
     (is (near? (total late) (total (fog/reconfigure (assoc plan :sources []) late 3 123 true))))))
+
 (deftest sightline-rate-follows-mixing-and-total-room-clearance
   (let [measured (assoc room :measured-fog {:clearance-half-life-s 12.0 :reference-path-m 3})
         calibrated (fog/plan measured (frame/compile-patch [fixture]))

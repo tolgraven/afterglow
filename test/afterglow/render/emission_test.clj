@@ -9,14 +9,20 @@
    {:id :strip :channels {:red 1 :blue 2} :universe 1 :address 8}
    {:id :fog :channels {:dimmer 1 :fog 2} :universe 2 :address 1}
    {:id :spot :channels {:dimmer 1} :emission-color [0.5 1 0.5] :universe 2 :address 4}])
+
 (def patch (frame/compile-patch fixtures))
+
 (defn head [id] (get-in patch [:by-id id]))
+
 (defn row [id a v] {:target-id id :attribute a :value v})
+
 (def rows [(row :head :red 0.7) (row :head :white 0.1) (row :head :dimmer 0.8)
            (row :head :pan 0.4) (row :head :strobe 0.9) (row :head :shutter 0.25)
            (row :strip :red 0.7) (row :strip :blue 0.3) (row :spot :dimmer 1)
            (row :fog :dimmer 1) (row :fog :fog 0.35)])
+
 (defn near? [a b] (< (abs (- a b)) 0.005))
+
 (defn freeze [f] (update-vals (:universes f) vec))
 
 (deftest absent-and-nil-inversions-produce-identical-frames

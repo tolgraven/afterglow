@@ -14,6 +14,7 @@
    :ambiguous-channel-expression :withheld :hardware-verified? false})
 
 (defn- initial [] {:decoder (codec/initial-state) :voices {} :holds {} :diagnostics []})
+
 (defn- diagnose [state entries]
   (update state :diagnostics #(vec (take-last 32 (into % entries)))))
 

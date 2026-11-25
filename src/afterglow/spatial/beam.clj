@@ -7,7 +7,9 @@
             [afterglow.time :as time]))
 
 (defn- dot [a b] (reduce + (map * a b)))
+
 (defn- scale [v k] (mapv #(* k %) v))
+
 (defn- along [p d t] (mapv + p (scale d t)))
 
 (defn- unit [v]
@@ -214,6 +216,7 @@
 
 (def ^:private rim-offsets
   (mapv (fn [i] (let [angle (* i (/ Math/PI 4.0))] [(Math/cos angle) (Math/sin angle)])) (range 8)))
+
 (def ^:private cardinal-directions [[1 0 0] [-1 0 0] [0 1 0] [0 -1 0] [0 0 1] [0 0 -1]])
 
 (defn- polyhedron-points [{:keys [position axis spread lens-radius-m]} planes reach aimable?]

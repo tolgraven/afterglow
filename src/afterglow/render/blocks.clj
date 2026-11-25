@@ -9,9 +9,13 @@
   (throw (ex-info message {:path path :message message})))
 
 (defn- expr [x] (if (map? x) x {:op :const :value x}))
+
 (defn- op [kind & args] {:op kind :args (mapv expr args)})
+
 (defn- input [k] {:op :input :key k})
+
 (defn- coord [axis] {:op :coordinate :axis axis})
+
 (def ^:private tau (* 2.0 Math/PI))
 
 (defn- wave [phase] (op :add 0.5 (op :multiply 0.5 (op :sin (op :multiply tau phase)))))

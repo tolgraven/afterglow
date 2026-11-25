@@ -8,6 +8,7 @@
             [afterglow.runtime.faults :as faults]
             [afterglow.runtime.keyframes :as keyframes]
             [afterglow.time :as musical-time]
+            [afterglow.control.model :as control]
             [afterglow.control.params :as params]
             [afterglow.control.system :as system]))
 
@@ -385,8 +386,9 @@
         instances (into {} (keep (fn [result]
                                   (when-not (:done? result)
                                     [(:id result) (runtime/observable-instance result)]))) evaluations)
+        next-model (control/track-parameter-generations model (assoc model :instances instances))
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
-    (cond-> {:model (faults/record-events (assoc model :instances instances) events)
+    (cond-> {:model (faults/record-events next-model events)
              :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
              :keyframes (keyframes/committed-windows snapshot evaluations)
              :fault-events events

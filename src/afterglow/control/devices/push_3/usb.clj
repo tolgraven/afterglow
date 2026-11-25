@@ -20,7 +20,9 @@
            :bulk_transfer])))
 
 (defn- int-call [usb op & args] (.invokeInt ^Function (usb op) (object-array args)))
+
 (defn- void-call [usb op & args] (.invokeVoid ^Function (usb op) (object-array args)))
+
 (defn- check [op result]
   (when (neg? result)
     (throw (ex-info (str "Push 3 USB " (name op) " failed (" result ")") {:operation op :libusb-code result})))
