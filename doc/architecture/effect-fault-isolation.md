@@ -11,12 +11,47 @@ and discards the attempt's output, intents and completion flag. Healthy instance
 continue. The failed current version stores `:fault` and is suppressed until an
 explicit retry or a newer definition under the selected reload policy.
 
-For `:preserve-state` and `:restart`, a bad candidate stores `:reload-fault` while
+For `:preserve-state`, `:restart` and `:migrate`, a bad candidate stores `:reload-fault` while
 the captured last-good definition is retained. Preparation/compile/evaluation
 failure evaluates that captured version in the same frame. Separate fields
 preserve suppression if both candidate and captured versions fail. Pinned cues
 remain pinned. Timed/releasing faulted instances still reach their normal expiry;
 pause retains its private-clock semantics.
+
+## State migration on reload
+
+`:migrate` adopts a newer definition like `:preserve-state` (retained time,
+system controls and compatible parameters), then transforms the instance's
+private state for the new version. The shell's compiler attaches a pure function
+to the new definition's compiled step with `engine/with-state-migration`:
+
+```clojure
+(engine/with-state-migration step
+  (fn [old-state old-version new-version context] new-state))
+```
+
+`context` is portable data: instance/cue/effect IDs, both captured definitions,
+the retained parameters, the frame (`:show-id :epoch :revision :number :time-ms`)
+and the instance's private clock. The engine calls the function once, on the
+frame where the candidate first takes over, immediately before that step first
+runs, on the same worker that evaluates the instance. `advance` is pure, so the
+call is outside any `swap!` or CAS retry; the function must not perform IO, read
+clocks or own RNG. Definitions stay data: the migration lives on the compiled
+step, never in the registry. Paused instances defer the reload and its migration.
+
+A missing migration, a function result, or a recoverable exception from the
+function is a `:reload-fault` with `:stage :migrate`, `:effect-version` (the
+rejected version) and `:from-version`. Its first cause carries
+`{:type :afterglow.runtime.engine/state-migration-failed :path [:state-migration]}`
+and later causes keep the authored `ex-data` location, such as
+`{:path [:state-migration :steps 0]}`. The instance evaluates its last good
+definition with its last good state in the same frame, exactly as it would had
+the new version never been published. Other instances, ordering and output are
+unchanged. The quarantined migration is not retried every frame; a newer version
+or `:instance/retry` tries again from the last good state. Interruption,
+cancellation and VM errors propagate unchanged.
+
+Control validates `:reload-policy` on cue publication and on launch.
 
 `:instance/retry` is an ordinary idempotent command addressed to the current
 instance and epoch. It retries with retained parameters/state/time. A failed

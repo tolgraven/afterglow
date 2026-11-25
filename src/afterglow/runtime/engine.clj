@@ -63,7 +63,7 @@
                                          (get instance :release-duration-ms 0))))))
     (fail! ::invalid-duration "Instance deadline exceeds finite logical time"
            {:instance-id id}))
-  (when-not (#{:pinned :restart :preserve-state} (get instance :reload-policy :pinned))
+  (when-not (control/reload-policies (get instance :reload-policy :pinned))
     (fail! ::invalid-reload-policy "Unknown instance reload policy" {:instance-id id}))
   (doseq [field [:duration :release-duration] :when (contains? instance field)]
     (when (seq (musical-time/validate-duration (get instance field)))
@@ -105,6 +105,23 @@
                {:instance-id id :factor factor}))))
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
+
+(defn with-state-migration
+  "Attach a pure state migration to a compiled step. A :migrate reload calls
+  (migrate old-state old-version new-version context) once, at the frame where
+  the newer definition takes over, before that step first runs. context holds
+  portable data: instance/cue/effect identity, both captured definitions, the
+  retained parameters and the frame/clock. The function must not perform IO,
+  read clocks or own RNG; it runs on a frame worker outside any CAS retry."
+  [step migrate]
+  (when-not (or (fn? migrate) (var? migrate))
+    (fail! ::invalid-state-migration "A state migration must be a function" {}))
+  (vary-meta step assoc ::state-migration migrate))
+
+(defn state-migration
+  "Return the state migration attached to a compiled step, or nil."
+  [step]
+  (::state-migration (meta step)))
 
 (defn opacity-factor
   "Read the frame opacity factor for an instance and its evaluated definition version."
@@ -324,9 +341,13 @@
         fallback-model (if candidate? (update-in model [:registry :effects] dissoc (:effect-id instance)) model)
         fallback (prepare-instance fallback-model clock snapshot instance)]
     (try
-      (let [candidate (if candidate? (prepare-instance model clock snapshot instance) fallback)]
-        (assoc candidate :before instance :fallback fallback
-               :candidate? (not= (:effect-version instance) (get-in candidate [:instance :effect-version]))))
+      (let [candidate (if candidate? (prepare-instance model clock snapshot instance) fallback)
+            adopted? (not= (:effect-version instance) (get-in candidate [:instance :effect-version]))]
+        (cond-> (assoc candidate :before instance :fallback fallback :candidate? adopted?)
+          ;; The candidate keeps the old state until its step's migration runs.
+          (and adopted? (= :migrate (:reload-policy instance)))
+          (assoc :migration {:state (:state instance) :from-version (:effect-version instance)
+                             :from-definition (:definition instance) :clock (:clock candidate)})))
       (catch Throwable error
         (let [fault (faults/diagnostic snapshot instance
                                        (get-in model [:registry :effects (:effect-id instance) :version]) :reload error)]
@@ -345,6 +366,41 @@
       (when-not (faults/recoverable? error) (throw error))
       {:error error})))
 
+(defn- migrate-prepared
+  "Run a pending :migrate transform for the candidate definition. Returns the
+  prepared lifecycle with migrated state, or a :migrate fault diagnostic."
+  [snapshot step prepared]
+  (let [{:keys [state from-version from-definition clock]} (:migration prepared)
+        instance (:instance prepared)
+        to-version (:effect-version instance)
+        migrate (state-migration step)
+        context {:instance-id (:id instance) :cue-id (:cue-id instance) :effect-id (:effect-id instance)
+                 :from-definition from-definition :to-definition (:definition instance)
+                 :params (:params instance)
+                 :frame (select-keys snapshot [:show-id :epoch :revision :number :time-ms])
+                 :clock (select-keys clock [:time-ms :beat :bpm :meter :playing?])}]
+    (try
+      (when-not (ifn? migrate)
+        (fail! ::missing-state-migration "The new definition declares no state migration"
+               {:path [:state-migration] :from-version from-version :to-version to-version}))
+      (let [migrated (try (migrate state from-version to-version context)
+                          (catch Throwable error
+                            (when-not (faults/recoverable? error) (throw error))
+                            (throw (ex-info "State migration failed"
+                                            {:type ::state-migration-failed :path [:state-migration]
+                                             :from-version from-version :to-version to-version} error))))]
+        (when (fn? migrated)
+          (fail! ::invalid-migrated-state "A state migration must return state data, not a function"
+                 {:path [:state-migration] :from-version from-version :to-version to-version}))
+        {:prepared (-> prepared
+                       (dissoc :migration)
+                       (assoc :input-state migrated)
+                       (assoc-in [:instance :state] migrated)
+                       (assoc-in [:instance :system :last-input-state] migrated))})
+      (catch Throwable error
+        {:failure (assoc (faults/diagnostic snapshot instance to-version :migrate error)
+                         :from-version from-version)}))))
+
 (defn- silent-result [prepared]
   {:id (get-in prepared [:instance :id]) :instance (:instance prepared)
    :state (get-in prepared [:instance :state]) :assignments [] :contributions []
@@ -359,6 +415,10 @@
 
       (and error (not (:expired? prepared)))
       {:failure (faults/diagnostic snapshot instance (:effect-version instance) :compile error)}
+
+      (and (:migration prepared) (not (:expired? prepared)))
+      (let [{migrated :prepared :keys [failure]} (migrate-prepared snapshot step prepared)]
+        (if failure {:failure failure} (attempt snapshot compiled factors migrated)))
 
       :else
       (try
@@ -458,7 +518,10 @@
   since the prior rendered frame. Registry definitions are captured at launch;
   default :reload-policy :pinned keeps them. :preserve-state adopts a newer
   definition while retaining state/time; :restart resets state and start time.
-  Both opt-in policies retain common parameter values and add new defaults.
+  :migrate retains time and transforms state once through the pure function
+  attached to the new compiled step (with-state-migration); a missing or failing
+  migration is a :migrate reload fault that keeps the last good revision/state.
+  The opt-in policies retain common parameter values and add new defaults.
   Retained parameters must validate against new schemas; a rejected candidate
   retains and evaluates the captured last-good revision.
   Captured authored durations remain fixed until relaunch. Explicit system AR
