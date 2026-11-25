@@ -333,25 +333,32 @@
     timing))
 
 (defn- start-publications! [owner executor grid]
-  (let [now (:now-ms owner)]
-    (letfn [(queue-slot [wanted previous]
-              (at! owner executor (timeline/deadline grid wanted) #(wake wanted previous)))
-            (wake [wanted previous]
+  (let [now (:now-ms owner)
+        half-period (/ (:period-ms grid) 2.0)]
+    (letfn [(queue-slot [wanted previous earliest]
+              (at! owner executor (max (timeline/deadline grid wanted) earliest)
+                   #(wake wanted previous earliest)))
+            (wake [wanted previous earliest]
               ;; Repatch and blackout share this gate. Select the eligible slot
               ;; after any wait for them, so a stalled wake cannot send old work.
               (locking (:lock owner)
                 (let [started (now) slot (timeline/slot-at grid started)]
-                  (if (< slot wanted)
-                    (queue-slot wanted previous)
+                  (if (or (< slot wanted) (< started earliest))
+                    (queue-slot wanted previous earliest)
                     (let [timing (send-slot! owner grid slot previous started)
-                          ;; A thread can be preempted between checking the clock and
-                          ;; entering the sink. It can also send part of a frame
-                          ;; before throwing. Space from either completion.
                           handed-off (or (:sent-by-ms timing)
                                          (when (:failed? timing) (:finished-at-ms timing))
-                                         started)]
-                      (queue-slot (timeline/next-output-slot grid slot handed-off (now)) slot))))))]
-      (queue-slot 1 0))))
+                                         started)
+                          finished (now)
+                          complete? (and (:sent-by-ms timing) (not (:expired-before-send? timing)))
+                          ;; A completed handoff may recover the next nominal
+                          ;; slot after the spacing guard opens. Retain the
+                          ;; conservative grid wake for failed or expired sends.
+                          next-slot (if complete?
+                                      (max (inc slot) (inc (timeline/slot-at grid finished)))
+                                      (timeline/next-output-slot grid slot handed-off finished))]
+                      (queue-slot next-slot slot (+ handed-off half-period)))))))]
+      (queue-slot 1 0 (timeline/deadline grid 1)))))
 
 (defn- render-slot! [owner render! ticket started]
   (try (render! (assoc ticket :started-at-ms started))

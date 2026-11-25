@@ -61,6 +61,11 @@ previously prepared packets. Supply a stable `:timeline-id` in the ticket and
 change it on transport seeks or playback changes to retire old buffered output. High refresh-rate local UI animation keeps its
 own presentation clock.
 
+After a successful handoff, the publisher waits at least half a period before
+the next handoff. If that guard opens during the next nominal slot, the
+publisher can use the rest of that slot. An elapsed slot still expires, and
+a failed handoff keeps the conservative grid recovery.
+
 Inspect `(scheduler/status owner)` for the following measurements.
 
 | Measurement | Meaning |

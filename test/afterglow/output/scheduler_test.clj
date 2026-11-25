@@ -353,6 +353,35 @@
           (is (pos? (get-in (scheduler/status owner) [:render-timing :skipped]))))
         (finally (scheduler/close! owner))))))
 
+(deftest a-late-successful-handoff-can-send-in-the-next-unexpired-slot
+  (let [clock (atom 0.0)
+        next-call (atom nil)
+        sent (atom [])
+        owner (scheduler/create {:now-ms #(deref clock)
+                                 :send! (fn [_ _]
+                                          (swap! sent conj @clock)
+                                          (swap! clock + 1.0))})]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due callback] (reset! next-call [due callback]))]
+        (scheduler/complete! owner (scheduler/begin-frame! owner 1 @patch {} false) (frame 90 0 0))
+        (scheduler/start! owner 25)
+        (is (== 25 (first @next-call)))
+        (reset! clock 44.0)
+        ((second @next-call))
+        (is (== 57.5 (first @next-call)))
+        (reset! clock 50.0)
+        ((second @next-call))
+        (is (= [44.0] @sent))
+        (is (== 57.5 (first @next-call)))
+        (reset! clock 57.5)
+        ((second @next-call))
+        (is (= [44.0 57.5] @sent))
+        (is (= {:slot 2 :deadline-ms 50.0 :sent-at-ms 57.5}
+               (select-keys (:output-timing (scheduler/status owner)) [:slot :deadline-ms :sent-at-ms])))
+        (is (zero? (:skipped-output-slots (scheduler/status owner))))
+        (is (== 75 (first @next-call))))
+      (finally (scheduler/close! owner)))))
+
 (deftest blocked-wire-resumes-on-a-future-slot-with-a-single-send
   (let [clock (atom 0.0) next-call (atom nil) started (atom [])
         owner (scheduler/create {:now-ms #(deref clock)
@@ -407,7 +436,7 @@
         (reset! clock 25.0)
         ((second @next-call))
         (is (== 48 (get-in (scheduler/status owner) [:output-timing :sent-at-ms])))
-        (is (== 75 (first @next-call)) "A send at 50 ms would bunch two real sink invocations"))
+        (is (== 60.5 (first @next-call)) "The spacing guard starts from the actual handoff at 48 ms"))
       (finally (scheduler/close! owner)))))
 
 (deftest packing-past-a-slot-cannot-introduce-an-expired-source
@@ -647,7 +676,7 @@
         (reset! clock 75)
         ((second @next-call))
         (is (= [[2 90]] @sent))
-        (is (== 125 (first @next-call)) "A 100 ms callback could be only ten ms after the last entry"))
+        (is (== 102.5 (first @next-call)) "The next wake respects half a period after the successful handoff"))
       (finally (scheduler/close! owner)))))
 
 (deftest failed-handoff-spaces-the-next-send-even-after-partial-delivery
