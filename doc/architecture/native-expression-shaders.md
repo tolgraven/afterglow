@@ -214,6 +214,21 @@ publication times, readback stalls and DMX bytes on the intended GPU when
 selecting that backend. These measurements used the float64 CPU renderer and
 a capture sink. [Moving-head shader calibration and precision](moving-head-shaders.md)
 
+## Periodic aim on a native shader
+
+A native aim or direction can evaluate a sine or cosine of a world coordinate
+plus a beat. The host reduces that beat to its equivalent phase before the
+shader receives a float32 uniform. Elapsed and absolute beats keep distinct
+bindings. Ordinary fields and expressions inside floor or fract retain their
+existing arithmetic. The original double-precision expression remains available
+for CPU evaluation. The host uses it if the captured beat plus a position can
+round by more than one float32 step at unit scale even in double precision.
+
+This removes the avoidable clock rounding before the spatial addition. Other
+GPU operations and results still use float32. Physical DMX16 correctness should
+be checked against the reference for the selected rig and expression graph.
+[Tolglow mixed-stage parity evidence](https://github.com/tolgraven/tolglow/issues/609)
+
 ## Readback for uniform groups
 
 On Mesa 25.0.7 llvmpipe, a 20,000-head group with changing RGB and focus

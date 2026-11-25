@@ -54,6 +54,41 @@
       (finally (.close runner)))
     (is (thrown? clojure.lang.ExceptionInfo (gpu/evaluate! runner env)))))
 
+(defn- beat-angle [op axis clock]
+  (operation op (operation :add {:op :position :axis axis} {:op :beat :clock clock})))
+
+(deftest periodic-native-geometry-keeps-beat-clocks-and-ordinary-fields-separate
+  (let [private-key ::gpu/beat-phase-0
+        absolute (beat-angle :cos :x :absolute)
+        elapsed (beat-angle :sin :z :elapsed)
+        fields {:aim (operation :vec3 absolute (const-node 1.0) elapsed)
+                :direction (operation :vec3 (operation :floor absolute) (const-node 0.0) (const-node 1.0))
+                :color (operation :vec3 (operation :fract {:op :beat :clock :absolute})
+                                  (param private-key :number) (const-node 0.75))}
+        positions [[0.55 3.5 -1.5] [-2.75 3.5 0.9]]
+        capture {:beat 200000.75 :elapsed-beats 18.150000000000123 :params {private-key 0.25}}
+        alternate (assoc capture :beat 18.125 :elapsed-beats 725000.375)
+        group (gpu/group fields positions)
+        values (zipmap (map (juxt :path #(contains? % :phase-position-ceiling)) (:bindings group))
+                       (gpu/capture-inputs (:bindings group) capture))
+        reference (ir/compile-batch fields)]
+    (is (= [200000.75] (values [[:beat] false])))
+    (is (= [0.25] (values [[:params private-key] false])))
+    (is (< (abs (first (values [[:beat] true]))) Math/PI))
+    (is (< (abs (first (values [[:elapsed-beats] true]))) Math/PI))
+    (is (not= (values [[:beat] true]) (values [[:elapsed-beats] true])))
+    (with-open [runner (gpu/open! fields positions)]
+      (doseq [env [capture alternate]]
+        (let [expected (ir/evaluate-batch reference env positions)
+              actual (gpu/evaluate! runner env)]
+          (verify expected actual)
+          (doseq [field [:direction :color]]
+            (is (= (vec (get-in expected [:outputs field :values]))
+                   (vec (get-in actual [:outputs field :values])))))))
+      (doseq [bad [(dissoc capture :elapsed-beats) (assoc capture :beat ##Inf)
+                   (assoc capture :beat 1.0e18)]]
+        (is (thrown? clojure.lang.ExceptionInfo (gpu/evaluate! runner bad)))))))
+
 (deftest zero-size-and-nonfinite-results
   (with-open [runner (gpu/open! fields [])]
     (verify (ir/evaluate-batch (ir/compile-batch fields) env []) (gpu/evaluate! runner env)))

@@ -49,6 +49,31 @@
     (is (= :stopped (:active (compute/status owner))))
     (is (true? (get-in (compute/status owner) [:session :closed?])))))
 
+(deftest large-clocks-use-the-original-double-precision-aim-before-packing
+  (let [fields {:aim {:op :vec3
+                      :args [{:op :sin :args [{:op :add
+                                              :args [{:op :position :axis :x}
+                                                     {:op :beat :clock :absolute}]}]}
+                             {:op :const :value 2.0} {:op :const :value 3.0}]}}
+        plan (ir/compile-batch fields)
+        group (compute/prepare-group fields [[0.5 0 0]] plan)
+        blocks (fn [beat] [{:kind :batch :batch
+                            {:target-ids [:spot] :field-request {:group group :env {:beat beat}}}}])
+        owner (compute/open! {:compute-backend :native-gpu :budget-ms 5000})]
+    (try
+      (let [beat 1.0e18
+            reference ((compute/frame-renderer nil (System/nanoTime)) patch (blocks beat) {})
+            actual ((compute/frame-renderer owner (System/nanoTime)) patch (blocks beat) {})]
+        (is (= (frame/portable-frame reference) (frame/portable-frame actual)))
+        (is (= 0 (:native-dispatches (compute/status owner))))
+        (is (= 1 (:cpu-fallbacks (compute/status owner))))
+        (is (= :afterglow.render.gpu.expressions/beat-phase
+               (get-in (compute/status owner) [:last-fallback :type]))))
+      ((compute/frame-renderer owner (System/nanoTime)) patch (blocks 200000.75) {})
+      (is (= 1 (:native-dispatches (compute/status owner))))
+      (is (= 1 (:cpu-fallbacks (compute/status owner))))
+      (finally (compute/close! owner)))))
+
 (deftest timed-out-fields-and-physical-movement-share-one-deadline
   (let [layers (blocks 0.75)
         owner (compute/open! {:compute-backend :native-gpu :movement-backend :native-gpu :budget-ms 100})
