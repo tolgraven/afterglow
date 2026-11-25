@@ -12,6 +12,7 @@
 
 (defn create []
   {:definitions (volatile! {}) :active (volatile! {}) :oscillators (volatile! {})
+   :oscillator-anchors (volatile! {})
    :executor (delay (ThreadPoolExecutor. 2 2 30 TimeUnit/SECONDS (ArrayBlockingQueue. 32)
                                           (threads "afterglow-reactive-sampler") (ThreadPoolExecutor$AbortPolicy.)))
    :scheduler (delay (doto (ScheduledThreadPoolExecutor. 1 (threads "afterglow-reactive-schedule"))
@@ -20,8 +21,9 @@
 (defn fork [manager] (assoc manager :active (volatile! {})))
 
 ;; Named oscillators are portable data. Their committed position is derived
-;; only from the frozen db's transport, so replaying the same publications
-;; reproduces the same buckets.
+;; from frozen db transports. One anchor per oscillator, advanced only by owner
+;; publications, keeps bar and phrase periods continuous across meter changes,
+;; so replaying the same publications reproduces the same buckets.
 (defn- validate-oscillator [id {:keys [period phase] :or {phase 0} :as definition}]
   (when-not (and (keyword? id) (map? definition) (= #{} (disj (set (keys definition)) :period :phase))
                  (map? period) (= 1 (count period)) (#{:beats :bars :phrases} (ffirst period))
@@ -31,13 +33,23 @@
                     {:type :afterglow.reactive/invalid-oscillator :oscillator id :definition definition})))
   {:period period :phase phase})
 
-(defn register-oscillator! [manager id definition]
-  (vswap! (:oscillators manager) assoc id (validate-oscillator id definition))
-  id)
+(defn register-oscillator!
+  "Register or replace a definition. A new or changed definition restarts its
+  anchor and clears the bucket of every active source following it, so the
+  next publication samples even when the bucket number is unchanged."
+  [manager id definition]
+  (let [definition (validate-oscillator id definition)]
+    (when-not (= definition (get @(:oscillators manager) id))
+      (vswap! (:oscillators manager) assoc id definition)
+      (vswap! (:oscillator-anchors manager) dissoc id)
+      (doseq [[_ entry] @(:active manager) :when (= id (:oscillator entry))]
+        (vreset! (:timer entry) nil)))
+    id))
 
 (defn remove-oscillator! [manager id]
   (let [present? (contains? @(:oscillators manager) id)]
     (vswap! (:oscillators manager) dissoc id)
+    (vswap! (:oscillator-anchors manager) dissoc id)
     present?))
 
 (defn oscillators [manager] @(:oscillators manager))
@@ -47,18 +59,57 @@
     (ex-info (str "Unknown reactive oscillator " id "; registered oscillators: " registered)
              {:type :afterglow.reactive/unknown-oscillator :oscillator id :registered registered})))
 
+(defn- oscillator-clock [id db]
+  (let [{:keys [beat meter]} (time/frame-clock db)]
+    (when (some? beat)
+      (when-not (time/finite-number? beat)
+        (throw (ex-info "Oscillator transport beat must be finite or nil" {:oscillator id})))
+      ;; A decimal beat divided by a ratio period may not terminate.
+      {:beat (if (decimal? beat) (rationalize beat) beat)
+       :meter (time/normalize-meter meter)
+       :owner [(:show-id db) (:epoch db)]})))
+
+(defn- anchored-position [{:keys [period]} {:keys [beat position meter]} at-beat]
+  (+ position (/ (- at-beat beat) (time/duration->beats period meter))))
+
+(defn- advance-anchor
+  "A new show identity or epoch starts at phase + beat / period. A meter change
+  re-anchors at the current beat, continuing from the position the previous
+  meter reached there. Absent a meter map, the change is placed at the first
+  publication that carries it."
+  [{:keys [phase] :as definition} anchor {:keys [beat meter owner]}]
+  (cond
+    (or (nil? anchor) (not= owner (:owner anchor)))
+    {:owner owner :meter meter :beat 0 :position phase}
+
+    (not= meter (:meter anchor))
+    {:owner owner :meter meter :beat beat :position (anchored-position definition anchor beat)}
+
+    :else anchor))
+
+(defn observe-oscillators!
+  "Advance every oscillator's anchor from one committed db on the owner. A
+  malformed transport leaves the anchor; captures report that error."
+  [manager db]
+  (doseq [[id definition] @(:oscillators manager)]
+    (try
+      (when-let [clock (oscillator-clock id db)]
+        (vswap! (:oscillator-anchors manager) update id #(advance-anchor definition % clock)))
+      (catch Exception _ nil))))
+
 (defn oscillator-position
   "Unwrapped cycle position of a named oscillator at the committed transport
-  beat: phase + beat / period-in-beats, using the committed meter. Exact when
-  the beat and definition are rational. Nil while the beat is unavailable."
+  beat. Within one meter it is anchor position + elapsed beats / period-in-beats;
+  from a fresh anchor that is phase + beat / period-in-beats. Exact when the beat
+  and definition are rational. Nil while the beat is unavailable. Pure: it never
+  advances the stored anchor."
   [manager id db]
-  (let [{:keys [period phase] :as definition} (get @(:oscillators manager) id)]
+  (let [definition (get @(:oscillators manager) id)]
     (when-not definition (throw (unknown-oscillator manager id)))
-    (let [{:keys [beat meter]} (time/frame-clock db)]
-      (when (some? beat)
-        (when-not (time/finite-number? beat)
-          (throw (ex-info "Oscillator transport beat must be finite or nil" {:oscillator id})))
-        (+ phase (/ beat (time/duration->beats period (or meter {}))))))))
+    (when-let [{:keys [beat] :as clock} (oscillator-clock id db)]
+      (anchored-position definition
+                         (advance-anchor definition (get @(:oscillator-anchors manager) id) clock)
+                         beat))))
 
 (defn- sampling-interval [interval cycle-position]
   (let [[unit value] (when (and (map? interval) (= 1 (count interval))) (first interval))]

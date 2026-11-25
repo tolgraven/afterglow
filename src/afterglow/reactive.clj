@@ -462,9 +462,12 @@
   "Register or replace a named musical oscillator used by
   {:interval {:cycles n} :oscillator id} coeffects. The portable definition is
   {:period {:beats|:bars|:phrases n} :phase p}. Its unwrapped cycle position at
-  a committed transport beat is p + beat / period-in-beats, so a tempo change
-  moves boundaries in time but never in cycles. Bars and phrases use the
-  committed transport meter."
+  a committed transport beat starts as p + beat / period-in-beats, so a tempo
+  change moves boundaries in time but never in cycles. Bars and phrases use the
+  committed meter; every publication advances an anchor, and a meter change
+  continues from the position already reached instead of jumping. A new show
+  ID or epoch restarts the anchor. Replacing the definition with a different
+  one restarts the anchor and makes each following source sample again."
   [system id definition]
   (locking (:lock system)
     (ensure-open! system) (outside-evaluation!)
@@ -699,6 +702,8 @@
                              (write-state! system
                                            (-> (reduce #(mark-dependents %1 [:source %2]) state changed)
                                                (assoc :source-snapshot captured) (update :generation inc)))
+                             ;; Oscillator anchors follow every publication, observed or not.
+                             (coeffects/observe-oscillators! (:coeffects system) (:db captured))
                              (refresh-coeffects! system)
                              (loop []
                                (when (:prune? (state-of system))
