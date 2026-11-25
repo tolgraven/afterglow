@@ -1,7 +1,8 @@
 (ns afterglow.control.model
-  "Immutable show commands. Time and identity enter through the command envelope;
+  "Immutable show commands. Logical time enters through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
+            [afterglow.control.edit-history :as edit-history]
             [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
             [afterglow.control.targets :as targets]
@@ -363,6 +364,7 @@
     :show/restart
     (let [time (time! model command)]
       {:model (-> model (update :epoch inc) (assoc :instances {} :time-ms time)
+                  (update :control dissoc :edit-history)
                   (assoc-in [:control :next-instance] 0)
                   (assoc-in [:control :next-order] 0)
                   (assoc-in [:control :history] {})
@@ -370,20 +372,152 @@
        :events [{:type :show/restarted :epoch (inc (:epoch model))}]})
     (reject! :unknown-operation "Unknown command operation" {:op op})))
 
+(def ^:private gesture-operations
+  #{:gesture/begin :gesture/sample :gesture/end :gesture/cancel})
+
+(def edit-history-limit
+  "Maximum number of retained operator edit nodes, including the root."
+  128)
+
+(defn- edit-history-operation? [op]
+  (or (gesture-operations op) (#{:history/undo :history/redo :history/select} op)))
+
+(defn- parameter-target [{:keys [instance-id param]}]
+  [:instance-param instance-id param])
+
+(defn- target-label [id label]
+  (if (and (string? label) (seq label))
+    label
+    (if (keyword? id) (subs (str id) 1) id)))
+
+(defn edit-target-display
+  "Return portable cue/effect labels for a live edit target. Completed edits
+  retain these labels independently of their target's availability."
+  [model [kind id]]
+  (when (= :instance-param kind)
+    (let [{:keys [cue-id effect-id definition]} (get-in model [:instances id])]
+      (not-empty
+        (cond-> {}
+          (identifier? cue-id)
+          (assoc :cue-id cue-id :cue-label (target-label cue-id (get-in model [:registry :cues cue-id :name])))
+          (identifier? effect-id)
+          (assoc :effect-id effect-id :effect-label (target-label effect-id (:name definition))))))))
+
+(defn- live-scalar-cell [instance param]
+  (let [schema (get-in instance [:definition :params param])
+        value (get-in instance [:params param])]
+    (when (and (= :running (:phase instance))
+               (#{:number :integer} (:type schema))
+               (params/valid-value? schema value))
+      {:type (:type schema) :value value})))
+
+(defn- history-cell [model history [kind id param :as target]]
+  (when (= :instance-param kind)
+    (when-let [cell (live-scalar-cell (get-in model [:instances id]) param)]
+      (assoc cell :generation (get-in history [:generations target] 0)))))
+
+(defn track-parameter-generations
+  "Advance tracked scalar generations across an instance transition outside
+  the command reducer. A parameter can disappear and later return with a new
+  default that equals an earlier sample. Observe the loss of the live cell so
+  undo, cancel and capture cannot claim the new value."
+  [before model]
+  (let [old-instances (:instances before)
+        instances (:instances model)]
+    (reduce-kv (fn [model [kind id param :as target] _]
+                 (let [previous (get old-instances id)
+                       current (get instances id)]
+                   (if (and (= :instance-param kind)
+                            (or (not= (:phase previous) (:phase current))
+                                (not (identical? (:params previous) (:params current)))
+                                (not (identical? (:definition previous) (:definition current))))
+                            (not= (live-scalar-cell previous param) (live-scalar-cell current param)))
+                     (update-in model [:control :edit-history :generations target] inc)
+                     model)))
+               model
+               (get-in model [:control :edit-history :generations] {}))))
+
+(defn- retain-history-generations [history op target]
+  (case op
+    :gesture/begin
+    (update history :generations #(assoc % target (get % target 0)))
+
+    (:gesture/end :gesture/cancel)
+    (let [targets (into (set (keys (:open history))) (keep :target) (vals (:nodes history)))]
+      (update history :generations select-keys targets))
+
+    history))
+
+(defn edit-history-snapshot
+  "Return the saved edit tree, with open gestures considered ended in target
+  order. Conflict and no-op handling match live end actions. Sampled values
+  are already canonical, so saving needs no writes, commands or receipts."
+  [model]
+  (when-let [history (get-in model [:control :edit-history])]
+    (dissoc
+      (reduce (fn [history [target gesture]]
+                (let [result (edit-history/apply-action
+                               history {target (history-cell model history target)}
+                               (assoc gesture :op :gesture/end :target target
+                                      :target-display (edit-target-display model target)))]
+                  (retain-history-generations (:history result) :gesture/end target)))
+              history
+              (sort-by (comp pr-str key) (:open history)))
+      :open)))
+
+(defn- apply-history-operation [model {:keys [op instance-id param control-id gesture-id] :as command} operator-id]
+  (let [gesture? (gesture-operations op)
+        target (when gesture? (parameter-target command))
+        history (or (get-in model [:control :edit-history]) (edit-history/new-history edit-history-limit))
+        _ (when gesture?
+            (require! (and (identifier? instance-id) (keyword? param)
+                           (identifier? control-id) (identifier? gesture-id))
+                      :invalid-gesture "Gesture needs an instance, scalar parameter, control and gesture ID"))
+        targets (if gesture? [target] (keys (:generations history)))
+        cells (into {} (keep (fn [target]
+                               (when-let [cell (history-cell model history target)]
+                                 [target cell]))) targets)
+        action (cond-> (assoc command :actor operator-id :target target)
+                 (= :gesture/end op) (assoc :target-display (edit-target-display model target)))
+        proposal (edit-history/apply-action history cells action)
+        _ (require! (= :accepted (:status proposal)) (:code proposal)
+                    "Edit history command rejected" (select-keys proposal [:target]))
+        next-history (retain-history-generations (:history proposal) op target)
+        result (reduce (fn [{:keys [model events]} [[_ id param] value]]
+                         (let [write (apply-operation model {:op :param/set :instance-id id :param param :value value})]
+                           {:model (:model write) :events (into events (:events write))}))
+                       {:model model :events []}
+                       (sort-by (comp pr-str key) (:writes proposal)))]
+    (-> (if (= history next-history) result (assoc-in result [:model :control :edit-history] next-history))
+        (assoc :result (assoc (select-keys proposal [:discarded])
+                             :history-cursor (:cursor next-history)
+                             :history-position (edit-history/position next-history))))))
+
+(defn- track-external-write [model {:keys [op instance-id param] :as command} result]
+  (if (and (= :param/set op) (get-in model [:control :edit-history :generations]))
+    (let [target (parameter-target command)
+          path [:control :edit-history :generations target]
+          value-path [:instances instance-id :params param]]
+      (if (and (some? (get-in model path))
+               (not= (get-in model value-path) (get-in (:model result) value-path)))
+        (update-in result (into [:model] path) inc)
+        result))
+    result))
+
 (defn- receipt [model command status]
   {:command-id (:command-id command) :show-id (:show-id model)
    :epoch (:epoch model) :revision (:revision model) :status status})
 
-(defn- remember [model command ack]
+(defn- remember [model command ack operator-id]
   (let [id (:command-id command)
         order (conj (get-in model [:control :history-order]) id)
         limit (get-in model [:control :history-limit])
         remove-count (max 0 (- (count order) limit))
-        evicted (take remove-count order)]
+        evicted (take remove-count order)
+        entry (cond-> {:command command :ack ack} operator-id (assoc :operator-id operator-id))]
     (-> model
         (assoc-in [:control :history-order] (vec (drop remove-count order)))
-        (update-in [:control :history]
-                   #(apply dissoc (assoc % id {:command command :ack ack}) evicted)))))
+        (update-in [:control :history] #(apply dissoc (assoc % id entry) evicted)))))
 
 (defn apply-command
   "Apply one command atomically as data. Accepted writes increment revision.
@@ -391,37 +525,55 @@
   accepted IDs return their original ack and no events; a reused ID with changed
   payload is rejected. Retry history is bounded, so callers must expire sessions
   rather than replay commands after receipts have been evicted. Restart changes
-  epoch and drops active instances; old epoch requests cannot alter the new show."
-  [model command]
-  (try
-    (require! (map? command) :invalid-command "Command must be a map")
-    (require! (identifier? (:command-id command)) :invalid-command "Command needs a stable ID")
-    (require! (= (:show-id model) (:show-id command)) :wrong-show "Command targets a different show")
-    (require! (= (:epoch model) (:epoch command)) :stale-epoch "Show epoch changed")
-    (require! (some? (:source command)) :invalid-command "Command needs a source")
-    (if-let [cached (get-in model [:control :history (:command-id command)])]
-      (do (require! (= command (:command cached)) :command-id-conflict "Command ID reused with different data")
-          {:model model :events [] :ack (:ack cached)})
-      (do
-        (when (contains? command :expected-revision)
-          (require! (= (:revision model) (:expected-revision command))
-                    :stale-revision "Show revision changed"))
-        (when (contains? command :time-ms) (time! model command))
-        (let [{next-model :model events :events result :result} (apply-operation model command)
-              updated (cond-> (update next-model :revision inc)
-                        (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
-              ack (merge (receipt updated command :accepted) result)
-              remembered (remember updated command ack)
-              remembered (if (contains? model ::events/pending)
-                           (events/collect remembered :control
-                             {:kind :command :id (or (get-in command [:source :adapter])
-                                                     (get-in command [:source :type]) (:source command))}
-                             events)
-                           remembered)]
-          {:model remembered :events (vec events) :ack ack})))
-    (catch clojure.lang.ExceptionInfo e
-      (if-let [code (:control/error (ex-data e))]
-        {:model model :events []
-         :ack (assoc (receipt model command :rejected) :code code :message (.getMessage e)
-                     :details (:details (ex-data e)))}
-        (throw e)))))
+  epoch and drops active instances and their edit history.
+
+  Gesture and history operations require an :operator-id from a trusted caller
+  in the separate authority argument. This is a public actor identifier for
+  history and events. Adapters resolve it independently of command payloads.
+  History navigation checks both the expected cursor and the edit-tree position
+  within the show epoch, including after a retry receipt has been evicted.
+  Ordinary :param/set keeps its original validation and numeric representation.
+  Generation tracking compares canonical model values using Clojure equality."
+  ([model command] (apply-command model command nil))
+  ([model command authority]
+   (try
+     (require! (map? command) :invalid-command "Command must be a map")
+     (require! (identifier? (:command-id command)) :invalid-command "Command needs a stable ID")
+     (require! (= (:show-id model) (:show-id command)) :wrong-show "Command targets a different show")
+     (require! (= (:epoch model) (:epoch command)) :stale-epoch "Show epoch changed")
+     (require! (some? (:source command)) :invalid-command "Command needs a source")
+     (let [operator-id (when (edit-history-operation? (:op command))
+                         (let [id (:operator-id authority)]
+                           (require! (identifier? id) :operator-required "Edit history requires a trusted operator")
+                           id))]
+       (if-let [cached (get-in model [:control :history (:command-id command)])]
+         (do
+           (require! (= command (:command cached)) :command-id-conflict "Command ID reused with different data")
+           (require! (= operator-id (:operator-id cached))
+                     :command-id-conflict "Command ID reused with different operator")
+           {:model model :events [] :ack (:ack cached)})
+         (do
+           (when (contains? command :expected-revision)
+             (require! (= (:revision model) (:expected-revision command))
+                       :stale-revision "Show revision changed"))
+           (when (contains? command :time-ms) (time! model command))
+           (let [{next-model :model events :events result :result}
+                 (if operator-id (apply-history-operation model command operator-id)
+                     (track-external-write model command (apply-operation model command)))
+                 updated (cond-> (update next-model :revision inc)
+                           (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
+                 ack (merge (receipt updated command :accepted) result)
+                 remembered (remember updated command ack operator-id)
+                 remembered (if (contains? model ::events/pending)
+                              (events/collect remembered :control
+                                {:kind :command :id (or operator-id (get-in command [:source :adapter])
+                                                        (get-in command [:source :type]) (:source command))}
+                                events)
+                              remembered)]
+             {:model remembered :events (vec events) :ack ack}))))
+     (catch clojure.lang.ExceptionInfo e
+       (if-let [code (:control/error (ex-data e))]
+         {:model model :events []
+          :ack (assoc (receipt model command :rejected) :code code :message (.getMessage e)
+                      :details (:details (ex-data e)))}
+         (throw e))))))

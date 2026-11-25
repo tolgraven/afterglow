@@ -33,10 +33,19 @@ Every write is a normal `:param/set` command carrying the exact instance ID.
 
 ## Physical strip, master and tempo
 
-The strip receives source-derived mode and 14-bit value messages for the touched
-component. Level, centered, point and dark modes are diffed; an untouched strip
-is cleared. Handoff and orderly close restore Push's default point/return mode.
-Disconnect cleanup avoids writes to absent hardware.
+The strip normally shows and edits the selected instance's committed system
+opacity, including effects without authored parameters. The note 12 touch
+captures the selection. A selection or show change ends the write target, so
+the next target requires a release and another touch. The LED bar follows the
+current selection. A strip without a selection or an encoder target goes dark.
+Push 2 sends its position as pitch bend on zero-based MIDI channel 0 using
+eight effective bits.
+[Ableton Push 2 MIDI and Display Interface, section 2.10](https://github.com/Ableton/push-interface/blob/main/doc/AbletonPush2MIDIDisplayInterface.asc#210-touch-strip)
+
+Touching an encoder before the strip selects the encoder's existing strip route.
+Level, centered, point and dark feedback modes are diffed. Handoff and orderly
+close restore Push's default point/return mode. Disconnect cleanup skips writes
+to absent hardware.
 
 Touching the master encoder (note 8) assigns the strip to master level. Turning
 CC 79 adjusts master by 1% per tick, or 0.1% with Shift. Touching the tempo encoder

@@ -233,3 +233,46 @@
              (finally (session/close! device)))))
     (is (= 2 (count (distinct (map :command-id @log)))))
     (is (= [:one-shot :one-shot] (mapv :launch-mode (vals (:instances @show)))))))
+
+(deftest captured-show-is-checked-again-before-admitting-an-active-tap
+  (let [{:keys [options show log input!]} (harness {})
+        armed? (atom false)
+        reads (atom 0)
+        device (push/connect! (assoc options :model!
+                                     (fn []
+                                       (when (and @armed? (= 2 (swap! reads inc)))
+                                         (swap! show assoc :show-id :replacement))
+                                       @show)))]
+    (try
+      (swap! show #(-> (command % "outside-wash" 0 {:op :cue/launch :cue-id :wash}) :model))
+      (input! 10 [0x93 13 96])
+      (reset! armed? true)
+      (input! 15 [0x83 13 0])
+      (is (= :replacement (:show-id @show)))
+      (is (empty? @log))
+      (is (= :running (get-in @show [:instances "0:1" :phase])))
+      (is (= :stale-epoch (get-in (session/snapshot device) [:last-ack :reason])))
+      (finally (session/close! device)))))
+
+(deftest active-cue-selection-fences-an-existing-opacity-strip-contact
+  (let [{:keys [options show log input!]} (harness {})
+        options (-> options (assoc-in [:layout :touch-strip] {:channel 5})
+                    (assoc-in [:layout :touch-strip-touch] {:channel 6 :note 24}))
+        device (push/connect! options)]
+    (try
+      (swap! show #(-> (command % "outside-a" 0 {:op :cue/launch :cue-id :wash}) :model
+                       (command "outside-b" 0 {:op :cue/launch :cue-id :wash-b}) :model))
+      (input! 10 [0xb5 42 127])
+      (input! 11 [0x93 13 96])
+      (input! 12 [0x83 13 0])
+      (input! 13 [0x96 24 127])
+      (input! 14 [0x93 14 96])
+      (input! 15 [0x83 14 0])
+      (input! 16 [0xe5 0 0])
+      (is (empty? @log))
+      (input! 17 [0x86 24 0])
+      (input! 18 [0x96 24 127])
+      (input! 19 [0xe5 0 0])
+      (is (= [[:instance/opacity-set "0:2" 0.0]] (mapv (juxt :op :instance-id :value) @log)))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))))

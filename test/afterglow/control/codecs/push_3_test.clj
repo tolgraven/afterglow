@@ -41,3 +41,18 @@
 (deftest relative-encoders-use-twos-complement
   (is (= [0 1 63 -64 -1] (mapv push/signed-encoder [0 1 63 64 127])))
   (is (thrown? clojure.lang.ExceptionInfo (push/signed-encoder 128))))
+
+(deftest strip-contact-needs-a-distinct-captured-note
+  (let [layout (push/capture captured {:kind :touch-strip-touch :bytes [0x96 24 127]})
+        decode (partial push/decode (push/compile-layout layout))]
+    (is (= {:channel 6 :note 24} (:touch-strip-touch layout)))
+    (is (= :touch-strip-touch (:type (decode [0x96 24 127]))))
+    (is (true? (:pressed? (decode [0x96 24 127]))))
+    (is (false? (:pressed? (decode [0x96 24 0]))))
+    (is (false? (:pressed? (decode [0x86 24 0]))))
+    (is (nil? (decode [0x95 24 127])))
+    (is (= :touch-strip (:type (decode [0xe5 0 64]))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (push/capture captured {:kind :touch-strip-touch :bytes [0x93 12 127]})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (push/capture captured {:kind :touch-strip-touch :bytes [0x96 24 0]})))))

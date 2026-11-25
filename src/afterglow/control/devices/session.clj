@@ -8,8 +8,11 @@
 (defn create
   "Create an inert session. Required options: :session-id, :profile, :model!
   (snapshot fn), :dispatch! (command -> result/ack synchronously), :now-ms!.
-  A grid cue launch/release may return a queue receipt. Profiles can reconcile
-  those receipts against the committed model before input and feedback.
+  Grid cue launch/release and opted-in operator gestures may return queue
+  receipts. Commands may pin a captured :show-id and :epoch. A pending
+  gesture carries its final :completion promise. Profiles
+  reconcile receipts before input and feedback. A reconciliation that observes
+  a newer owner commit can request a fresh snapshot with :refresh-model? true.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
@@ -51,9 +54,12 @@
       :source {:adapter (:id profile) :session-id session-id}
       :time-ms (max (:time-ms model 0) now)})))
 
+(defn- show-identity [model]
+  [(:show-id model) (:epoch model)])
+
 (defn- adopt-epoch! [session model]
   (let [epoch (:epoch model) state @(:state session)]
-    (when-not (= [(:show-id model) epoch] [(:show-id state) (:epoch state)])
+    (when-not (= (show-identity model) (show-identity state))
       (update-state! session assoc :show-id (:show-id model) :epoch epoch
                      :local (if-let [reset-model (:reset-model (:profile (:options session)))]
                               (reset-model (:local state))
@@ -66,23 +72,39 @@
   (let [{:keys [dispatch! profile]} (:options session)]
     (loop [remaining (seq commands) count 0]
       (when-let [template (first remaining)]
-        (when (>= count 64)
+        ;; Push 2 can release 64 held pads and close eight encoder edits at once.
+        (when (>= count 72)
           (throw (ex-info "Device transition emitted too many commands" {})))
         ;; Admission time/identity are assigned here, including delayed releases.
         (let [envelope (envelope! session)
               scheduled-launch? (grid-launch? template)
               timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
-              stale? (and timed-cue? (some #(and (contains? template %)
-                                                (not= (get template %) (get envelope %)))
-                                          [:show-id :epoch]))
+              gesture? (and (:operator-gestures? profile)
+                            (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
+              captured? (or gesture? (and (contains? template :show-id) (contains? template :epoch)))
+              stale? (or (and captured? (not= (show-identity template) (show-identity envelope)))
+                         (and timed-cue? (some #(and (contains? template %)
+                                                     (not= (get template %) (get envelope %)))
+                                               [:show-id :epoch])))
               command (cond-> (merge template envelope)
                         (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
-              response (if stale? {:status :rejected :reason :stale-epoch} (dispatch! command))
-              ack (or (:ack response) response)]
+              response (cond
+                         stale? {:status :rejected :reason :stale-epoch}
+                         (and gesture? (= :gesture/end (:op command)))
+                         ;; Preserve feedback and continue releasing other controls.
+                         (try (dispatch! command)
+                              (catch Exception error
+                                (record-error! session error)
+                                {:status :rejected :reason :dispatch-error}))
+                         :else (dispatch! command))
+              ack (or (:ack response) response)
+              pending-gesture? (and gesture? (= :pending (:status ack))
+                                    (instance? clojure.lang.IPending (:completion ack)))]
           (when-not (or (#{:accepted :rejected} (:status ack))
-                        (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack))))
+                        (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack)))
+                        pending-gesture?)
             (throw (ex-info "dispatch! must return a synchronous command acknowledgement" {})))
-          (update-state! session assoc :last-ack ack)
+          (update-state! session assoc :last-ack (cond-> ack pending-gesture? (dissoc :completion)))
           (let [result (when-let [acknowledge (:ack profile)]
                          (acknowledge (:local @(:state session)) command ack))]
             (when result (update-state! session assoc :local (:state result)))
@@ -120,7 +142,7 @@
   (if-let [reconcile (get-in session [:options :profile :reconcile])]
     (let [result (reconcile (:local @(:state session)) model)]
       (enact! session result)
-      (if (seq (:commands result))
+      (if (or (:refresh-model? result) (seq (:commands result)))
         (let [model ((get-in session [:options :model!]))]
           (adopt-epoch! session model)
           model)
@@ -194,8 +216,10 @@
                    (resume! session))
                  (let [model (model!)]
                    (adopt-epoch! session model)
-                   (let [model (reconcile! session model)]
-                     (enact! session ((:input profile) (:local @(:state session)) event model (envelope! session model))))
+                   (let [reconciled (reconcile! session model)]
+                     (when (= (show-identity model) (show-identity reconciled))
+                       (enact! session ((:input profile) (:local @(:state session)) event
+                                        reconciled (envelope! session reconciled)))))
                    (refresh-session! session false)))))
            (catch Exception error
              (record-error! session error)

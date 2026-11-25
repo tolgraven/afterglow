@@ -30,22 +30,102 @@
                        :latched {:id :latched :version 1 :effect-id :wash}}}
      :pages {:main {:id :main :cells {[0 0] :held [1 0] :latched}}}}))
 
-(defn harness [profile-options]
+(defn harness [profile-options & [base-options]]
   (let [show (atom (initial-model)) log (atom []) receive (atom nil)
-        device (session/create
-                 {:session-id "push3-capture-test" :profile (push/profile (merge options profile-options))
-                  :display (:display profile-options)
-                  :model! #(deref show) :now-ms! (constantly 0)
-                  :dispatch! (fn [command]
-                               (let [result (model/apply-command @show command)]
-                                 (swap! log conj command) (reset! show (:model result)) result))
-                  :midi {:open! #(do (reset! receive %) :capture)
-                         :send! (fn [_ _] (throw (ex-info "Push 3 must not emit unverified bytes" {})))
-                         :close! (fn [_] (swap! log conj :closed))}})]
-    {:show show :log log :receive receive :device device}))
+        session-options {:session-id "push3-capture-test"
+                         :profile (push/profile (merge (or base-options options) profile-options))
+                         :display (:display profile-options)
+                         :model! #(deref show) :now-ms! (constantly 0)
+                         :dispatch! (fn [command]
+                                      (let [result (model/apply-command @show command)]
+                                        (swap! log conj command)
+                                        (reset! show (:model result))
+                                        result))
+                         :midi {:open! #(do (reset! receive %) :capture)
+                                :send! (fn [_ _] (throw (ex-info "Push 3 must not emit unverified bytes" {})))
+                                :close! (fn [_] (swap! log conj :closed))}}]
+    {:show show :log log :receive receive :device (session/create session-options) :options session-options}))
+
+(def ^:private strip-layout
+  (codec/capture layout {:kind :touch-strip-touch :bytes [0x96 24 127]}))
+
+(deftest captured-opacity-strip-targets-the-selected-activation-until-selection-changes
+  (let [views (atom [])
+        display {:device :push-3 :input :view :open! (constantly :display)
+                 :render! (fn [_ view] (swap! views conj view)) :close! (fn [_])}
+        {:keys [show log receive device] :as h}
+        (harness {:layout strip-layout :display display} (dissoc options :touch-strip-param))
+        selected #(get-in (session/snapshot device) [:local :selected-instance])
+        opacity #(get-in @show [:instances % :system :opacity])]
+    (try
+      (session/open! device)
+      (is (nil? (:touch-strip (peek @views))))
+      (@receive [0x93 12 127])
+      (let [a (selected)]
+        (is (= {:target :opacity :instance-id a :value 1.0} (:touch-strip (peek @views))))
+        (@receive [0x95 24 127])
+        (@receive [0xe5 0 0])
+        (is (= 1.0 (opacity a)))
+        (@receive [0x96 24 127])
+        (@receive [0xe6 0 0])
+        (is (= 1.0 (opacity a)))
+        (@receive [0xe5 0 0])
+        (is (= 0.0 (opacity a)))
+        (is (= 0.0 (get-in (peek @views) [:touch-strip :value])))
+        (let [external (merge (select-keys @show [:show-id :epoch :time-ms])
+                              {:source {:adapter :web} :command-id "remote-opacity"
+                               :op :instance/opacity-set :instance-id a :value 0.25})]
+          ((get-in h [:options :dispatch!]) external)
+          (session/refresh! device)
+          (is (= 0.25 (get-in (peek @views) [:touch-strip :value]))))
+        (@receive [0x93 13 127])
+        (let [b (selected)]
+          (is (not= a b))
+          (is (= {:target :opacity :instance-id b :value 1.0} (:touch-strip (peek @views))))
+          (@receive [0x96 24 127])
+          (@receive [0xe5 0 0])
+          (@receive [0x96 24 0])
+          (@receive [0xe5 0 0])
+          (is (= [0.25 1.0] (mapv opacity [a b])))
+          (@receive [0x96 24 127])
+          (@receive [0xe5 0 0])
+          (@receive [0x86 24 0])
+          (is (= [0.25 0.0] (mapv opacity [a b])))
+          (is (= [a b] (mapv :instance-id (filter #(= :push-3 (get-in % [:source :adapter]))
+                                                  (filter #(= :instance/opacity-set (:op %)) @log)))))
+          (is (= {:level 0.5 :count 5} (get-in @show [:instances b :params])))
+          (is (= 1.0 (:master @show)))
+          (is (false? (:blackout? @show)))))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))))
+
+(deftest opacity-sample-cannot-cross-show-replacement-with-the-same-instance-id
+  (let [{:keys [show log receive options]}
+        (harness {:layout strip-layout} (dissoc options :touch-strip-param))
+        after-model-read (atom nil)
+        device (session/create (assoc options :model! #(let [model @show]
+                                                        (when-let [after-read (first (reset-vals! after-model-read nil))]
+                                                          (after-read))
+                                                        model)))]
+    (try
+      (session/open! device)
+      (@receive [0x93 13 127])
+      (@receive [0x96 24 127])
+      (let [id (first (keys (:instances @show)))
+            opacity #(get-in @show [:instances id :system :opacity])]
+        (reset! after-model-read #(swap! show assoc :show-id "replacement"))
+        (@receive [0xe5 0 0])
+        (is (= {:status :rejected :reason :stale-epoch} (:last-ack (session/snapshot device))))
+        (is (= "replacement" (:show-id (session/snapshot device))))
+        (is (= 1.0 (opacity)))
+        (is (= [:cue/launch] (mapv :op @log)))
+        (@receive [0x96 24 0])
+        (is (nil? (get-in (session/snapshot device) [:local :strip-touch]))))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))))
 
 (deftest actual-session-launches-and-edits-without-outbound-protocol
-  (let [{:keys [show log receive device]} (harness {})]
+  (let [{:keys [show log receive device]} (harness {:layout strip-layout})]
     (try
       (is (= [] @log))
       (session/open! device)
@@ -60,6 +140,7 @@
         (is (= 1.0 (get-in @show [:instances id :params :level])))
         (@receive [0xe5 127 127])
         (is (= 10 (get-in @show [:instances id :params :count])))
+        (is (= 1.0 (get-in @show [:instances id :system :opacity])))
         (@receive [0x92 9 127])
         (is (= #{:level} (get-in (session/snapshot device) [:local :touches])))
         (@receive [0x82 9 0])
@@ -69,6 +150,34 @@
         (is (= [] (:errors (session/snapshot device)))))
       (finally (session/close! device)))
     (is (= :closed (last @log)))))
+
+(deftest mpe-member-bend-cannot-follow-a-fixed-strip-gesture
+  (let [settings {:layout strip-layout :expression-mode :mpe
+                  :zone {:manager-channel 0 :member-channels [1 2]}
+                  :mpe-note-cells {40 [0 0] 41 [1 0]}}
+        {:keys [show receive device]} (harness settings (dissoc options :touch-strip-param))
+        selected #(get-in (session/snapshot device) [:local :mpe :selected-instance])
+        opacity #(get-in @show [:instances % :system :opacity])]
+    (try
+      (session/open! device)
+      (@receive [0x91 40 127])
+      (let [a (selected)]
+        (@receive [0x96 24 127])
+        (@receive [0xe1 0 0])
+        (is (= 1.0 (opacity a)))
+        (@receive [0xe5 0 0])
+        (is (= 0.0 (opacity a)))
+        (@receive [0x92 41 127])
+        (let [b (selected)]
+          (is (not= a b))
+          (@receive [0xe5 0 0])
+          (is (= 1.0 (opacity b)))
+          (@receive [0x96 24 0])
+          (@receive [0x96 24 127])
+          (@receive [0xe5 0 0])
+          (is (= 0.0 (opacity b)))))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))))
 
 (deftest button-and-pad-presses-are-edges-not-repeat-triggers
   (let [{:keys [show receive device]} (harness {})]
