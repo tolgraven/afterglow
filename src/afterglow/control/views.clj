@@ -2,6 +2,7 @@
   "Pure device-independent projections. Local focus, menus and raw protocol
   buffers belong to adapters; these views describe committed show state."
   (:require [afterglow.control.categories :as categories]
+            [afterglow.control.effect-selection :as effect-selection]
             [afterglow.control.instance-order :as instance-order]
             [afterglow.control.pages :as pages]))
 
@@ -60,17 +61,19 @@
   "Public committed control projection. Does not expose resource handles,
   deduplication history, raw definition code or arbitrary private model fields."
   [model]
-  (merge (select-keys model [:show-id :epoch :revision :time-ms :master :blackout? :transport])
-         {:cues (mapv #(cue-view model %) (sort-by str (keys (get-in model [:registry :cues]))))
-          :pages (mapv #(page-view model %) (pages/page-ids model))
-          :groups (categories/group-view model)
-          :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
-                                                   :started-at-ms :release-at-ms :duration-ms
-                                                   :priority :order :render-priority :render-order :phase :launch-mode])
-                                  :categories (categories/definition-categories (:definition %))
-                                  :system (merge {:opacity 1.0 :paused? false}
-                                                 (select-keys (:system %) [:opacity :paused? :attack :release])))
-                           (instance-order/ordered model))}))
+  (let [instances (instance-order/ordered model)]
+    (merge (select-keys model [:show-id :epoch :revision :time-ms :master :blackout? :transport])
+           {:cues (mapv #(cue-view model %) (sort-by str (keys (get-in model [:registry :cues]))))
+            :pages (mapv #(page-view model %) (pages/page-ids model))
+            :groups (categories/group-view model)
+            :effect-selection (effect-selection/projection model instances)
+            :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
+                                                     :started-at-ms :release-at-ms :duration-ms
+                                                     :priority :order :render-priority :render-order :phase :launch-mode])
+                                    :categories (categories/definition-categories (:definition %))
+                                    :system (merge {:opacity 1.0 :paused? false}
+                                                   (select-keys (:system %) [:opacity :paused? :attack :release])))
+                             instances)})))
 
 (defn diff-view
   "Return changed and removed top-level values. A transport adds epoch and

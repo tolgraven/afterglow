@@ -33,6 +33,48 @@
        (apply! {:op :registry/publish :kind :effects :definition effect})
        (apply! {:op :cue/put :cue {:id :red :effect-id :wash :params {:level 0.6}}}))))
 
+(deftest effect-selection-publishes-one-ordered-receipt-and-replays-safely
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (configured)
+                 (apply! launch)
+                 (apply! (assoc launch :launch {:params {:level 0.3}}))
+                 (apply! launch)
+                 (apply! {:op :instance/move-after :instance-id "0:1" :after-instance-id "0:3"}))
+        cmd (command show {:op :effect-selection/toggle :control :solo
+                           :selector {:categories [:intensity] :instance-ids ["0:1" "0:2"]}
+                           :expected-revision (:revision show)})
+        {:keys [model ack events]} (model/apply-command show cmd)
+        ids ["0:2" "0:1"]
+        change {:control :solo :mode :exclusive :instance-ids ids
+                :changed-instance-ids ids :selected-instance-ids ids}
+        selection (:effect-selection (views/snapshot model))]
+    (is (= :accepted (:status ack)))
+    (is (= (inc (:revision show)) (:revision ack) (:revision model)))
+    (is (= change (select-keys ack (keys change))))
+    (is (= [(assoc change :type :effect-selection/changed)] events))
+    (is (= ["0:2" "0:3" "0:1"] (mapv :id (:instances selection))))
+    (is (= ids (:included-instance-ids selection)))
+    (is (= (mapv :params (:instances (views/snapshot show)))
+           (mapv :params (:instances (views/snapshot model)))))
+    (is (= {:model model :ack ack :events []} (model/apply-command model cmd)))
+    (doseq [[submitted code] [[(assoc cmd :additive? true) :command-id-conflict]
+                              [(assoc cmd :command-id :stale) :stale-revision]
+                              [(assoc cmd :command-id :previous-show :epoch 1) :stale-epoch]
+                              [(command model {:op :effect-selection/toggle :control :mute
+                                               :selector {:instance-ids ["0:2" "0:99"]}}) :unknown-instance]]]
+      (let [result (model/apply-command model submitted)]
+        (is (= :rejected (get-in result [:ack :status])))
+        (is (= code (get-in result [:ack :code])))
+        (is (identical? model (:model result)))
+        (is (empty? (:events result)))))))
+
+(deftest effect-selection-reads-only-supported-defaults-from-previous-show-settings
+  (doseq [[settings expected] [["legacy setting" {:solo :exclusive :mute :exclusive}]
+                               [{:solo :additive :mute :unknown :unused :value}
+                                {:solo :additive :mute :exclusive}]]]
+    (let [show (model/new-show {:settings {:effect-selection settings}})]
+      (is (= expected (get-in (views/snapshot show) [:effect-selection :modes]))))))
+
 (deftest reorder-uses-captured-launch-ids-and-preserves-chronology
   (let [launch {:op :cue/launch :cue-id :red}
         show (-> (configured)
