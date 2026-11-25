@@ -490,39 +490,44 @@
           (identifier? effect-id)
           (assoc :effect-id effect-id :effect-label (target-label effect-id (:name definition))))))))
 
-(defn- live-scalar-cell [instance param]
+(defn- live-parameter-cell [instance param temporary?]
   (let [schema (get-in instance [:definition :params param])
         value (get-in instance [:params param])]
     (when (and (= :running (:phase instance))
-               (#{:number :integer} (:type schema))
+               (or temporary? (#{:number :integer} (:type schema)))
                (params/valid-value? schema value))
       {:type (:type schema) :value value})))
 
-(defn- history-cell [model history [kind id param :as target]]
+(defn- history-cell [model history [kind id param :as target] temporary?]
   (when (= :instance-param kind)
-    (when-let [cell (live-scalar-cell (get-in model [:instances id]) param)]
-      (assoc cell :generation (get-in history [:generations target] 0)))))
+    (let [instance (get-in model [:instances id])]
+      (when-let [cell (live-parameter-cell instance param temporary?)]
+        (cond-> (assoc cell :generation (get-in history [:generations target] 0))
+          temporary? (assoc :schema (get-in instance [:definition :params param])))))))
 
 (defn track-parameter-generations
-  "Advance tracked scalar generations across an instance transition outside
+  "Advance tracked parameter generations across an instance transition outside
   the command reducer. A parameter can disappear and later return with a new
   default that equals an earlier sample. Observe the loss of the live cell so
   undo, cancel and capture cannot claim the new value."
   [before model]
   (let [old-instances (:instances before)
-        instances (:instances model)]
+        instances (:instances model)
+        history (get-in model [:control :edit-history])]
     (reduce-kv (fn [model [kind id param :as target] _]
                  (let [previous (get old-instances id)
-                       current (get instances id)]
+                       current (get instances id)
+                       temporary? (get-in history [:open target :temporary?])]
                    (if (and (= :instance-param kind)
                             (or (not= (:phase previous) (:phase current))
                                 (not (identical? (:params previous) (:params current)))
                                 (not (identical? (:definition previous) (:definition current))))
-                            (not= (live-scalar-cell previous param) (live-scalar-cell current param)))
+                            (not= (live-parameter-cell previous param temporary?)
+                                  (live-parameter-cell current param temporary?)))
                      (update-in model [:control :edit-history :generations target] inc)
                      model)))
                model
-               (get-in model [:control :edit-history :generations] {}))))
+               (:generations history {}))))
 
 (defn- retain-history-generations [history op target]
   (case op
@@ -544,7 +549,7 @@
       (reduce (fn [history [target gesture]]
                 (let [op (if (:temporary? gesture) :gesture/cancel :gesture/end)
                       result (edit-history/apply-action
-                               history {target (history-cell model history target)}
+                               history {target (history-cell model history target (:temporary? gesture))}
                                (assoc gesture :op op :target target
                                       :target-display (edit-target-display model target)))]
                   (retain-history-generations (:history result) op target)))
@@ -559,15 +564,16 @@
         _ (when gesture?
             (require! (and (identifier? instance-id) (keyword? param)
                            (identifier? control-id) (identifier? gesture-id))
-                      :invalid-gesture "Gesture needs an instance, scalar parameter, control and gesture ID"))
-        cancel-gesture (when (= :gesture/cancel op) (get-in history [:open target]))
+                      :invalid-gesture "Gesture needs an instance, parameter, control and gesture ID"))
+        temporary? (if (= :gesture/begin op) (true? (:temporary? command))
+                      (get-in history [:open target :temporary?]))
         ;; A reload can keep the sampled value while invalidating the rollback.
-        invalid-rollback? (and (:temporary? cancel-gesture)
+        invalid-rollback? (and (= :gesture/cancel op) temporary?
                                (not (params/valid-value? (get-in model [:instances instance-id :definition :params param])
-                                                         (:before cancel-gesture))))
+                                                         (get-in history [:open target :before]))))
         targets (if gesture? (when-not invalid-rollback? [target]) (keys (:generations history)))
         cells (into {} (keep (fn [target]
-                               (when-let [cell (history-cell model history target)]
+                               (when-let [cell (history-cell model history target temporary?)]
                                  [target cell]))) targets)
         action (cond-> (assoc command :actor operator-id :target target)
                  (= :gesture/end op) (assoc :target-display (edit-target-display model target)))

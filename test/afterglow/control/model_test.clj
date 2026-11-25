@@ -376,6 +376,68 @@
     (is (= 4 (get-in (:model invalid) [:instances id :params :count])))
     (is (= 2 (get-in (:model invalid) [:control :edit-history :cursor])))))
 
+(deftest temporary-gestures-validate-native-values-and-project-an-owned-restoration
+  (let [cases [[:color {:type :color} [1 0 0] [0.2 0.3 0.4] [2 0 0]]
+               [:position {:type :vector :size 3 :bounds [-1 1]} [0 0 0] [0.3 0.4 -0.2] [0 1]]
+               [:span {:type :range :bounds [0 1]} [0.2 0.8] [0.3 0.8] [0.8 0.3]]
+               [:shape {:type :enum :values [{:signal :sine} nil]} {:signal :sine} nil :other]
+               [:enabled {:type :boolean} true false :yes]
+               [:count {:type :integer :bounds [1 8]} 2 4 4.5]
+               [:period {:type :number :bounds [0 2]} 1/3 5/11 :fraction]]
+        schemas (into {} (map (fn [[param schema baseline]] [param (assoc schema :default baseline)])) cases)
+        show (-> (model/new-show)
+                 (apply! {:op :registry/publish :kind :effects :definition (update effect :params merge schemas)})
+                 (apply! {:op :cue/put :cue {:id :red :effect-id :wash}})
+                 (apply! {:op :cue/launch :cue-id :red}))
+        id (first (keys (:instances show)))
+        propose (fn [model op] (model/apply-command model (command model op) studio-operator))]
+    (doseq [[param {:keys [type]} baseline live invalid] cases]
+      (testing (name type)
+        (let [gesture (knob id param :temporary)
+              begin (assoc gesture :op :gesture/begin)
+              sample (assoc gesture :op :gesture/sample :sequence 1 :value live)
+              cancel (assoc gesture :op :gesture/cancel)
+              target [:instance-param id param]
+              path [:instances id :params param]
+              started (operator! show (assoc begin :temporary? true))
+              sampled (operator! started sample)
+              rejected (propose started (assoc sample :value invalid))
+              saved (model/settle-temporary-gestures-for-save sampled)
+              canceled (operator! sampled cancel)]
+          (when-not (#{:number :integer} type)
+            (is (= :target-unavailable (get-in (propose show begin) [:ack :code]))))
+          (is (= :invalid-value (get-in rejected [:ack :code])))
+          (is (identical? started (:model rejected)))
+          (is (= :invalid-value (get-in (propose started (dissoc sample :value)) [:ack :code])))
+          (is (= live (get-in sampled path)))
+          (is (= :temporary-gesture (get-in (propose sampled (assoc gesture :op :gesture/end :last-sequence 1)) [:ack :code])))
+          (is (= baseline (get-in (:model saved) path) (get-in canceled path)))
+          (is (= live (get-in sampled path)))
+          (is (= baseline (get-in saved [:settled target :before])))
+          (is (empty? (get-in canceled [:control :edit-history :open])))
+          (is (= {0 {:parent nil}} (:nodes (model/edit-history-snapshot sampled))
+                                 (get-in canceled [:control :edit-history :nodes]))))))))
+
+(deftest temporary-color-owns-the-whole-value-generation
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        gesture (knob id :color :temporary)
+        path [:instances id :params :color]
+        target [:instance-param id :color]
+        varied [0.4 0 0]
+        live (-> show (operator! (assoc gesture :op :gesture/begin :temporary? true))
+                 (operator! (assoc gesture :op :gesture/sample :sequence 1 :value varied)))
+        changed (apply! live {:op :param/set :instance-id id :param :color :value [0.4 0 0.1]})
+        repeated (apply! changed {:op :param/set :instance-id id :param :color :value varied})
+        evolved (model/track-parameter-generations live (assoc-in live path [0.4 0.1 0]))
+        canceled (model/apply-command repeated (command repeated (assoc gesture :op :gesture/cancel)) studio-operator)]
+    (is (= 2 (get-in repeated [:control :edit-history :generations target])))
+    (is (= 1 (get-in evolved [:control :edit-history :generations target])))
+    (is (= :history-conflict (get-in canceled [:ack :discarded])))
+    (is (= varied (get-in (:model (model/settle-temporary-gestures-for-save repeated)) path)))
+    (is (= varied (get-in (:model canceled) path)))
+    (is (empty? (get-in canceled [:model :control :edit-history :open])))))
+
 (deftest history-generations-follow-retention-and-clear-on-restart
   (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
         id (first (keys (:instances show)))
