@@ -476,11 +476,12 @@
                   accepted? (and (= :cue/launch (:op command)) (= :accepted (:status ack)))
                   note (:pad-note command)
                   token (:command-id command)
-                  gridded? (contains? command :grid)]
+                  gridded? (contains? command :grid)
+                  selected? (and accepted? (or (not gridded?) (= token (:grid-selection state))))]
               {:state (cond-> state
                         hold (assoc :holds (:state hold))
-                        (and accepted? (or (not gridded?) (= token (:grid-selection state))))
-                        (assoc :selected-instance (:instance-id ack))
+                        selected? (assoc :selected-instance (:instance-id ack))
+                        (and selected? gridded?) (assoc :selected-cue (:cue-id command))
                         (and accepted? (contains? (:pressed-pads state) note)
                              (or (not gridded?) (= token (get-in state [:grid-presses note]))))
                         (assoc-in [:pad-instances note] (:instance-id ack)))

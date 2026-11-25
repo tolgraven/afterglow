@@ -22,6 +22,10 @@
   (or (when launch-receipt (launch-receipt model id))
       (get-in model [:control :history id :ack])))
 
+(defn- retain-pending [state result]
+  (cond-> result
+    (contains? state ::pending) (assoc-in [:state ::pending] (::pending state))))
+
 (defn- reconcile [acknowledge launch-receipt state model]
   (when (seq (::pending state))
     (reduce (fn [{:keys [state commands]} command]
@@ -38,13 +42,14 @@
   [{:keys [input ack reset-model stop] :as profile} grid launch-receipt]
   (if (nil? grid)
     profile
-    (do
+    (let [acknowledge (fn [state command receipt]
+                        (retain-pending state (ack state command receipt)))]
       (when-not (or (nil? launch-receipt) (ifn? launch-receipt))
         (throw (ex-info "Push launch-receipt must be a function" {})))
       (assoc profile
              :grid-launches? true
              :input (fn [state event model envelope]
-                      (let [result (input state event model envelope)
+                      (let [result (retain-pending state (input state event model envelope))
                             raw (select-keys envelope [:time-ms])]
                         (if (seq (:commands result))
                           (update result :commands
@@ -60,9 +65,9 @@
                         ;; Keep feedback bookkeeping bounded even if a host loses
                         ;; its receipt. Held releases are owned independently.
                         {:state (update state ::pending #(vec (take-last 256 (conj (vec %) command))))}
-                        (ack state command (terminal-ack receipt)))
-                      (ack state command receipt)))
-             :reconcile (partial reconcile ack launch-receipt)
+                        (acknowledge state command (terminal-ack receipt)))
+                      (acknowledge state command receipt)))
+             :reconcile (partial reconcile acknowledge launch-receipt)
              :reset-model #(dissoc (reset-model %) ::pending)
              :stop (fn [state model envelope disconnected?]
                      (stop (dissoc state ::pending) model envelope disconnected?))))))
