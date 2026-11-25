@@ -44,7 +44,12 @@ scheduled deadline. A held source may still drive the configured fallback.
 latency and blends continuous channels using the delayed timeline. A fractional
 latency can put that target between physical slots. A valid sample remains
 available through the first slot that can present it as a lower endpoint. Function
-channels retain the lower sample. A patch, blackout or epoch change fences
+channels retain the lower sample. If either endpoint rejected an edge-tracking
+follower, strictly intermediate samples copy that fixture's dimmer and emitter
+bytes from the rejected endpoint. If both rejected the fixture, the lower sample
+supplies the bytes. This preserves the cut through the transition and keeps the
+ordinary interpolation of movement and unrelated fixtures. Exact endpoints retain
+their original bytes. A patch, blackout or epoch change fences
 previously prepared packets. Supply a stable `:timeline-id` in the ticket and
 change it on transport seeks or playback changes to retire old buffered output. High refresh-rate local UI animation keeps its
 own presentation clock.

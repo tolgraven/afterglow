@@ -15,6 +15,58 @@
 (defn- frame [r g b]
   {:universes {0 (byte-array (concat (map unchecked-byte [r g b]) (repeat 509 0)))}})
 
+(deftest buffered-tracking-cuts-keep-rejected-emission-dark-between-exact-endpoints
+  (let [floor {:id :floor :point [0 0 0] :normal [0 1 0] :size [20 20]}
+        head (fn [id x address channels]
+               {:id id :position [x 3 0] :beam-angle 20 :lens-radius-m 0.1 :universe 1
+                :address address :channels (merge {:pan [1 2] :tilt [3 4]} channels)})
+        patch (render/compile-patch
+                [(head :lead 0 1 {:red 5}) (head :first 1 12 {:red 5})
+                 (head :second 2 503 {:red {:offset 5 :presentation :hold}
+                                      :dimmer {:offset 10 :fine-offset 11 :inverted-from 0 :presentation :hold}})
+                 (head :downstream 3 34 {:amber 5})
+                 {:id :wash :universe 1 :address 100 :channels {:dimmer 1}}])
+        first-link {:leader :lead :follower :first :surface floor :along [1 0 0]}
+        second-link (assoc first-link :follower :second)
+        downstream (assoc first-link :leader :second :follower :downstream)
+        assign (fn [id attribute value] {:target-id id :attribute attribute :value value})
+        options {:mode :buffered-interpolation :period-ms 25 :latency-ms 50}
+        run (fn [rich?]
+              (let [clock (atom 0) sent (atom []) owner (capture clock sent)]
+                (try
+                  (let [frames (mapv (fn [[time red wash conflict?]]
+                                       (reset! clock time)
+                                       (let [rows [(assign :lead :aim [0 0 0])
+                                                   (assign :lead :red 1.0) (assign :first :red 1.0)
+                                                   (assign :second :aim [4.0 0 0]) (assign :second :red red)
+                                                   (assign :second :dimmer 1.0) (assign :downstream :amber 1.0)
+                                                   (assign :wash :dimmer wash)]
+                                             links (if conflict? [first-link second-link downstream] [first-link downstream])
+                                             token (scheduler/begin-frame! owner 0 patch options false)
+                                             out (render/resolve-frame patch rows {:edge-tracking links :include-values? rich?
+                                                                                   :compact-values? (not rich?)})]
+                                         (is (true? (scheduler/complete! owner token out)))
+                                         out))
+                                     [[0 1.0 0.0 false] [25 0.5 0.4 true] [50 0.25 1.0 false]])]
+                    (is (= [[nil nil] [nil :overlap :leader-suppressed] [nil nil]]
+                           (mapv #(mapv :reason (:edge-tracking %)) frames)))
+                    (doseq [at [50 62.5 75 87.5 100]]
+                      (reset! clock at)
+                      (scheduler/publish! owner))
+                    (is (= (mapv #(bytes-copy (:universes %)) frames)
+                           (mapv #(get-in @sent [% :bytes]) [0 2 4])))
+                    (mapv :bytes @sent))
+                  (finally (scheduler/close! owner)))))]
+    (let [rich (run true) compact (run false)
+          lanes (fn [universes] (mapv #(get-in universes %) [[1 506] [1 511] [2 0] [1 37] [1 99]]))]
+      (is (= rich compact))
+      (is (= [[255 0 0 255 0]
+              [128 255 255 0 51]
+              [128 255 255 0 102]
+              [128 255 255 0 179]
+              [64 0 0 255 255]]
+             (mapv lanes rich))))))
+
 (deftest deadline-fallback-is-independent-from-completion-and-preserves-original-time
   (let [physical (atom 0) sent (atom []) owner (capture physical sent)
         token (scheduler/begin-frame! owner 0 @patch {:mode :hold-fade} false)
