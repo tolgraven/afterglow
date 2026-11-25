@@ -1,5 +1,6 @@
 (ns afterglow.render.frame-test
   (:require [clojure.test :refer [deftest is testing]]
+            [afterglow.render.atmosphere :as atmosphere]
             [afterglow.render.ir :as ir]
             [afterglow.render.coverage :as coverage]
             [afterglow.render.fields :as fields]
@@ -16,6 +17,62 @@
     (mapv #(bit-and 255 (aget ^bytes buffer (dec %))) offsets)))
 
 (defn near? [a b] (< (Math/abs (double (- a b))) 1.0e-9))
+
+(deftest profiled-fog-opacity-fades-from-the-physical-off-bytes
+  (let [nozzle {:id :jet :universe 1 :address 512 :channels {:fog [1 2]}
+                :fogger {:flow-m3-min 60 :dmx-range [220.25 20.25]}}
+        patch (frame/compile-patch [nozzle])
+        channel (get-in patch [:by-id :jet :compiled-channels :fog])
+        row (fn [physical blend opacity]
+              (assoc (assignment :jet :fog (atmosphere/physical-level channel physical) blend)
+                     :opacity opacity))
+        bytes (fn [output] [(first (bytes-at output 1 512)) (first (bytes-at output 2 1))])]
+    (doseq [include-values? [true false]
+            [physical opacity expected] [[220.25 0.5 [220 64]] [20.25 0.5 [120 64]]
+                                         [20.25 0.0 [220 64]] [20.25 1.0 [20 64]]]
+            blend [:replace :max :add]]
+      (let [assignment (row physical blend opacity)
+            options {:include-values? include-values?}
+            batch {:target-ids [:jet] :outputs {:fog {:type :number :components 1
+                                                     :values (double-array [(:value assignment)])}}
+                   :blend blend :opacity opacity}]
+        (is (= expected (bytes (frame/resolve-frame patch [assignment] options))))
+        (is (= expected (bytes (frame/resolve-contributions patch [{:kind :assignments :assignments [assignment]}] options))))
+        (is (= expected (bytes (frame/resolve-batches patch [batch] options))))))
+    (doseq [include-values? [true false]]
+      (let [before (row 180.25 :replace 1.0)
+            after (row 20.25 :replace 1.0)
+            options {:include-values? include-values?}
+            ordinary {:kind :assignments :assignments [before]}
+            native {:kind :assignments :assignments [after]
+                    :native-layer {:id :native :member 0 :opacity 0.5 :target-weights {:jet 1.0}}}]
+        (is (= [200 64] (bytes (frame/resolve-frame patch [before (row 220.25 :replace 0.5)] options))))
+        (is (= [180 64] (bytes (frame/resolve-frame patch [before (row 20.25 :replace 0.0)] options))))
+        (is (= [120 64] (bytes (frame/resolve-contributions patch [ordinary (assoc-in native [:native-layer :member-opacity] 0.75)] options))))
+        (is (= [180 64] (bytes (frame/resolve-contributions patch [ordinary (assoc-in native [:native-layer :member-opacity] 0.0)] options))))))))
+
+(deftest fog-opacity-interpolates-physical-values-across-the-inversion-pivot
+  (let [patch (frame/compile-patch [{:id :jet :universe 1 :address 1
+                                    :channels {:fog {:offset 1 :inverted-from 120}}
+                                    :fogger {:flow-m3-min 60 :dmx-range [200 255]}}])
+        channel (get-in patch [:by-id :jet :compiled-channels :fog])
+        row (fn [physical] (assignment :jet :fog (atmosphere/physical-level channel physical)))
+        after (row 30)
+        base {:kind :assignments :assignments [(row 220)]}
+        native {:kind :assignments :assignments [after]
+                :native-layer {:id :native :member 0}}
+        native-batch (assoc native :kind :batch :batch
+                            {:target-ids [:jet] :outputs {:fog {:type :number :components 1
+                                                              :values (double-array [(:value after)])}}})]
+    (doseq [include-values? [true false]
+            :let [options {:include-values? include-values?}
+                  byte (fn [blocks] (first (bytes-at (frame/resolve-contributions patch blocks options) 1 1)))]]
+      (is (= [166] (bytes-at (frame/resolve-frame patch [(assoc after :opacity 0.2)] options) 1 1)))
+      (is (= 166 (byte [(assoc-in native [:native-layer :member-opacity] 0.2)])))
+      (is (= 166 (byte [(assoc-in native-batch [:native-layer :target-weights] {:jet 0.2})])))
+      (is (= 125 (byte [base (assoc-in native [:native-layer :member-opacity] 0.5)])))
+      (is (= 220 (byte [base (assoc-in native [:native-layer :member-opacity] 0.0)])))
+      (is (= 30 (byte [base native]))))))
 
 (deftest linear-rgb-and-master-dimming-without-hardware-dimmer
   (let [result (frame/resolve-frame [rgb]
