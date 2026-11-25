@@ -53,21 +53,23 @@ instance disappears, a delayed strip input cannot edit the replacement instance.
 the Push profile supplies MIDI addresses and local interaction state. Each
 command carries the exact instance ID.
 
-## Temporary scalar edits
+## Temporary parameter edits
 
 Connect Push 2 through the trusted show owner with `:operator-gestures? true`.
 Set `:temporary-encoder-modifier :shift` to use Shift, or set it to the MIDI CC
 of a mapped momentary button. A mapped CC takes precedence over that button's
 usual action. Shift continues to control step size.
 
-Hold the modifier as you touch a numeric or integer parameter encoder. Its turns
-and touch-strip changes apply live. The encoder remembers its mode until lift,
+Hold the modifier as you touch an authored parameter encoder. Turns, strip
+changes and the touched parameter's checkbox or picker apply live. Numeric,
+integer, boolean, enum, color, vector and range parameters are supported. The
+encoder remembers its mode until lift,
 even if you let go of the modifier first. On lift or disconnect, the show owner
 restores the pre-touch value if the gesture still owns it. A newer edit to the
 same parameter takes precedence. Temporary gestures leave no undo entry, and
 an unadmitted temporary gesture ignores turns for that touch. This includes
-empty encoder slots and non-scalar parameters. Each encoder tracks its own
-touch, and touching without the modifier records an ordinary scalar edit.
+empty slots and targets that have stopped running. Each encoder tracks its own
+touch. Ordinary scalar touches still record an undo entry.
 
 Push 3 User Mode can decode explicitly mapped encoder-touch notes. The Push 3
 profile currently uses those notes for touch feedback and still sends ordinary

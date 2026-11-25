@@ -3,6 +3,7 @@
   from Afterglow's existing adapter; this module has no port or native UI access."
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.parameter-edit :as parameter-edit]
+            [afterglow.control.params :as params]
             [afterglow.control.codecs.midi :as midi]
             [afterglow.control.codecs.push-2 :as codec]
             [afterglow.control.pages :as pages]
@@ -108,6 +109,15 @@
 (defn- encoder-control-id [note]
   (keyword "push-2" (str "encoder-" note)))
 
+(defn- write-touched-parameter [state {:keys [instance-id param encoder]} value]
+  (let [write {:state state :commands [{:op :param/set :instance-id instance-id :param param :value value}]}
+        gesture (encoder-gesture/active state (encoder-control-id encoder))]
+    (if (= :temporary (get-in state [:encoder-touch-modes encoder]))
+      (if (and (:temporary? gesture) (= instance-id (:instance-id gesture)) (= param (:param gesture)))
+        (encoder-gesture/edit state gesture (constantly write))
+        {:state state})
+      write)))
+
 (defn- touch-encoder [state model note envelope operator-gestures? mode]
   (let [captured-mode (get-in state [:encoder-touch-modes note])
         temporary? (= :temporary (or captured-mode mode))
@@ -127,7 +137,8 @@
                     (and operator-gestures? (not (:released? gesture)))
                     (update :encoder-releases dissoc control-id))]
         (if (and operator-gestures? (= :running (:phase instance))
-                 (#{:number :integer} (:type schema))
+                 (if temporary? (params/valid-value? schema (get-in instance [:params (:param selection)]))
+                     (#{:number :integer} (:type schema)))
                  ;; A duplicate touch must not give an unadmitted temporary touch a new target.
                  (not (and temporary? captured-mode)))
           (encoder-gesture/start state control-id selection envelope temporary?)
@@ -177,8 +188,7 @@
     (let [instance (get-in model [:instances instance-id])
           schema (get-in instance [:definition :params param])]
       (if (= :boolean (:type schema))
-        {:state state :commands [{:op :param/set :instance-id instance-id :param param
-                                  :value (not (get-in instance [:params param]))}]}
+        (write-touched-parameter state selection (not (get-in instance [:params param])))
         (let [next-component (mod (inc component) (count (parameter-edit/components schema)))]
           {:state (-> state (assoc-in [:components [instance-id param]] next-component)
                       (update :touches (fn [touches]
@@ -198,7 +208,7 @@
                     (not (:shift? state)) (assoc :instance-id (:id instance)))] [])}))
 
 (defn- picker-pad [state model note]
-  (when-let [{:keys [instance-id param encoder]} (touched state model)]
+  (when-let [{:keys [instance-id param] :as selection} (touched state model)]
     (let [schema (get-in model [:instances instance-id :definition :params param])
           [x y] (codec/pad-coordinates note)
           value (case (:type schema)
@@ -206,9 +216,8 @@
                   :enum (nth (or (:values schema) (:options schema)) (+ x (* y 8)) ::missing)
                   ::missing)]
       (when (#{:color :enum} (:type schema))
-        {:state state :commands (if (or (= ::missing value)
-                                        (= :temporary (get-in state [:encoder-touch-modes encoder]))) []
-                                    [{:op :param/set :instance-id instance-id :param param :value value}])}))))
+        (if (= ::missing value) {:state state :commands []}
+            (write-touched-parameter state selection value))))))
 
 (defn- press-pad [grid state event model envelope]
   (if-let [cue (cue-at state model (:note event))]
@@ -265,13 +274,18 @@
                  (mapv (fn [[param value]] {:op :param/set :instance-id id :param param :value value})
                        (parameter-edit/velocity-values (:definition instance) (:value event))) [])}))
 
+(defn- edit-encoder-gesture [state model {:keys [instance-id param component temporary?] :as gesture} value mode]
+  (let [selection (cond-> gesture
+                    temporary? (assoc :component (get-in state [:components [instance-id param]] component)))]
+    (encoder-gesture/edit state gesture #(edit-parameter state model selection value mode))))
+
 (defn- encoder [state event model envelope]
   (let [note (- (:controller event) 71)
         control-id (encoder-control-id note)
         gesture (encoder-gesture/active state control-id)
         delta (codec/signed-encoder (:raw-value event))]
     (cond
-      gesture (encoder-gesture/edit state gesture #(edit-parameter state model gesture delta :relative))
+      gesture (edit-encoder-gesture state model gesture delta :relative)
       (= :temporary (get-in state [:encoder-touch-modes note])) {:state state}
       (contains? (:temporary-release-tails state) note) {:state state}
       (encoder-gesture/after-release? state control-id (:time-ms envelope)) {:state state}
@@ -285,7 +299,7 @@
       (cond
         (and gesture (= (select-keys selection [:instance-id :param])
                         (select-keys gesture [:instance-id :param])))
-        (encoder-gesture/edit state gesture #(edit-parameter state model gesture value :absolute))
+        (edit-encoder-gesture state model gesture value :absolute)
         (= :temporary (get-in state [:encoder-touch-modes encoder])) {:state state}
         :else (edit-parameter state model selection value :absolute)))))
 
@@ -599,7 +613,7 @@
   optionally routes pad launches to a musical grid owned by the host. Set
   :operator-gestures? true with a trusted host dispatcher to group touched scalar
   encoders. :temporary-encoder-modifier can be :shift or a mapped button CC.
-  Hold it when touching a scalar encoder to restore its value on encoder lift.
+  Hold it when touching an authored parameter encoder to restore its value on lift.
   The host must settle pending ends and cancels after prior samples. Detents
   without touch use ordinary control after a short release tail.
   :active-cue-grid? enables Select and Duplicate to open separate active

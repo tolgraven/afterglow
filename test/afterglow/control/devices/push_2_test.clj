@@ -734,8 +734,8 @@
         (is (= :param/set (:op (peek (admitted-commands h))))))
       (finally (finish! h)))))
 
-(deftest temporary-touch-on-an-unsupported-or-empty-slot-cannot-become-an-edit
-  (doseq [slot [:unsupported :empty]]
+(deftest temporary-touch-with-an-unavailable-or-empty-slot-cannot-become-an-edit
+  (doseq [slot [:not-running :empty]]
     (testing (name slot)
       (let [{:keys [show now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true
                                                                              :temporary-encoder-modifier :shift})}
@@ -743,7 +743,8 @@
         (swap! show update-in [:registry :effects :wash] assoc :params schemas :param-order order)
         (fixture/ready! h)
         (try
-          (when (= :unsupported slot) (launch! h 37))
+          (when (= :not-running slot)
+            (swap! show assoc-in [:instances (launch! h 37) :phase] :releasing))
           (receive! h [0xb0 49 127])
           (receive! h [0x90 0 127])
           (receive! h [0xb0 49 0])
@@ -766,6 +767,66 @@
             (is (= 0.05 (:ninth (values h id))))
             (is (= :param/set (:op (peek (admitted-commands h))))))
           (finally (finish! h)))))))
+
+(deftest temporary-push-edits-use-the-typed-controls-and-restore-whole-parameters
+  (let [{:keys [show] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true
+                                                                       :temporary-encoder-modifier :shift})}
+                                             push-operator)]
+    (swap! show update-in [:registry :effects :wash] assoc :params schemas :param-order order)
+    (fixture/ready! h)
+    (try
+      (let [id (launch! h 37)
+            original (values h id)
+            temporary-touch! (fn [note]
+                               (receive! h [0xb0 49 127])
+                               (receive! h [0x90 note 127])
+                               (receive! h [0xb0 49 0]))]
+        (temporary-touch! 0)
+        (receive! h [0xb0 71 1])
+        (is (true? (:enabled (values h id))))
+        (receive! h [0xb0 20 127])
+        (is (false? (:enabled (values h id))))
+        (receive! h [0xb0 71 1])
+        (temporary-touch! 3)
+        (receive! h [0xb0 74 1])
+        (is (= saw (:wave (values h id))))
+        (receive! h [0x90 36 127])
+        (is (= sine (:wave (values h id))))
+        (receive! h [0xb0 74 1])
+        (receive! h [0x80 0 0])
+        (is (false? (:enabled (values h id))))
+        (is (= saw (:wave (values h id))))
+        (receive! h [0x80 3 0])
+        (is (= sine (:wave (values h id))))
+        (temporary-touch! 4)
+        (receive! h [0xb0 75 1])
+        (is (not= (:color original) (:color (values h id))))
+        (receive! h [0x90 39 127])
+        (is (= (vec (repeat 3 (/ 3 7.0))) (:color (values h id))))
+        (receive! h [0x80 4 0])
+        (temporary-touch! 5)
+        (receive! h [0xb0 25 127])
+        (receive! h [0xb0 76 5])
+        (is (= [0 0.1 0] (:position (values h id))))
+        (receive! h [0xe0 127 127])
+        (is (= [0 1.0 0] (:position (values h id))))
+        (receive! h [0x80 5 0])
+        (temporary-touch! 6)
+        (receive! h [0xb0 26 127])
+        (receive! h [0xe0 127 127])
+        (is (= [0.2 1.0] (:span (values h id))))
+        (receive! h [0x80 6 0])
+        (is (= original (values h id)))
+        (is (= 5 (count (filter #(= :gesture/cancel (:op %)) (admitted-commands h)))))
+        (is (not-any? #(#{:param/set :gesture/end} (:op %)) (admitted-commands h)))
+        (is (= {0 {:parent nil}} (get-in @show [:control :edit-history :nodes])))
+        (receive! h [0x90 3 127])
+        (receive! h [0xb0 74 1])
+        (receive! h [0x80 3 0])
+        (is (= :param/set (:op (peek (admitted-commands h)))))
+        (is (= saw (:wave (values h id))))
+        (is (= {0 {:parent nil}} (get-in @show [:control :edit-history :nodes]))))
+      (finally (finish! h)))))
 
 (deftest temporary-turns-stay-blocked-across-epoch-adoption-and-clock-rebase
   (doseq [stage [:held :trailing]]
