@@ -8,6 +8,8 @@
             [afterglow.runtime.faults :as faults]
             [afterglow.runtime.keyframes :as keyframes]
             [afterglow.time :as musical-time]
+            [afterglow.control.model :as control]
+            [afterglow.control.instance-order :as instance-order]
             [afterglow.control.params :as params]
             [afterglow.control.system :as system]))
 
@@ -23,6 +25,9 @@
   [value]
   (and (finite-number? value) (not (neg? value))))
 
+(defn- unit-opacity? [value]
+  (and (finite-number? value) (<= 0 value 1)))
+
 (defn- validate-instance!
   [id instance]
   (system/validate-state instance)
@@ -34,6 +39,7 @@
                  (map? (:params instance)) (contains? instance :state)
                  (finite-number? (:priority instance))
                  (integer? (:order instance)) (not (neg? (:order instance)))
+                 (instance-order/valid-render-position? instance)
                  (nonnegative-number? (:started-at-ms instance))
                  (#{:running :releasing} (:phase instance)))
     (fail! ::invalid-instance "Invalid runtime instance" {:instance-id id}))
@@ -85,8 +91,25 @@
            {:model-time-ms (:time-ms model) :frame-time-ms (:time-ms frame)}))
   (when (and (contains? frame :delta-ms) (not (nonnegative-number? (:delta-ms frame))))
     (fail! ::invalid-delta "Frame delta must be finite and nonnegative" {}))
+  (let [factors (get frame ::opacity-factors {})]
+    (when-not (map? factors)
+      (fail! ::invalid-opacity-factors "Expected an instance ID to opacity factor map" {}))
+    (doseq [[id factor] factors]
+      (when-not (and (contains? (:instances model) id)
+                     (if (map? factor)
+                       (every? (fn [[version value]]
+                                 (and (integer? version) (pos? version) (unit-opacity? value))) factor)
+                       (unit-opacity? factor)))
+        (fail! ::invalid-opacity-factors "Active instance opacity factors must be in [0,1], optionally by definition version"
+               {:instance-id id :factor factor}))))
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
+
+(defn opacity-factor
+  "Read the frame opacity factor for an instance and its evaluated definition version."
+  [factors id version]
+  (let [factor (get factors id 1)]
+    (if (map? factor) (get factor version 1) factor)))
 
 (defn- reload-instance
   [registry clock instance]
@@ -240,7 +263,7 @@
             (assoc :target-ids (:targets program-definition)))))))
 
 (defn- descriptor
-  [step {:keys [instance program intents expired? clock paused? input-state delta-ms number]}]
+  [step opacity-factor {:keys [instance program intents expired? clock paused? input-state delta-ms number]}]
   (let [instance (assoc instance :definition program)]
     {:id (:id instance) :priority (:priority instance) :order (:order instance)
      :state (:state instance) :instance instance
@@ -254,20 +277,23 @@
                    result (if expired?
                             (assoc context :done? true)
                             (let [ctx (assoc context :frame private-frame :instance step-instance :state input-state)]
-                              (if (or (:keyframes program) (:measure-effect private-frame) (seq (:keyframe-intervals private-frame)))
+                              (if (or (:keyframes program) (keyframes/dependency-driven? step)
+                                      (:measure-effect private-frame) (seq (:keyframe-intervals private-frame)))
                                 (keyframes/evaluate step ctx) (step ctx))))
                    valid? (valid-step-shape? result)
                    ;; Validate block shapes before opacity can discard a hidden
                    ;; contribution, preserving the kernel failure contract.
                    _ (when valid? (runtime/append-contributions result []))
                    result (if valid?
-                            (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))]
+                            (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))
+                                  gain (if (== 1 opacity-factor) gain (* gain opacity-factor))]
                               (if-let [layer (native-layer instance program)]
                                 (let [tag (assoc layer :member-opacity gain)
                                       flushed (runtime/append-contributions result [])
                                       blocks (cond-> (:contributions flushed)
                                                (and (or (= :previous (:targets layer)) (seq (:target-ids layer)))
                                                     (not expired?)
+                                                    (not (::keyframes/inputs-unavailable? result))
                                                     (empty? (:contributions flushed)))
                                                (conj {:kind :assignments :assignments []}))]
                                   (assoc flushed :contributions (mapv #(assoc % :native-layer tag) blocks)))
@@ -323,7 +349,7 @@
    :state (get-in prepared [:instance :state]) :assignments [] :contributions []
    :intents (:intents prepared) :done? false})
 
-(defn- attempt [snapshot compiled prepared]
+(defn- attempt [snapshot compiled factors prepared]
   (let [instance (:instance prepared) {:keys [step error]} (get compiled (:program prepared))]
     (cond
       (and (not (:expired? prepared))
@@ -335,7 +361,8 @@
 
       :else
       (try
-        (let [value (runtime/evaluate-instance snapshot (descriptor step prepared))
+        (let [factor (opacity-factor factors (:id instance) (:effect-version instance))
+              value (runtime/evaluate-instance snapshot (descriptor step factor prepared))
               source (assoc (select-keys instance [:effect-id :effect-version :cue-id]) :instance-id (:id instance))]
           (-> value
               (assoc :instance instance)
@@ -349,8 +376,8 @@
                                                  (take 4 (take-while some? (iterate #(.getCause ^Throwable %) error))))
                                          :result :evaluate) error)})))))
 
-(defn- evaluate-isolated [snapshot compiled prepared]
-  (let [result (attempt snapshot compiled prepared)
+(defn- evaluate-isolated [snapshot compiled factors prepared]
+  (let [result (attempt snapshot compiled factors prepared)
         candidate? (:candidate? prepared)
         before (:before prepared)
         fault (:failure result)
@@ -360,7 +387,7 @@
                              (assoc :before before :candidate? false)
                              (assoc-in [:instance :reload-fault] fault)
                              (update :intents conj (faults/event :effect/reload-failed fault)))]
-            [(attempt snapshot compiled fallback) fallback])
+            [(attempt snapshot compiled factors fallback) fallback])
           [result prepared])
         succeeded? (and (nil? (:failure result)) (not (:skipped? result)))
         result (if-let [failure (:failure result)]
@@ -385,8 +412,9 @@
         instances (into {} (keep (fn [result]
                                   (when-not (:done? result)
                                     [(:id result) (runtime/observable-instance result)]))) evaluations)
+        next-model (control/track-parameter-generations model (assoc model :instances instances))
         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
-    (cond-> {:model (faults/record-events (assoc model :instances instances) events)
+    (cond-> {:model (faults/record-events next-model events)
              :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
              :keyframes (keyframes/committed-windows snapshot evaluations)
              :fault-events events
@@ -438,6 +466,12 @@
   time, beat and meter captured before any private offsets. No typed result
   buffers enter the model.
   System opacity weights the blend result, never authored parameter values.
+  The optional ::opacity-factors frame input maps active instance IDs to a unit
+  factor or a sparse map from definition version to unit factor. Unspecified
+  factors default to unity. Reloads and their fallbacks each use the factor for
+  the definition being evaluated. The factor multiplies the instance's system
+  opacity and AR level at the contribution boundary, including native member
+  opacity. Factors stay outside the effect context and committed instance.
   A removed registry definition leaves captured running instances valid.
 
   Duration expiry enters release at the exact logical deadline. During a positive
@@ -471,7 +505,8 @@
          delta-ms (get frame :delta-ms (- time-ms (get model :last-frame-time-ms (:time-ms model))))
          _ (when-not (nonnegative-number? delta-ms)
              (fail! ::invalid-delta "Computed frame delta must be nonnegative" {}))
-         snapshot (merge {:fixtures []} frame
+         factors (::opacity-factors frame)
+         snapshot (merge {:fixtures []} (dissoc frame ::opacity-factors)
                          {:show-id (:show-id model) :epoch (:epoch model)
                           :revision (:revision model) :number frame-number
                           :time-ms time-ms :delta-ms delta-ms
@@ -483,7 +518,7 @@
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
          prepared (mapv (partial prepare-isolated model clock snapshot)
-                        (sort-by (juxt :priority :order :id) (vals (:instances model))))
+                        (instance-order/ordered model))
          definitions (distinct (map :program
                                     (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
                                                                   (get-in % [:instance :fault :effect-version])))
@@ -492,12 +527,12 @@
                     (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
                     keyframes/with-rig-positions)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
-         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :state]) :step identity) prepared)
-         evaluations (vec (map-work (partial evaluate-isolated snapshot compiled) prepared))
+         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :render-priority :render-order :state])
+                                   :step identity) prepared)
+         evaluations (vec (map-work (partial evaluate-isolated snapshot compiled factors) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
-         evaluations (vec (sort-by (juxt #(get-in % [:instance :priority])
-                                         #(get-in % [:instance :order]) :id) evaluations))]
+         evaluations (vec (sort-by (comp instance-order/sort-key :instance) evaluations))]
      (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
                             :last-frame-beat (:beat clock) :frame-number frame-number)
                snapshot descriptors evaluations))))

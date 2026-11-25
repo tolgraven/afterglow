@@ -3,6 +3,7 @@
   (:import [java.net DatagramSocket DatagramPacket InetAddress]))
 
 (def ^:private byte-array-class (class (byte-array 0)))
+
 (def ^:private artdmx-prefix [65 114 116 45 78 101 116 0 0 80 0 14])
 
 (defn artdmx-packet

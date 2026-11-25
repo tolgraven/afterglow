@@ -18,18 +18,26 @@
             [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
+
 (def ^:private extra-emitters (apply dissoc photometry/emitter-spectrum [:red :green :blue :white]))
+
 (def ^:private geometric-attributes #{:aim :direction})
+
 (def ^:private rgb-attributes [:red :green :blue])
 
 ;; Final fields, no mutable buffers: safe to share between render workers/frames.
 (deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot ^boolean coarseRange])
+
 (deftype DenseChannel [^long kind ^long slot ^long compactIndex scatter fallback])
+
 (deftype EmitterTint [attribute ^long slot ^double red ^double green ^double blue])
+
 (deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints])
+
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
    [:emitted-color :vec3 3] [:intensity :number 1] [:aim :vec3 3] [:direction :vec3 3]])
+
 (def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4 :shutter 9})
 
 (defn- packed-number? [value]
@@ -46,8 +54,11 @@
   (and (number? x) (Double/isFinite (double x))))
 
 (defn- unit? [x] (and (finite? x) (<= 0 x) (<= x 1)))
+
 (defn- vec3? [x] (and (vector? x) (= 3 (count x)) (every? finite? x)))
+
 (defn- positive-int? [x] (and (integer? x) (pos? x) (<= x Integer/MAX_VALUE)))
+
 (defn- clamp [x lo hi] (min hi (max lo x)))
 
 (defn- channel-spec [spec]
@@ -266,6 +277,28 @@
       (mapv composite (or previous (vec (repeat (count value) 0))) value)
       (composite (or previous 0) value))))
 
+(defn- profiled-fog-channel [fixture]
+  (let [channel (get-in fixture [:compiled-channels :fog])]
+    (when (::fog-off channel) channel)))
+
+(defn- blend-profiled-fog [channel previous value blend opacity]
+  (let [start (or previous (::fog-idle-level channel))
+        end (blend-value previous value blend 1)]
+    (if (unit? end)
+      (atmosphere/mix-physical-level channel start end opacity)
+      ;; A partial add can fit even when its full logical endpoint overflows.
+      ;; Keep that range check and mix along the representable part of the ramp.
+      (let [partial-level (blend-value previous value blend opacity)]
+        (if (< start partial-level 1)
+          (atmosphere/mix-physical-level channel start 1 (/ (- partial-level start) (- 1 start)))
+          partial-level)))))
+
+(defn- blend-field [fixture attribute previous value blend opacity]
+  (if-let [channel (when (and (= :fog attribute) (not (== 1 opacity)))
+                     (profiled-fog-channel fixture))]
+    (blend-profiled-fog channel previous value blend opacity)
+    (blend-value previous value blend opacity)))
+
 (defn- assignment-value? [attribute value hdr?]
   (let [level? (if (and hdr? (hdr/light-attributes attribute))
                  #(and (finite? %) (not (neg? %))) unit?)]
@@ -296,7 +329,7 @@
           (let [index (int (::index fixture))
                 attributes (or (aget targets index) (transient {}))
                 previous (get attributes attribute)
-                blended (blend-value previous value blend opacity)]
+                blended (blend-field fixture attribute previous value blend opacity)]
             (when-not (assignment-value? attribute blended (and (::hdr? patch) (::emission-channels fixture)))
               (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
             (aset targets index (assoc! attributes attribute blended))
@@ -790,11 +823,12 @@
                                       blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute)))))))
     (pack-dense-state patch values present options)))
 
-(defn- packed-assignment? [assignment]
-  (and (not (geometric-attributes (:attribute assignment)))
-       (packed-number? (:opacity assignment 1))
-       (let [value (:value assignment)]
-         (if (vector? value) (every? packed-number? value) (packed-number? value)))))
+(defn- packed-assignment? [patch {:keys [target-id attribute value opacity] :or {opacity 1}}]
+  (and (not (geometric-attributes attribute))
+       (packed-number? opacity)
+       (or (not= :fog attribute) (== 1 opacity)
+           (not (profiled-fog-channel (get (:by-id patch) target-id))))
+       (if (vector? value) (every? packed-number? value) (packed-number? value))))
 
 (defn- packed-plan? [patch]
   ;; A highly heterogeneous rig should not allocate target-count × every unique
@@ -848,7 +882,7 @@
        (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
 
        (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
-            (every? packed-assignment? assignments))
+            (every? (partial packed-assignment? patch) assignments))
        (resolve-packed-only patch assignments options)
 
        :else (pack-general-state patch (reduce-assignments patch assignments) options)))))
@@ -1089,17 +1123,25 @@
                      (:assignments block))))
 
 (defn- general-targets
-  "A target's entire ordered history must retain general arithmetic when any
-  write uses geometry or exact numbers. Other targets stay in dense storage."
-  [blocks]
+  "Keep the ordered history of targets using geometry, exact numbers or
+  profiled fog fades in general arithmetic. Other targets stay dense."
+  [patch blocks]
   (reduce (fn [targets block]
             (case (:kind block)
-              :assignments (into targets (keep #(when-not (packed-assignment? %) (:target-id %)))
+              :assignments (into targets (keep #(when-not (packed-assignment? patch %) (:target-id %)))
                                  (:assignments block))
-              :batch (let [{:keys [target-ids columns opacity]} (:compiled block)]
-                       (if (or (not (packed-number? opacity))
-                               (some #(geometric-attributes (:attribute %)) columns))
-                         (into targets target-ids) targets)))) #{} blocks))
+              :batch (let [{:keys [target-ids columns opacity] :as batch} (:compiled block)]
+                       (cond
+                         (or (not (packed-number? opacity))
+                             (some #(geometric-attributes (:attribute %)) columns))
+                         (into targets target-ids)
+
+                         (and (seq (:fog-off-bytes patch))
+                              (or (not (== 1 opacity)) (::layers/opacities batch))
+                              (some #(= :fog (:attribute %)) columns))
+                         (into targets (filter #(profiled-fog-channel (get (:by-id patch) %))) target-ids)
+
+                         :else targets)))) #{} blocks))
 
 (defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} ^booleans general]
   ;; A large pixel batch may have only a few geometric targets. Scan the mask
@@ -1275,7 +1317,7 @@
   (let [blocks (if (> (count blocks) 1) (coverage/plan blocks) blocks)
         size (* (int (::stride patch)) (count (:fixtures patch)))
         values (double-array size), present (boolean-array size)
-        targets (cond-> (general-targets blocks) (seq (:edge-tracking options)) (into (tracking-ids (:edge-tracking options))))]
+        targets (cond-> (general-targets patch blocks) (seq (:edge-tracking options)) (into (tracking-ids (:edge-tracking options))))]
     (if (empty? targets)
       (do (doseq [block blocks]
             (with-effect-source (:source block)
@@ -1334,7 +1376,10 @@
                              :batch (assoc block :compiled (first (validate-batches patch [(:batch block)] (:native-layer block))))
                              (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
           blocks (hdr/apply-contribution-gains blocks (:hdr options) #(get-in patch [:by-id % ::emission-channels]))
-          blocks (layers/compose blocks layer-rows blend-value
+          blocks (layers/compose-fields blocks layer-rows
+                                 (fn [id attribute previous value blend opacity]
+                                   (blend-field (when (= :fog attribute) (get (:by-id patch) id))
+                                                attribute previous value blend opacity))
                                  (fn [{:keys [target-id attribute value] :as a}]
                                    (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
                                                          (:blend a :replace) a (::hdr? patch))) (::hdr? patch))
@@ -1354,9 +1399,11 @@
   Heterogeneous patches, exact master levels and rich values use the general path.
   Assignments and batches accept :opacity in [0,1], default 1. Each write is
   previous + opacity * (blend(previous, value) - previous); zero skips the write,
-  preserving earlier contributions and absent-attribute defaults. Geometry uses
-  the same componentwise interpolation in world coordinates. Opacity never scales
-  authored parameters. Scalar channel overrides remain distinct from RGB color.
+  preserving earlier contributions and absent-attribute defaults. Profiled fog
+  uses its calibrated off level when no earlier write exists and interpolates in
+  physical DMX space. Geometry uses the same componentwise interpolation in world
+  coordinates. Opacity never scales authored parameters. Scalar channel overrides
+  remain distinct from RGB color.
   Blocks may carry :source provenance. Output validation/blending failures add
   that exact value as :effect-source in ex-data, retaining the original cause
   and data. Final geometric failures identify the last effective positive-opacity

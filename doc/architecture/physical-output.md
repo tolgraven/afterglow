@@ -113,8 +113,10 @@ sent channel values when a normal packet expires. It receives detached
 buffers and source metadata, including any immutable `:safety-state` from
 the completed source. A failed handoff marks the wire uncertain until a
 complete send succeeds. If the first handoff failed, the safety hook receives
-the current idle values. It also receives whether the last source predates
-the current publication gate. Return `nil` when no cutoff is needed.
+the current idle values. It also receives whether the source predates the
+current publication gate and the DMX patch used for the last successful
+handoff, including any successful safety handoff. Corrected buffers use
+the current gate's patch. Return `nil` when no cutoff is needed.
 The safety send leaves the expired frame pending for its usual admission
 rules and reports `:safety-output?` and `:safety-publications`.
 The next slot can still consume a newer completion that arrived during

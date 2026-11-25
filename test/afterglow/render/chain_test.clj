@@ -7,11 +7,17 @@
             [clojure.test :refer [deftest is]]))
 
 (defn- lit [n] {:op :const :value n})
+
 (defn- plus [& xs] {:op :add :args (vec xs)})
+
 (defn- parameter [key] {:op :param :key key})
+
 (def default-env {:params {:level 0.2} :elapsed-beats 3.0 :beat 4.0 :elapsed-ms 420.0})
+
 (def ids [:left :right])
+
 (def positions [[0.15 0 0] [0.73 0 0]])
+
 (def fixtures (mapv (fn [id i p] {:id id :position p :universe 1 :address (+ 1 (* 4 i))
                                    :channels {:focus 1 :red 2 :green 3 :blue 4}})
                     ids (range) positions))

@@ -26,6 +26,9 @@ jobs:
       - name: Run focused tests
         if: matrix.suite == 'pure'
         run: lein test-pure
+      - name: Check blank lines between definitions
+        if: matrix.java == '21' && matrix.suite == 'pure'
+        run: lein check-definition-spacing
       - name: Run all tests
         if: matrix.suite == 'parity'
         run: lein test

@@ -17,9 +17,10 @@
   Optional prepare-output receives those arrays and the source metadata and
   returns the final universe map before deadline admission. Optional
   prepare-safety-output receives a private copy of the last successfully sent
-  arrays, or current idle arrays if the initial send threw. Its metadata adds
-  :stale-source? and :uncertain? (a handoff may have sent some universes before
-  throwing). Return nil or the corrected buffers.
+  arrays, or current idle arrays if the initial send threw. Its metadata includes
+  :wire-patch from the last complete send, :stale-source? for an older source
+  generation, and :uncertain? for a possible partial send. Return nil or corrected
+  buffers using the current gate's patch.
 
   For time-bounded safety state, optional output-valid-until-ms receives the
   preparation metadata and monotonic time immediately before preparation. It
@@ -157,7 +158,7 @@
   (update-vals universes (fn [^bytes buffer] (aclone buffer))))
 
 (defn- wire-snapshot [packet output]
-  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms :generation :safety-state])
+  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms :generation :safety-state :wire-patch])
          :universes (copy-buffers output)))
 
 (defn- handoff! [owner packet output snapshot started]
@@ -194,20 +195,22 @@
 (defn- send-safety-output! [owner gate]
   (let [{:keys [last-sent uncertain?]} (some-> (:wire owner) deref)]
     (when (or last-sent uncertain?)
-      (let [source (if last-sent (dissoc last-sent :universes)
+      (let [source (if last-sent (dissoc last-sent :universes :wire-patch)
                        {:frame-id 0 :generation (:generation gate)})
-            context (preparation-context gate (assoc source :uncertain? (boolean uncertain?)
+            context (preparation-context gate (assoc source :wire-patch (:wire-patch last-sent)
+                                                           :uncertain? (boolean uncertain?)
                                                            :stale-source? (not= (:generation gate) (:generation source))))
+            output-source (assoc source :wire-patch (get-in gate [:key 1]))
             prepare! (fn []
                        (let [buffers (if last-sent (copy-buffers (:universes last-sent))
                                          (:universes (policy/materialize {:universes (get-in gate [:plan :idle-universes])})))]
                          ((:prepare-safety-output owner) buffers context)))]
-        (when-let [sent (prepare-and-handoff! owner source source context prepare! nil)]
+        (when-let [sent (prepare-and-handoff! owner source output-source context prepare! nil)]
           (assoc sent :safety-output? true))))))
 
 (defn- send-packet! [owner gate packet expires-at]
   (if (:send! owner)
-    (let [source (assoc packet :generation (:generation gate))
+    (let [source (assoc packet :generation (:generation gate) :wire-patch (get-in gate [:key 1]))
           context (preparation-context gate (select-keys packet [:frame-id :safety-state]))
           prepare! (fn []
                      (let [{:keys [universes]} (policy/materialize packet)]

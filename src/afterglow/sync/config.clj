@@ -13,8 +13,11 @@
    :link {:enabled? false :source-id :ableton-link :port 17000 :follow-transport? true}})
 
 (defn- bounded-int? [value low high] (and (integer? value) (<= low value high)))
+
 (defn- text? [value limit] (and (string? value) (<= 1 (count value) limit)))
+
 (defn- identifier? [value] (or (keyword? value) (text? value 128)))
+
 (defn source-id [id]
   (when-not (identifier? id) (fail! :invalid-config "Clock source requires a bounded identity"))
   (keyword id))

@@ -6,19 +6,25 @@
             [afterglow.control.params :as params]))
 
 (def curves #{:linear :ease-in :ease-out :smoothstep})
+
 (def semantic-axes
   {:level :pressure :dimmer :pressure :brightness :pressure :intensity :pressure
    :velocity :strike :strike :strike :pressure :pressure :aftertouch :pressure
    :pan :glide :azimuth :glide :rotation :glide :tilt :slide :elevation :slide
    :focus :slide :zoom :slide :slide :slide :glide :glide :lift :lift})
+
 (def max-mapped-parameters 62)
 
 (defn- fail! [path message]
   (throw (ex-info message {:expressive/error :invalid-policy :errors [{:path path :message message}]})))
+
 (defn- identifier? [x] (or (keyword? x) (and (string? x) (<= 1 (count x) 128))))
+
 (defn- kw [x] (if (string? x) (keyword x) x))
+
 (defn- finite-pair? [x]
   (and (vector? x) (= 2 (count x)) (every? params/finite-number? x)))
+
 (defn- normalize-binding [value path]
   (cond
     (nil? value) nil

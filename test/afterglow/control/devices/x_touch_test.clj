@@ -5,6 +5,7 @@
             [afterglow.control.devices.x-touch :as touch]))
 
 (defn cue-id [n] (keyword (str "cue-" n)))
+
 (defn initial-model []
   (control/new-show
    {:registry {:effects {:wash {:id :wash :version 1
@@ -13,6 +14,7 @@
                                          :mode {:type :enum :values [:a :b :c] :default :b}
                                          :color {:type :color :default [1 0 0]}}}}
                :cues (into {} (for [n (range 40)] [(cue-id n) {:id (cue-id n) :version 1 :effect-id :wash :name (str "Cue " n)}]))}}))
+
 (defn harness []
   (let [model (atom (initial-model)) commands (atom []) now (atom 0) callbacks (atom {}) log (atom [])]
     {:model model :commands commands :now now :callbacks callbacks :log log
@@ -27,10 +29,14 @@
                               (swap! commands conj command)
                               (let [result (control/apply-command @model command)]
                                 (reset! model (:model result)) result)))}}))
+
 (defn options [h id overrides]
   (merge (:options h) {:session-id id :channels (:channels h) :transport ((:transport h) id)} overrides))
+
 (defn input! [h id bytes] ((get @(:callbacks h) id) bytes))
+
 (defn instance-for [h cue] (last (sort-by :order (filter #(= cue (:cue-id %)) (vals (:instances @(:model h)))))))
+
 (defn sent [h] (mapv #(nth % 2) (filter #(= :send (first %)) @(:log h))))
 
 (deftest touch-gated-faders-and-relative-encoders-drive-real-validated-parameters
@@ -148,6 +154,51 @@
                                                   :transport {:open! (fn [_] (throw (Exception. "injected open failure")))
                                                               :send! (fn [& _]) :close! (fn [_])}}]}))))
       (is (= (inc before) (count (filter #(= :close (first %)) @(:log h))))))))
+
+(deftest group-strip-remapping-and-stale-bank-callbacks-never-reassign-ownership
+  (let [h (harness)
+        rows (mapv (fn [n] {:group-id [:manual n] :label (str "Group" n) :level 0.5}) (range 18))
+        _ (swap! (:model h) assoc :group-rows rows)
+        group (touch/connect-group!
+               (assoc (:options h) :channels [] :require-touch? false
+                      :group-channels :group-rows
+                      :group-level-command (fn [id value] {:op :test/level :id id :value value})
+                      :units [{:session-id "main" :transport ((:transport h) "main")}
+                              {:session-id "xt" :extender? true :transport ((:transport h) "xt")}]))]
+    (try
+      (input! h "main" [144 104 127])
+      (swap! (:model h) update :group-rows subvec 1)
+      (input! h "main" [224 127 127])
+      (is (empty? @(:commands h)) "Removed target cannot become the new occupant of its strip")
+      (input! h "main" [128 104 0])
+      (swap! (:model h) assoc :group-rows rows)
+      (input! h "main" [144 104 127])
+      (input! h "main" [224 127 127])
+      (is (empty? @(:commands h)) "A touch before display refresh does not target the new strip")
+      (input! h "main" [128 104 0])
+      (input! h "main" [224 127 127])
+      (is (empty? @(:commands h)) "Group profile still gates echoes when cue-only options would allow them")
+      (input! h "main" [144 104 127])
+      (input! h "main" [224 127 127])
+      (is (= {:op :test/level :id [:manual 0] :value 1.0}
+             (select-keys (peek @(:commands h)) [:op :id :value])))
+      (input! h "main" [128 104 0])
+      (input! h "main" [144 47 127])
+      (is (= 16 (:bank (touch/group-status group))))
+      (let [[main xt] (:sessions @(:state group))
+            bank #(get-in (session/snapshot %) [:local :bank])]
+        (is (= [16 16] (mapv bank [main xt])))
+        (session/suspend! main)
+        (input! h "main" [144 46 127])
+        (is (= 16 (:bank (touch/group-status group))))
+        (let [stale (get @(:callbacks h) "main")]
+          (session/reconnect! main)
+          (is (= [16 16] (mapv bank [main xt])))
+          (stale [144 46 127])
+          (is (= 16 (:bank (touch/group-status group)))))
+        (input! h "main" [144 46 127])
+        (is (= [0 0] (mapv bank [main xt]))))
+      (finally (touch/close-group! group)))))
 
 (deftest component-mapping-preserves-other-components-and-invalid-profiles-stay-inert
   (let [h (harness)

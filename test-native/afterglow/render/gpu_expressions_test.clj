@@ -5,7 +5,9 @@
             [clojure.test :refer [deftest is]]))
 
 (defn- const-node [x] {:op :const :value x})
+
 (defn- param [key type] {:op :param :key key :type type})
+
 (defn- operation [op & nodes] {:op op :args (vec nodes)})
 
 (def position {:op :vec3 :args (mapv #(hash-map :op :position :axis %) [:x :y :z])})

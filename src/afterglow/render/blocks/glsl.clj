@@ -4,7 +4,9 @@
 
 (def ^:private token-pattern
   #"\G\s*(?:((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)|([A-Za-z_][A-Za-z_0-9]*(?:\.[xyz])?)|([()+*/,-]))")
+
 (def ^:private operators {"+" [1 :add] "-" [1 :subtract] "*" [2 :multiply] "/" [2 :divide]})
+
 (def ^:private functions
   #{"sin" "cos" "abs" "floor" "fract" "sqrt" "exp" "pow" "clamp" "mix" "min" "max" "vec2" "vec3" "vec4"})
 

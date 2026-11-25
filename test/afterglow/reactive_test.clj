@@ -7,7 +7,9 @@
   (:import [java.util.concurrent CountDownLatch Executors TimeUnit Callable]))
 
 (defn value-sub [{:keys [db]} _] (:value @db))
+
 (def value-definition {:id ::value :kind :sub :implementation {:type :var :symbol "afterglow.reactive-test/value-sub"}})
+
 (defn- error-type [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo error (:type (ex-data error)))))
 
@@ -83,14 +85,18 @@
 (deftest a-batch-freezes-sources-even-when-a-handler-writes-a-ratom
   (let [system (reactive/create-system {}) cell (reactive/ratom system ::value 1)
         writer (reactive/reaction system ::writer #(let [before @cell] (when (= before 2) (reset! cell 3)) [before @cell]))
-        reader (reactive/reaction system ::reader #(identity @cell))]
-    (is (= [1 1] @writer)) (is (= 1 @reader))
-    (reset! cell 2)
-    (reactive/publish! system)
-    (is (= 3 @cell) "source writes retain immediate atom semantics")
-    (is (= [[2 2] 2] [@writer @reader]) "every derivation reads the same captured value")
-    (reactive/publish! system)
-    (is (= [[3 3] 3] [@writer @reader]))))
+        _ (reactive/reg-sub! system ::reader (fn [_ _] @cell))
+        {:keys [signal close!]} (reactive/acquire! system [::reader] (constantly nil))
+        bindings {:source [:source ::value] :derived [:subscription [::reader]]}]
+    (try
+      (is (= [1 1] @writer)) (is (= 1 @signal))
+      (reset! cell 2)
+      (is (= {:source 2 :derived 2} (:inputs (reactive/publish! system {} bindings))))
+      (is (= 3 @cell) "source writes retain immediate atom semantics")
+      (is (= [[2 2] 2] [@writer @signal]) "every derivation reads the same captured value")
+      (is (= {:source 3 :derived 3} (:inputs (reactive/publish! system {} bindings))))
+      (is (= [[3 3] 3] [@writer @signal]))
+      (finally (close!) (reactive/close! system)))))
 
 (deftest real-threads-cannot-mix-a-publish-snapshot
   (let [system (reactive/create-system {}) cell (reactive/ratom system ::value 1)
@@ -513,6 +519,7 @@
         (is (= {:value 1} @(reactive/db-signal system))))
       (is (empty? (:faults (reactive/publish! system))))
       ((:close! lease)))))
+
 (deftest untrusted-var-restoration-requires-local-registration-or-explicit-allowlist
   (let [empty (reactive/create-system {:value 2}) known (reactive/create-system {})
         data {:registrations [value-definition]}]

@@ -104,7 +104,8 @@
         instances (into {} (map (fn [[id instance]]
                                   [id (select-keys instance
                                                    [:id :cue-id :effect-id :effect-version :state :params
-                                                    :priority :order :phase :started-at-ms :started-at-beat
+                                                    :priority :order :render-priority :render-order :phase
+                                                    :started-at-ms :started-at-beat
                                                     :release-at-ms :release-at-beat :duration-timer :release-timer])]))
                         (:instances model))]
     (merge {:model-digest (digest model) :output-digest (digest portable-frame)

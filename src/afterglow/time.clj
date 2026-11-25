@@ -3,6 +3,7 @@
   tempo is used only when estimating milliseconds at a presentation boundary.")
 
 (def default-meter {:beats-per-bar 4 :bars-per-phrase 4})
+
 (def units #{:beats :bars :phrases :ms})
 
 (defn finite-number? [x]

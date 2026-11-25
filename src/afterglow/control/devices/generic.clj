@@ -90,7 +90,9 @@
                                   transport (assoc :midi transport)))))
 
 (defn connect-midi! [options] (connect! (assoc options :kind :midi)))
+
 (defn connect-osc! [options] (connect! (assoc options :kind :osc)))
+
 (defn connect-sensor! [options] (connect! (assoc options :kind :sensor)))
 
 (defn connect-push-3-midi!

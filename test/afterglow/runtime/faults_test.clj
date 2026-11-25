@@ -7,6 +7,7 @@
             [afterglow.control.model :as control]))
 
 (defn- invoke [show t compile] (engine/advance show {:time-ms t} compile))
+
 (defn- calls-compiler [calls behavior]
   (fn [definition]
     (fn [context]

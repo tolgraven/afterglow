@@ -85,6 +85,7 @@
       (is (= 4 @calls)))))
 
 (def cube {:shape :rounded-box :position [0 0 0] :size [4 2 2] :rounding 0})
+
 (def cut {:shape :sphere :radius 0.5 :position [0 0 0]})
 
 (deftest sculpted-box-and-moving-boolean-fields

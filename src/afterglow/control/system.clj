@@ -5,6 +5,7 @@
 
 (defn- invalid! [message & [details]]
   (throw (ex-info message {:control/error :invalid-system :details details})))
+
 (defn- unit? [x] (and (time/finite-number? x) (<= 0 x 1)))
 
 (defn validate-options [options]

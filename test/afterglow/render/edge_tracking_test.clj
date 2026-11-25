@@ -5,31 +5,39 @@
             [clojure.test :refer [deftest is]]))
 
 (def floor {:id :floor :point [0 0 0] :normal [0 1 0] :size [40 40]})
+
 (def links [{:leader :one :follower :two :surface floor :along [1 0 0]}
             {:leader :two :follower :three :surface floor :along [1 0 0]}])
+
 (def heads (mapv (fn [id x address angle]
                    {:id id :position [x 3 -1] :beam-angle angle :lens-radius-m 0.1
                     :universe 1 :address address :channels {:pan [1 2] :tilt [3 4] :red 5 :green 6 :blue 7}})
                  [:one :two :three] [-2 1 4] [510 518 526] [25 22 19]))
+
 ;; Express fixture addresses within their own universe even when a coarse/fine
 ;; pair or the fixture as a whole crosses a boundary.
 (def rig (mapv (fn [f] (if (> (:address f) 512)
                          (-> f (update :address - 512) (update :universe inc)) f)) heads))
+
 (defn- assign [id key value] {:target-id id :attribute key :value value})
+
 (defn- authored [x]
   (into [(assign :one :aim [(- x 1.0) 0.0 1.0])
          (assoc (assign :one :aim [(+ x 1.0) 0.0 1.0]) :opacity 0.5)]
         (for [f rig] (assign (:id f) :color [1.0 0.4 0.2]))))
+
 (defn- spots [patch rows]
   (mapv (fn [f]
           (let [row (get rows (:id f))
                 beam (optics/fixture-beam f (assoc row :pose (frame/fixture-pose f row)))]
             (optics/beam-footprint beam floor))) (:fixtures patch)))
+
 (defn- x-extents [spot]
   (let [x (first (:center spot))
         width (Math/hypot (* (:major-radius-m spot) (first (:major-axis spot)))
                           (* (:minor-radius-m spot) (first (:minor-axis spot))))]
     [(- x width) (+ x width)]))
+
 (defn- near [a b] (< (abs (- a b)) 1.0e-8))
 
 (deftest chains-track-actual-post-blend-movement-every-frame

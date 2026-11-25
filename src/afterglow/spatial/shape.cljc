@@ -6,8 +6,11 @@
 (def ^:private unit-stretch [1.0 1.0 1.0])
 
 (defn- box [lo hi] {:min lo :max hi})
+
 (defn- centered-box [p half] (box (mapv - p half) (mapv + p half)))
+
 (defn- centered-radius [p radius] (centered-box p [radius radius radius]))
+
 (defn- length [x y z] (math/hypot (math/hypot x y) z))
 
 (defn- sphere [{[cx cy cz :as p] :position r :radius}]

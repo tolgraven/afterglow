@@ -7,6 +7,7 @@
 
 (def lamp {:id :head :position [0 0 0] :direction [0 0 1] :beam-angle 20.0 :lens-radius-m 0.1
            :channels {:red 1 :green 2 :blue 3 :pan 4 :tilt 5} :universe 1 :address 1})
+
 (def lit {:emitted-color [0.8 0.1 0] :intensity 1.0 :direction [0 0 1]})
 
 (deftest custom-occluders-still-decide-visibility-for-prepared-volume-queries
@@ -19,6 +20,21 @@
     (is (= 0.8 (weight (for-volume options))))
     (is (nil? (weight (for-volume (override options)))))
     (is (nil? (weight (override (for-volume options)))))))
+
+(deftest prepared-observation-reader-preserves-optical-and-aimable-queries
+  (let [volume {:shape :sphere :position [0.0 0.0 3.0] :radius 0.25}
+        sampling (field/prepare volume)
+        origins {:min [0.0 0.0 0.0] :max [0.0 0.0 0.0]}
+        emissions (mapv #(beam/observe lamp %) [lit (assoc lit :shutter-open? false)])
+        wall {:id :wall :point [0 0 2] :normal [0 0 1]}]
+    (doseq [selection [#{:beam} #{:beam :aimable}]
+            settings [{:range-m 12.0} {:range-m 2.5} {:extinction-per-m 0.25}
+                      {:intensity-threshold 0.81M} {:surfaces [wall]}]
+            emitter emissions]
+      (let [options (beam/volume-options (beam/prepare-options settings) selection sampling origins)
+            reader (beam/observed-volume-reader volume sampling options)]
+        (is (= (beam/observed-contribution emitter volume sampling options) (reader emitter))
+            (pr-str [selection settings]))))))
 
 (defn- at [fixture output point options]
   (beam/contribution fixture output {:shape :sphere :position point :radius 0.0}

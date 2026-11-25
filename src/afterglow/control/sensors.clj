@@ -6,10 +6,15 @@
             [afterglow.time :as time]))
 
 (defn- fail! [message & [details]] (throw (ex-info message {:type ::invalid :details details})))
+
 (defn- finite? [x] (params/finite-number? x))
+
 (defn- id? [x] (or (keyword? x) (and (string? x) (<= 1 (count x) 128))))
+
 (defn- unit? [x] (and (finite? x) (<= 0 x 1)))
+
 (defn- nonnegative? [x] (and (finite? x) (<= 0 x)))
+
 (defn- portable? [x]
   (cond (or (nil? x) (string? x) (keyword? x) (boolean? x)) true
         (number? x) (finite? x)

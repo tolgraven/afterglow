@@ -6,8 +6,11 @@
            [java.nio.file Files]))
 
 (def model-name "3D Head / 45")
+
 (def channel-name "Lamp \"A\"")
+
 (def control-label "Slow \\ bright")
+
 (def fixture
   {:model model-name :manufacturer "Demo" :type "Head" :open-curly "{"
    :creator {:author "Writer \"A\"" :name "Fixture Creator" :version "1"}

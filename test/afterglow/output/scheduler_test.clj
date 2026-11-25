@@ -6,12 +6,16 @@
             [afterglow.output.scheduler :as scheduler]))
 
 (def fixtures [{:id :pixel :universe 0 :address 1 :channels {:red 1 :green 2 :blue 3}}])
+
 (def patch (delay (render/compile-patch fixtures)))
+
 (defn- bytes-copy [universes]
   (into {} (map (fn [[u data]] [u (mapv #(bit-and (int %) 255) data)])) universes))
+
 (defn- capture [physical sent]
   (scheduler/create {:now-ms #(deref physical)
                      :send! (fn [universes id] (swap! sent conj {:id id :bytes (bytes-copy universes)}))}))
+
 (defn- frame [r g b]
   {:universes {0 (byte-array (concat (map unchecked-byte [r g b]) (repeat 509 0)))}})
 
@@ -566,6 +570,44 @@
       (reset! clock 50)
       (is (:safety-output? (scheduler/publish! owner 50)))
       (is (= [:first-patch :next-patch [:next-patch true]] @contexts))
+      (finally (scheduler/close! owner)))))
+
+(deftest a-successful-safety-send-records-its-current-output-patch
+  (let [initial @patch
+        replacement (render/compile-patch [(assoc (first fixtures) :address 5)])
+        clock (atom 0) stall? (atom false) receipts (atom [])
+        address (fn [compiled] (get-in compiled [:fixtures 0 :address]))
+        owner (scheduler/create
+                {:now-ms #(deref clock)
+                 :send! (fn [_ _])
+                 :prepare-output (fn [buffers _]
+                                   (when @stall? (swap! clock + 26))
+                                   buffers)
+                 :prepare-safety-output
+                 (fn [buffers {:keys [output-context wire-patch generation stale-source?]}]
+                   (swap! receipts conj [(address wire-patch) (address output-context) generation stale-source?])
+                   (if (= wire-patch output-context) buffers (render/idle-universes output-context)))})
+        begin! (fn [epoch patch]
+                 (scheduler/begin-frame! owner epoch patch {} false {:output-context patch}))
+        publish! (fn [time]
+                   (reset! clock time)
+                   (scheduler/publish! owner time))]
+    (try
+      (let [token (begin! 0 initial)]
+        (is (true? (scheduler/complete! owner token (frame 180 0 0))))
+        (publish! 25)
+        (reset! stall? true)
+        (let [new-epoch (begin! 1 initial)]
+          (is (> (:generation new-epoch) (:generation token)))
+          (is (:safety-output? (publish! 50))))
+        (let [new-patch (begin! 1 replacement)]
+          (is (> (:generation new-patch) (:generation token)))
+          (is (:safety-output? (publish! 100))))
+        (is (:safety-output? (publish! 150)))
+        (is (= [[1 1 (:generation token) true]
+                [1 5 (:generation token) true]
+                [5 5 (:generation token) true]]
+               @receipts)))
       (finally (scheduler/close! owner)))))
 
 (deftest a-buffered-sample-can-survive-packet-packing-in-an-earlier-slot

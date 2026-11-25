@@ -533,6 +533,7 @@
        :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))}))))
 
 (def ^:private time-inputs {:time-ms "u_time_ms" :elapsed-ms "u_elapsed_ms"})
+
 (def ^:private numeric-contract
   {:cpu :float64 :gpu :float32 :requirements [:finite-float32-inputs :valid-operator-domains]})
 

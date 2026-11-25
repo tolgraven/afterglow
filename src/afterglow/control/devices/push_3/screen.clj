@@ -5,13 +5,21 @@
            [java.nio ByteBuffer ByteOrder]))
 
 (def ^:const width 960)
+
 (def ^:const height 160)
+
 (def ^:const stride 2048)
+
 (def ^:const payload-length (* height stride))
+
 (def vendor 0x2982)
+
 (def product 0x1969)
+
 (def interface-number 0)
+
 (def endpoint 0x01)
+
 (def display-name "Ableton Push 3 Display")
 
 (defn header []
@@ -53,6 +61,7 @@
     wire))
 
 (defn- u8 [^bytes bytes i] (bit-and 0xff (aget bytes i)))
+
 (defn- u16 [^bytes bytes i] (+ (u8 bytes i) (* 256 (u8 bytes (inc i)))))
 
 (defn configuration

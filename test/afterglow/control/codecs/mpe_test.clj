@@ -3,6 +3,7 @@
             [afterglow.control.codecs.mpe :as mpe]))
 
 (def zone (mpe/compile-zone {:manager-channel 0 :member-channels [1 2 3]}))
+
 (defn step [state bytes] (mpe/advance zone state bytes))
 
 (deftest per-note-channel-identities-and-before-note-expression

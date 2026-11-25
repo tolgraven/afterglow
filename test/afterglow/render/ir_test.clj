@@ -4,6 +4,7 @@
             [afterglow.render.ir :as ir]))
 
 (defn- c [value] {:op :const :value value})
+
 (defn- near? [a b] (< (Math/abs (double (- a b))) 1.0e-9))
 
 (deftest explicit-inputs-and-reusable-compiled-functions

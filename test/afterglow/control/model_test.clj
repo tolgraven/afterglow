@@ -33,6 +33,97 @@
        (apply! {:op :registry/publish :kind :effects :definition effect})
        (apply! {:op :cue/put :cue {:id :red :effect-id :wash :params {:level 0.6}}}))))
 
+(deftest reorder-uses-captured-launch-ids-and-preserves-chronology
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (configured)
+                 (apply! launch)
+                 (apply! (assoc launch :launch {:params {:level 0.7}}))
+                 (apply! launch)
+                 (apply! (assoc launch :launch {:priority 10})))
+        move {:op :instance/move-after :instance-id "0:1" :after-instance-id "0:3"
+              :expected-revision (:revision show)}
+        cmd (command show move)
+        result (model/apply-command show cmd)
+        moved (:model result)
+        ids ["0:2" "0:3" "0:1" "0:4"]]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (= ids (get-in result [:ack :instance-ids])))
+    (is (= [{:type :instances/reordered :instance-ids ids}] (:events result)))
+    (is (= ids (mapv :id (:instances (views/snapshot moved)))))
+    (is (= ["0:1" "0:2" "0:3" "0:4"] (:instances (views/cue-view moved :red))))
+    (is (= (:instances show) (update-vals (:instances moved) #(dissoc % :render-order))))
+    (is (identical? (get-in show [:instances "0:4"]) (get-in moved [:instances "0:4"])))
+    (is (= {:model moved :ack (:ack result) :events []} (model/apply-command moved cmd)))
+    (is (= ["0:2" "0:3" "0:1" "0:5" "0:4"]
+           (mapv :id (:instances (views/snapshot (apply! moved launch))))))
+    (is (= ids (mapv :id (:instances (views/snapshot (model/new-show moved))))))
+    (let [after-release (apply! moved {:op :instance/end :instance-id "0:3"})
+          relaunched (-> after-release (apply! {:op :instance/remove :instance-id "0:3"}) (apply! launch))]
+      (doseq [[m op expected] [[moved move :stale-revision]
+                               [after-release (dissoc move :expected-revision) :instance-not-running]
+                               [relaunched (dissoc move :expected-revision) :unknown-instance]]]
+        (let [rejected (model/apply-command m (command m op))]
+          (is (= expected (get-in rejected [:ack :code])))
+          (is (identical? m (:model rejected)))
+          (is (empty? (:events rejected))))))))
+
+(deftest standalone-cross-tier-reorder-preserves-authored-priority-and-accepts-an-existing-position
+  (let [launch (fn [show priority]
+                 (apply! show {:op :cue/launch :cue-id :red :launch {:priority priority}}))
+        show (reduce launch (configured) [0 0 10 10 20])
+        move (fn [model source target]
+               (model/apply-command model (command model {:op :instance/move-after
+                                                          :instance-id source :after-instance-id target})))
+        adjacent (move show "0:3" "0:2")
+        up (move show "0:1" "0:3")
+        moved (:model up)
+        down (move moved "0:1" "0:2")]
+    (is (= :accepted (get-in adjacent [:ack :status])))
+    (is (empty? (:events adjacent)))
+    (is (identical? (:instances show) (get-in adjacent [:model :instances])))
+    (is (= ["0:2" "0:3" "0:1" "0:4" "0:5"] (get-in up [:ack :instance-ids])))
+    (is (= (assoc (get-in show [:instances "0:1"]) :render-priority 10 :render-order 1)
+           (get-in moved [:instances "0:1"])))
+    (is (identical? (get-in show [:instances "0:5"]) (get-in moved [:instances "0:5"])))
+    (is (= ["0:2" "0:3" "0:1" "0:4" "0:6" "0:5"]
+           (mapv :id (:instances (views/snapshot (launch moved 10))))))
+    (is (= ["0:2" "0:1" "0:3" "0:4" "0:5"] (get-in down [:ack :instance-ids])))
+    (is (nil? (get-in down [:model :instances "0:1" :render-priority])))))
+
+(deftest seeded-shuffle-preserves-priorities-and-pins-releasing-and-layer-slots
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (reduce (fn [m priority] (apply! m (assoc launch :launch {:priority priority})))
+                         (configured) [0 0.0 0 0 0 0 0 3 3 3])
+                 (apply! {:op :instance/end :instance-id "0:3"})
+                 (assoc-in [:instances "0:5" :source] {:adapter :test :native-layer {:id :macro :member 0}}))
+        shuffled (fn [seed] (model/apply-command show (command show {:op :instances/shuffle :seed seed})))
+        result (shuffled 31)
+        ids (get-in result [:ack :instance-ids])]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (= result (shuffled 31)))
+    (is (not= ids (get-in (shuffled 37) [:ack :instance-ids])))
+    (is (= ["0:3" "0:5"] (mapv ids [2 4])))
+    (is (= #{"0:8" "0:9" "0:10"} (set (subvec ids 7))))
+    (is (= (:instances show) (update-vals (get-in result [:model :instances]) #(dissoc % :render-order))))
+    (is (= :invalid-seed (get-in (shuffled 9223372036854775808N) [:ack :code])))))
+
+(deftest reorder-rejects-ambiguous-compound-positions-atomically
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (configured)
+                 (apply! (assoc launch :source {:adapter :test :native-layer {:id :a :member 0}}))
+                 (apply! launch)
+                 (apply! (assoc launch :source {:adapter :test :native-layer {:id :a :member 1}}))
+                 (apply! launch))
+        mixed (assoc-in show [:instances "0:3" :priority] 1)]
+    (doseq [[m source target code] [[show "0:1" "0:3" :same-render-unit]
+                                    [show "0:4" "0:1" :interleaved-native-layer]
+                                    [mixed "0:4" "0:1" :priority-mismatch]]]
+      (let [result (model/apply-command m (command m {:op :instance/move-after
+                                                       :instance-id source :after-instance-id target}))]
+        (is (= code (get-in result [:ack :code])))
+        (is (identical? m (:model result)))
+        (is (empty? (:events result)))))))
+
 (deftest construction-is-inert-and-validates-basic-shape
     (is (= {:bpm 120 :playing? true :beat 0.0 :meter {:beats-per-bar 4 :bars-per-phrase 4}}
            (:transport (model/new-show))))
@@ -161,6 +252,237 @@
       (let [result (model/apply-command show (command show {:op :param/set :instance-id id :param param :value value}))]
         (is (= :invalid-params (get-in result [:ack :code])))
         (is (= show (:model result)))))))
+
+(def ^:private studio-operator {:operator-id "studio-panel"})
+
+(defn- operator-command [show {:keys [op] :as operation}]
+  (command show (if (#{:history/undo :history/redo :history/select} op)
+                  (merge {:expected-history-position (get-in show [:control :edit-history :position] 0)} operation)
+                  operation)))
+
+(defn- operator! [show operation]
+  (let [{:keys [model ack]} (model/apply-command show (operator-command show operation) studio-operator)]
+    (when-not (= :accepted (:status ack))
+      (throw (ex-info "Operator command rejected" ack)))
+    model))
+
+(defn- knob [id param gesture-id]
+  {:instance-id id :param param :control-id :knob :gesture-id gesture-id})
+
+(defn- turn! [show gesture value]
+  (-> show
+      (operator! (assoc gesture :op :gesture/begin))
+      (operator! (assoc gesture :op :gesture/sample :sequence 1 :value value))
+      (operator! (assoc gesture :op :gesture/end :last-sequence 1))))
+
+(deftest operator-edits-use-separate-authority-and-existing-receipts
+  (let [show (events/begin (apply! (configured) {:op :cue/launch :cue-id :red}))
+        id (first (keys (:instances show)))
+        gesture (assoc (knob id :level :gesture-a)
+                       :source {:adapter :forged :operator-id "studio-panel"} :actor "forged")
+        begin-command (command show (assoc gesture :op :gesture/begin))
+        forged (model/apply-command show begin-command)
+        started (operator! show (assoc gesture :op :gesture/begin))
+        value-command (command started (assoc gesture :op :gesture/sample :sequence 1 :value 0.8))
+        {:keys [model ack] :as sampled} (model/apply-command started value-command studio-operator)
+        duplicate (model/apply-command model value-command studio-operator)
+        replay-forged (model/apply-command model value-command)
+        replay-other (model/apply-command model value-command {:operator-id "other-panel"})
+        ended (operator! model (assoc gesture :op :gesture/end :last-sequence 1
+                                     :target-display {:cue-id :forged :cue-label "Forged"}))
+        undone (operator! ended {:op :history/undo :expected-cursor 1})
+        ordinary (apply! show (assoc gesture :op :param/set :value 0.7))]
+    (is (= :operator-required (get-in forged [:ack :code])))
+    (is (identical? show (:model forged)))
+    (is (= 0.8 (get-in model [:instances id :params :level])))
+    (is (= 0 (get-in model [:control :edit-history :cursor])))
+    (is (= [{:type :param/changed :instance-id id :param :level :value 0.8}] (:events sampled)))
+    (is (= {:kind :command :id "studio-panel"} (:emitter (last (events/pending model)))))
+    (is (= ack (:ack duplicate)))
+    (is (identical? model (:model duplicate)))
+    (is (empty? (:events duplicate)))
+    (is (= :operator-required (get-in replay-forged [:ack :code])))
+    (is (= :command-id-conflict (get-in replay-other [:ack :code])))
+    (is (= "studio-panel" (get-in ended [:control :edit-history :nodes 1 :actor])))
+    (is (= {:cue-id :red :cue-label "red" :effect-id :wash :effect-label "wash"}
+           (get-in ended [:control :edit-history :nodes 1 :target-display])))
+    (is (= 0.6 (get-in undone [:instances id :params :level])))
+    (is (= 0.7 (get-in ordinary [:instances id :params :level])))
+    (is (nil? (get-in ordinary [:control :edit-history])))))
+
+(deftest unrelated-parameters-undo-after-an-external-aba-write
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        target [:instance-param id :level]
+        edits (-> show (turn! (knob id :level :gesture-a) 0.8)
+                       (turn! (knob id :count :gesture-b) 4))
+        repeated (apply! edits {:op :param/set :instance-id id :param :level :value 0.8})
+        automated (-> repeated
+                      (apply! {:op :param/set :instance-id id :param :level :value 0.7})
+                      (apply! {:op :param/set :instance-id id :param :level :value 0.8}))
+        separate-undo (operator! automated {:op :history/undo :expected-cursor 2})
+        conflict (model/apply-command separate-undo
+                   (operator-command separate-undo {:op :history/undo :expected-cursor 1}) studio-operator)]
+    (is (= 0 (get-in repeated [:control :edit-history :generations target])))
+    (is (= 2 (get-in automated [:control :edit-history :generations target])))
+    (is (= 2 (get-in separate-undo [:instances id :params :count])))
+    (is (= 0.8 (get-in separate-undo [:instances id :params :level])))
+    (is (= :history-conflict (get-in conflict [:ack :code])))
+    (is (= target (get-in conflict [:ack :details :target])))
+    (is (identical? separate-undo (:model conflict)))
+    (is (empty? (:events conflict)))))
+
+(deftest canceled-edits-preserve-redo-and-validate-samples
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        target [:instance-param id :count]
+        undone (-> show (turn! (knob id :count :gesture-a) 4)
+                   (operator! {:op :history/undo :expected-cursor 1}))
+        gesture (knob id :count :gesture-b)
+        open (operator! undone (assoc gesture :op :gesture/begin))
+        sample (assoc gesture :op :gesture/sample :sequence 1 :value 3)
+        invalid (model/apply-command open (command open (assoc sample :value 3.5)) studio-operator)
+        other (model/apply-command open (command open sample) {:operator-id "other-panel"})
+        sampled (operator! open sample)
+        canceled (model/apply-command sampled (command sampled (assoc gesture :op :gesture/cancel))
+                                      studio-operator)
+        redone (operator! (:model canceled) {:op :history/redo :expected-cursor 0 :node-id 1})]
+    (is (= :invalid-params (get-in invalid [:ack :code])))
+    (is (identical? open (:model invalid)))
+    (is (= :unknown-gesture (get-in other [:ack :code])))
+    (is (identical? open (:model other)))
+    (is (= 3 (get-in sampled [:instances id :params :count])))
+    (is (= [{:type :param/changed :instance-id id :param :count :value 2}] (:events canceled)))
+    (is (nil? (get-in canceled [:model :control :edit-history :open target])))
+    (is (= 0 (get-in canceled [:ack :history-cursor])))
+    (is (= 4 (get-in redone [:instances id :params :count])))
+    (is (= 1 (get-in redone [:control :edit-history :cursor])))))
+
+(deftest history-travel-validates-all-final-writes-before-commit
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        edits (-> show (turn! (knob id :level :gesture-a) 0.8)
+                       (turn! (knob id :count :gesture-b) 4))
+        selection {:op :history/select :expected-cursor 2 :node-id 0}
+        valid (model/apply-command edits (operator-command edits selection) studio-operator)
+        reloaded (assoc-in edits [:instances id :definition :params :level :bounds] [0.7 1.0])
+        invalid (model/apply-command reloaded (operator-command reloaded selection) studio-operator)]
+    (is (= :accepted (get-in valid [:ack :status])))
+    (is (= [:count :level] (mapv :param (:events valid))))
+    (is (= 0 (get-in valid [:model :control :edit-history :cursor])))
+    (is (= :invalid-params (get-in invalid [:ack :code])))
+    (is (identical? reloaded (:model invalid)))
+    (is (empty? (:events invalid)))
+    (is (= 4 (get-in (:model invalid) [:instances id :params :count])))
+    (is (= 2 (get-in (:model invalid) [:control :edit-history :cursor])))))
+
+(deftest temporary-gestures-validate-native-values-and-project-an-owned-restoration
+  (let [cases [[:color {:type :color} [1 0 0] [0.2 0.3 0.4] [2 0 0]]
+               [:position {:type :vector :size 3 :bounds [-1 1]} [0 0 0] [0.3 0.4 -0.2] [0 1]]
+               [:span {:type :range :bounds [0 1]} [0.2 0.8] [0.3 0.8] [0.8 0.3]]
+               [:shape {:type :enum :values [{:signal :sine} nil]} {:signal :sine} nil :other]
+               [:enabled {:type :boolean} true false :yes]
+               [:count {:type :integer :bounds [1 8]} 2 4 4.5]
+               [:period {:type :number :bounds [0 2]} 1/3 5/11 :fraction]]
+        schemas (into {} (map (fn [[param schema baseline]] [param (assoc schema :default baseline)])) cases)
+        show (-> (model/new-show)
+                 (apply! {:op :registry/publish :kind :effects :definition (update effect :params merge schemas)})
+                 (apply! {:op :cue/put :cue {:id :red :effect-id :wash}})
+                 (apply! {:op :cue/launch :cue-id :red}))
+        id (first (keys (:instances show)))
+        propose (fn [model op] (model/apply-command model (command model op) studio-operator))]
+    (doseq [[param {:keys [type]} baseline live invalid] cases]
+      (testing (name type)
+        (let [gesture (knob id param :temporary)
+              begin (assoc gesture :op :gesture/begin)
+              sample (assoc gesture :op :gesture/sample :sequence 1 :value live)
+              cancel (assoc gesture :op :gesture/cancel)
+              target [:instance-param id param]
+              path [:instances id :params param]
+              started (operator! show (assoc begin :temporary? true))
+              sampled (operator! started sample)
+              rejected (propose started (assoc sample :value invalid))
+              saved (model/settle-temporary-gestures-for-save sampled)
+              canceled (operator! sampled cancel)]
+          (when-not (#{:number :integer} type)
+            (is (= :target-unavailable (get-in (propose show begin) [:ack :code]))))
+          (is (= :invalid-value (get-in rejected [:ack :code])))
+          (is (identical? started (:model rejected)))
+          (is (= :invalid-value (get-in (propose started (dissoc sample :value)) [:ack :code])))
+          (is (= live (get-in sampled path)))
+          (is (= :temporary-gesture (get-in (propose sampled (assoc gesture :op :gesture/end :last-sequence 1)) [:ack :code])))
+          (is (= baseline (get-in (:model saved) path) (get-in canceled path)))
+          (is (= live (get-in sampled path)))
+          (is (= baseline (get-in saved [:settled target :before])))
+          (is (empty? (get-in canceled [:control :edit-history :open])))
+          (is (= {0 {:parent nil}} (:nodes (model/edit-history-snapshot sampled))
+                                 (get-in canceled [:control :edit-history :nodes]))))))))
+
+(deftest temporary-color-owns-the-whole-value-generation
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        gesture (knob id :color :temporary)
+        path [:instances id :params :color]
+        target [:instance-param id :color]
+        varied [0.4 0 0]
+        live (-> show (operator! (assoc gesture :op :gesture/begin :temporary? true))
+                 (operator! (assoc gesture :op :gesture/sample :sequence 1 :value varied)))
+        changed (apply! live {:op :param/set :instance-id id :param :color :value [0.4 0 0.1]})
+        repeated (apply! changed {:op :param/set :instance-id id :param :color :value varied})
+        evolved (model/track-parameter-generations live (assoc-in live path [0.4 0.1 0]))
+        canceled (model/apply-command repeated (command repeated (assoc gesture :op :gesture/cancel)) studio-operator)]
+    (is (= 2 (get-in repeated [:control :edit-history :generations target])))
+    (is (= 1 (get-in evolved [:control :edit-history :generations target])))
+    (is (= :history-conflict (get-in canceled [:ack :discarded])))
+    (is (= varied (get-in (:model (model/settle-temporary-gestures-for-save repeated)) path)))
+    (is (= varied (get-in (:model canceled) path)))
+    (is (empty? (get-in canceled [:model :control :edit-history :open])))))
+
+(deftest history-generations-follow-retention-and-clear-on-restart
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        first-edit (turn! show (knob id :level :gesture-a) 0.8)
+        pruned (turn! (assoc-in first-edit [:control :edit-history :limit] 2)
+                      (knob id :count :gesture-b) 4)
+        open (operator! pruned (assoc (knob id :level :gesture-c) :op :gesture/begin))
+        late-sample (command open (assoc (knob id :level :gesture-c) :op :gesture/sample
+                                        :sequence 1 :value 0.9))
+        restart (apply! open {:op :show/restart})
+        rejected (model/apply-command restart late-sample studio-operator)
+        root-undo (model/apply-command restart (operator-command restart {:op :history/undo :expected-cursor 0})
+                                       studio-operator)]
+    (is (= {[:instance-param id :count] 0} (get-in pruned [:control :edit-history :generations])))
+    (is (seq (get-in open [:control :edit-history :open])))
+    (is (nil? (get-in restart [:control :edit-history])))
+    (is (= :stale-epoch (get-in rejected [:ack :code])))
+    (is (= :at-history-root (get-in root-undo [:ack :code])))
+    (is (identical? restart (:model root-undo)))))
+
+(deftest an-evicted-undo-cannot-replay-after-redo-returns-to-the-same-tip
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        edited (turn! show (knob id :level :gesture-a) 0.8)
+        undo (operator-command edited {:op :history/undo :expected-cursor 1})
+        undone (model/apply-command edited undo studio-operator)
+        redone (operator! (:model undone) {:op :history/redo :expected-cursor 0 :node-id 1})
+        cached (model/apply-command redone undo studio-operator)
+        evicted (reduce (fn [model _] (apply! model {:op :master/set :value 0.9})) redone (range 1024))
+        replayed (model/apply-command evicted undo studio-operator)
+        fresh (operator-command evicted {:op :history/undo :expected-cursor 1})
+        incomplete (model/apply-command evicted (dissoc fresh :expected-history-position) studio-operator)
+        disengaged (model/apply-command evicted fresh studio-operator)]
+    (is (= 2 (get-in undone [:ack :history-position])))
+    (is (= (:ack undone) (:ack cached)))
+    (is (identical? redone (:model cached)))
+    (is (nil? (get-in evicted [:control :history (:command-id undo)])))
+    (is (= [1 3] ((juxt :cursor :position) (get-in evicted [:control :edit-history]))))
+    (is (= 0.8 (get-in evicted [:instances id :params :level])))
+    (doseq [result [replayed incomplete]]
+      (is (= :stale-history-position (get-in result [:ack :code])))
+      (is (identical? evicted (:model result)))
+      (is (empty? (:events result))))
+    (is (= [:accepted 0 4] ((juxt :status :history-cursor :history-position) (:ack disengaged))))
+    (is (= 0.6 (get-in disengaged [:model :instances id :params :level])))))
 
 (deftest releases-address-instance-and-do-not-reset-release-clock
   (let [show (-> (configured) (apply! {:op :cue/launch :cue-id :red})
@@ -429,3 +751,61 @@
     (doseq [targets [nil 1 [:left :left] [:left nil]]]
       (is (= :invalid-targets (get-in (model/apply-command m (command m {:op :effect/launch :effect-id :wash
                                                                         :launch {:targets targets}})) [:ack :code]))))))
+
+(deftest domain-command-uses-the-shared-receipts-and-event-batch
+  (let [base (events/begin (model/new-show))
+        cmd (command base {:op :example/set :value 1 :expected-revision 0})
+        changed {:type :example/changed :value 1}
+        operation (fn [m {:keys [value]}]
+                    (when (neg? value)
+                      (throw (ex-info "Invalid value" {:control/error :invalid-value})))
+                    {:model (assoc-in m [:settings :example] value)
+                     :events [changed] :result {:value value}})
+        result (model/apply-domain-command base cmd operation)
+        updated (:model result)
+        duplicate (model/apply-domain-command updated cmd operation)]
+    (is (= {:status :accepted :revision 1 :value 1}
+           (select-keys (:ack result) [:status :revision :value])))
+    (is (= 1 (get-in updated [:settings :example])))
+    (is (= [changed] (mapv :event (events/pending updated))))
+    (is (= (:ack result) (:ack duplicate)))
+    (is (identical? updated (:model duplicate)))
+    (is (= [] (:events duplicate)))
+    (doseq [[code m c] [[:wrong-show base (assoc cmd :show-id :other)]
+                        [:stale-epoch base (assoc cmd :epoch 1)]
+                        [:stale-revision updated (assoc cmd :command-id :new)]
+                        [:command-id-conflict updated (assoc cmd :value 2)]
+                        [:invalid-value base (assoc cmd :value -1)]]]
+      (let [rejected (model/apply-domain-command m c operation)]
+        (is (= code (get-in rejected [:ack :code])))
+        (is (identical? m (:model rejected)))))))
+
+(deftest host-domain-admission-preserves-an-open-operator-gesture
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        gesture (knob id :level :interleaved)
+        started (operator! show (assoc gesture :op :gesture/begin))
+        cmd (command started {:op :example/set :value 0.5})
+        operation (fn [m {:keys [value]}] {:model (assoc-in m [:settings :example] value)})
+        mixed (model/apply-domain-command started cmd operation)
+        mixed-model (:model mixed)
+        sample (operator-command mixed-model
+                                 (assoc gesture :op :gesture/sample :sequence 1 :value 0.8
+                                        :source {:adapter :guest :operator-id "studio-panel"}))
+        forged (model/apply-domain-command
+                 mixed-model sample
+                 (fn [& _] (throw (AssertionError. "Reserved history operations must use owner admission"))))
+        sampled (model/apply-command mixed-model sample studio-operator)
+        ended (operator! (:model sampled) (assoc gesture :op :gesture/end :last-sequence 1))
+        undo (operator! ended {:op :history/undo :expected-cursor 1})]
+    (is (= :accepted (get-in mixed [:ack :status])))
+    (is (= 0.5 (get-in mixed-model [:settings :example])))
+    (is (= (get-in started [:control :edit-history])
+           (get-in mixed-model [:control :edit-history])))
+    (is (= :operator-required (get-in forged [:ack :code])))
+    (is (identical? mixed-model (:model forged)))
+    (is (= :accepted (get-in sampled [:ack :status])))
+    (is (= 0.8 (get-in ended [:instances id :params :level])))
+    (is (= 0.6 (get-in undo [:instances id :params :level])))
+    (is (= 0.5 (get-in undo [:settings :example])))
+    (is (= (:ack mixed) (:ack (model/apply-domain-command undo cmd operation))))))

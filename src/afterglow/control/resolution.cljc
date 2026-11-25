@@ -5,6 +5,7 @@
             [clojure.set :as set]))
 
 (defn- id-key [x] (if (string? x) (keyword x) x))
+
 (defn- field [m k] (get m k (get m (name k))))
 
 (defn- width [spec]
@@ -56,6 +57,7 @@
          (tree-seq coll? seq expression))))
 
 (defn- targets [ids] (when (coll? ids) (set ids)))
+
 (defn- intersection [a b] (cond (nil? a) b (nil? b) a :else (set/intersection a b)))
 
 (defn parameter-bits
