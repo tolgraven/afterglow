@@ -741,7 +741,8 @@
     (aset-boolean present index true))))
 
 (defn- apply-hdr! [patch options ^doubles values ^booleans present ^objects general]
-  (when-let [settings (:hdr options)]
+  (when-let [settings (cond-> (:hdr options)
+                        (::hdr-falloff options) (assoc ::hdr/falloff-weight (::hdr-falloff options)))]
     (let [slots (::attribute-slots patch)
           stride (long (::stride patch))
           rich? (fn [i] (or (nil? values) (and general (some? (aget general (int i))))))
@@ -1437,8 +1438,8 @@
                    (map? (:previous-values options)))
       (fail! "Invalid render options" {:options options}))
     (when-not (vector? contributions) (fail! "Contributions must be an ordered vector" {}))
-    (when (:hdr options) (hdr/validate! (:hdr options)))
-    (let [blocks (mapv (fn [block]
+    (let [options (cond-> options (:hdr options) (assoc ::hdr-falloff (hdr/compile! (:hdr options))))
+          blocks (mapv (fn [block]
                          (when-not (map? block) (fail! "Invalid contribution block" {}))
                          (with-effect-source (:source block)
                            (case (:kind block)

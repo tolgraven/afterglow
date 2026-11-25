@@ -3,7 +3,9 @@
   (:require [afterglow.render.photometry :as photometry]
             [afterglow.render.hdr.packed :as packed]
             [afterglow.render.shutter :as shutter]
-            [thi.ng.color.core :as color]))
+            [thi.ng.color.core :as color])
+  (:import [clojure.lang IFn$DD]
+           [java.util.concurrent ConcurrentHashMap]))
 
 (def emitters (set (keys photometry/emitter-spectrum)))
 
@@ -11,9 +13,87 @@
 
 (defn- nonnegative? [n] (and (number? n) (Double/isFinite (double n)) (not (neg? n))))
 
-(defn validate!
-  "Validate resolved, portable frame controls. Distances are metres."
-  [settings]
+(def falloff-presets
+  "Named spill responses. Each maps the distance fraction d/radius to a weight."
+  #{:linear :quadratic :smoothstep})
+
+(def max-falloff-points
+  "Upper bound on authored falloff control points, bounding per-receiver lookup."
+  64)
+
+(defn- unit-weight? [n]
+  (and (number? n) (Double/isFinite (double n)) (<= 0.0 (double n) 1.0)))
+
+(defn falloff-curve?
+  "Whether points is a portable authored falloff: a vector of
+  [distance-fraction weight] pairs. Distance fractions increase strictly from 0
+  (the source) to 1 (the spill radius). Every weight is finite and within [0,1]."
+  [points]
+  (and (vector? points) (<= 2 (count points) max-falloff-points)
+       (every? #(and (vector? %) (= 2 (count %)) (every? unit-weight? %)) points)
+       (zero? (double (first (first points)))) (== 1.0 (double (first (peek points))))
+       (apply < (map #(double (first %)) points))))
+
+(def ^:private preset-weights
+  {:linear (fn ^double [^double u] (- 1.0 u))
+   :quadratic (fn ^double [^double u] (let [t (- 1.0 u)] (* t t)))
+   :smoothstep (fn ^double [^double u] (let [t (- 1.0 u)] (* t t (- 3.0 (* 2.0 t)))))})
+
+(defn- compile-curve
+  "Piecewise-linear interpolation over owned, never-mutated control arrays."
+  [points]
+  (let [^doubles xs (double-array (map #(double (first %)) points))
+        ^doubles ws (double-array (map #(double (second %)) points))
+        last-index (dec (alength xs))]
+    (fn ^double [^double u]
+      (cond
+        (<= u 0.0) (aget ws 0)
+        (>= u 1.0) (aget ws last-index)
+        :else (loop [k 1]
+                (if (and (< k last-index) (>= u (aget xs k)))
+                  (recur (inc k))
+                  (let [x0 (aget xs (dec k)) w0 (aget ws (dec k))]
+                    (+ w0 (* (- u x0) (/ (- (aget ws k) w0) (- (aget xs k) x0)))))))))))
+
+;; Compiled curves are pure functions of their immutable control points, so
+;; workers can share them. Only validated curves enter, so a hit is already
+;; valid. Persistent vectors cache their hash and equality checks identity
+;; first, so a hit allocates nothing.
+(def ^:private ^ConcurrentHashMap compiled-curves (ConcurrentHashMap.))
+
+(def max-compiled-curves
+  "Distinct authored curves retained. A miss beyond this evicts one entry."
+  256)
+
+(defn falloff?
+  "A named preset or an authored control-point curve. A compiled curve skips
+  the structural check because it was validated before it was cached."
+  [falloff]
+  (or (contains? falloff-presets falloff)
+      (and (vector? falloff) (.containsKey compiled-curves falloff))
+      (falloff-curve? falloff)))
+
+(defn falloff-weight
+  "Compile a validated falloff once into a primitive distance-fraction to
+  weight function. Presets return shared constants. Authored curves are cached
+  by value. A miss at capacity evicts a single other curve. Concurrent misses can
+  briefly exceed the bound by the number of compiling workers."
+  ^IFn$DD [falloff]
+  (or (get preset-weights falloff)
+      (when (vector? falloff) (.get compiled-curves falloff))
+      (do (when-not (falloff-curve? falloff)
+            (throw (ex-info "Invalid HDR spill falloff" {:falloff falloff})))
+          (when (>= (.size compiled-curves) (long max-compiled-curves))
+            (when-let [evicted (first (.keySet compiled-curves))]
+              (.remove compiled-curves evicted)))
+          (let [f (compile-curve falloff)]
+            (or (.putIfAbsent compiled-curves falloff f) f)))))
+
+(defn compile!
+  "Validate resolved, portable frame controls and return the compiled spill
+  falloff. The frame carries it into scatter, so receivers never look it up or
+  recompile it. Distances are metres."
+  ^IFn$DD [settings]
   (let [{:keys [gain source-gains cue-gains instance-gains fixture-ids max-excess
                 white-mix spill spill-white-mix radius falloff]
          :or {gain 1 max-excess 1 white-mix 1 spill 0 spill-white-mix 1 radius 1 falloff :linear}} settings]
@@ -22,11 +102,17 @@
                              :max-excess :white-mix :spill :spill-white-mix :radius :falloff} (keys settings))
                    (every? nonnegative? [gain max-excess radius])
                    (every? #(and (nonnegative? %) (<= % 1)) [white-mix spill spill-white-mix])
-                   (#{:linear :quadratic :smoothstep} falloff)
+                   (falloff? falloff)
                    (or (nil? fixture-ids) (vector? fixture-ids) (set? fixture-ids))
                    (every? #(or (nil? %) (and (map? %) (every? nonnegative? (vals %))))
                            [source-gains cue-gains instance-gains]))
-      (throw (ex-info "Invalid HDR gain, scope, spill or highlight settings" {:settings settings}))))
+      (throw (ex-info "Invalid HDR gain, scope, spill or highlight settings" {:settings settings})))
+    (falloff-weight falloff)))
+
+(defn validate!
+  "Validate resolved, portable frame controls. Distances are metres."
+  [settings]
+  (compile! settings)
   settings)
 
 (defn- rgb-attrs? [channels] (every? channels [:red :green :blue]))
@@ -92,7 +178,7 @@
         center (double (nth pos axis))
         ^doubles coords coords
         spill (double (:spill settings 0))
-        falloff (:falloff settings :linear)]
+        ^IFn$DD falloff (or (::falloff-weight settings) (falloff-weight (:falloff settings :linear)))]
     (when (pos? radius)
       (loop [k (long (lower-bound coords (- center radius)))]
         (when (and (< k (alength coords)) (< (aget coords k) (+ center radius)))
@@ -100,9 +186,9 @@
             (when (and (not= (:index other) (:index head)) (or (nil? allowed) (contains? allowed (:id other))))
               (let [[a b c] (:position other)
                     dx (- (double a) (double x)) dy (- (double b) (double y)) dz (- (double c) (double z))
-                    t (- 1.0 (/ (Math/sqrt (+ (* dx dx) (* dy dy) (* dz dz))) radius))]
-                (when (pos? t)
-                  (let [weight (case falloff :linear t :quadratic (* t t) :smoothstep (* t t (- 3.0 (* 2.0 t))))
+                    u (/ (Math/sqrt (+ (* dx dx) (* dy dy) (* dz dz))) radius)]
+                (when (< u 1.0)
+                  (let [weight (.invokePrim falloff u)
                         f (* spill weight)
                         at (* 3 (long (:index other)))]
                     (when contacts
@@ -189,7 +275,8 @@
   [layout settings read-at! write-at! high-at? fixture-count packed observe?]
   (let [allowed (some-> (:fixture-ids settings) set)
         scoped? #(or (nil? allowed) (contains? allowed (:id %)))
-        default-white (if (seq settings) 1.0 0.0)
+        ;; The frame's carried falloff is not an authored control.
+        default-white (if (> (count settings) (if (contains? settings ::falloff-weight) 1 0)) 1.0 0.0)
         source-white-mix (double (:white-mix settings default-white))
         spill-white-mix (double (:spill-white-mix settings default-white))
         gain (:gain settings 1.0)
