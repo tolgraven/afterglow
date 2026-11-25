@@ -60,13 +60,35 @@
     (let [after-release (apply! moved {:op :instance/end :instance-id "0:3"})
           relaunched (-> after-release (apply! {:op :instance/remove :instance-id "0:3"}) (apply! launch))]
       (doseq [[m op expected] [[moved move :stale-revision]
-                               [moved (assoc move :expected-revision (:revision moved) :after-instance-id "0:4") :priority-mismatch]
                                [after-release (dissoc move :expected-revision) :instance-not-running]
                                [relaunched (dissoc move :expected-revision) :unknown-instance]]]
         (let [rejected (model/apply-command m (command m op))]
           (is (= expected (get-in rejected [:ack :code])))
           (is (identical? m (:model rejected)))
           (is (empty? (:events rejected))))))))
+
+(deftest standalone-cross-tier-reorder-preserves-authored-priority-and-accepts-an-existing-position
+  (let [launch (fn [show priority]
+                 (apply! show {:op :cue/launch :cue-id :red :launch {:priority priority}}))
+        show (reduce launch (configured) [0 0 10 10 20])
+        move (fn [model source target]
+               (model/apply-command model (command model {:op :instance/move-after
+                                                          :instance-id source :after-instance-id target})))
+        adjacent (move show "0:3" "0:2")
+        up (move show "0:1" "0:3")
+        moved (:model up)
+        down (move moved "0:1" "0:2")]
+    (is (= :accepted (get-in adjacent [:ack :status])))
+    (is (empty? (:events adjacent)))
+    (is (identical? (:instances show) (get-in adjacent [:model :instances])))
+    (is (= ["0:2" "0:3" "0:1" "0:4" "0:5"] (get-in up [:ack :instance-ids])))
+    (is (= (assoc (get-in show [:instances "0:1"]) :render-priority 10 :render-order 1)
+           (get-in moved [:instances "0:1"])))
+    (is (identical? (get-in show [:instances "0:5"]) (get-in moved [:instances "0:5"])))
+    (is (= ["0:2" "0:3" "0:1" "0:4" "0:6" "0:5"]
+           (mapv :id (:instances (views/snapshot (launch moved 10))))))
+    (is (= ["0:2" "0:1" "0:3" "0:4" "0:5"] (get-in down [:ack :instance-ids])))
+    (is (nil? (get-in down [:model :instances "0:1" :render-priority])))))
 
 (deftest seeded-shuffle-preserves-priorities-and-pins-releasing-and-layer-slots
   (let [launch {:op :cue/launch :cue-id :red}

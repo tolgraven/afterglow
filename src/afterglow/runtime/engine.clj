@@ -36,7 +36,7 @@
                  (map? (:params instance)) (contains? instance :state)
                  (finite-number? (:priority instance))
                  (integer? (:order instance)) (not (neg? (:order instance)))
-                 (instance-order/valid-render-order? instance)
+                 (instance-order/valid-render-position? instance)
                  (nonnegative-number? (:started-at-ms instance))
                  (#{:running :releasing} (:phase instance)))
     (fail! ::invalid-instance "Invalid runtime instance" {:instance-id id}))
@@ -496,7 +496,7 @@
                     (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
                     keyframes/with-rig-positions)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
-         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :render-order :state])
+         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :render-priority :render-order :state])
                                    :step identity) prepared)
          evaluations (vec (map-work (partial evaluate-isolated snapshot compiled) prepared))
          ;; Worker completion order is deliberately discarded before the model,
