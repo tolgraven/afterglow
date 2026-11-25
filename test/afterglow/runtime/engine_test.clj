@@ -184,9 +184,13 @@
                         (instance "restarted" :order 2 :reload-policy :restart
                                   :state {:frames 10}))
                  (assoc-in [:registry :effects :pulse] new-definition))
-        result (engine/advance show {:time-ms 40} compiler)
+        result (engine/advance show {:time-ms 40
+                                     ::engine/opacity-factors {"pinned" {2 0}
+                                                                "preserved" {1 0, 2 0.75}
+                                                                "restarted" {1 0, 2 0.25}}} compiler)
         instances (get-in result [:model :instances])]
     (is (= [1 2 2] (mapv :definition-version (:assignments result))))
+    (is (= [nil 0.75 0.25] (mapv :opacity (:assignments result))))
     (is (= {:frames 1} (get-in instances ["pinned" :state])))
     (is (= {:frames 6} (get-in instances ["preserved" :state])))
     (is (= {:frames 21} (get-in instances ["restarted" :state])))
@@ -206,10 +210,11 @@
                  (assoc-in [:registry :effects :pulse]
                            (assoc definition :version 2
                                   :params {:level {:type :boolean :default false}})))]
-    (let [result (engine/advance show {:time-ms 10} compiler)]
+    (let [result (engine/advance show {:time-ms 10 ::engine/opacity-factors {"a" {1 0.5, 2 0}}} compiler)]
       (is (= 1 (get-in result [:model :instances "a" :effect-version])))
       (is (= :reload (get-in result [:model :instances "a" :reload-fault :stage])))
-      (is (= 0.75 (-> result :assignments first :value))))
+      (is (= 0.75 (-> result :assignments first :value)))
+      (is (= 0.5 (-> result :assignments first :opacity))))
     (is (= 1 (get-in show [:instances "a" :effect-version])))))
 
 (deftest compatible-reloads-invalidate-history-for-reintroduced-parameters
@@ -466,7 +471,8 @@
     (let [zero (engine/advance show {:time-ms 0 ::engine/opacity-factors {"plain" 0, "native" 0}} compile-step)]
       (is (= [{:id :compound :member 0 :opacity 0.75 :member-opacity 0.0}]
              (mapv :native-layer (:contributions zero)))))
-    (doseq [invalid [nil {"plain" nil} {"plain" Double/NaN} {"plain" 1.01} {"gone" 0.1}]]
+    (doseq [invalid [nil {"plain" nil} {"plain" Double/NaN} {"plain" 1.01} {"gone" 0.1}
+                     {"plain" {0 0.5}} {"plain" {2 Double/NaN}} {"plain" {2 -0.1}}]]
       (let [code (try (engine/advance show {:time-ms 0 ::engine/opacity-factors invalid} compile-step)
                       (catch clojure.lang.ExceptionInfo error (:type (ex-data error))))]
         (is (= ::engine/invalid-opacity-factors code))))))
