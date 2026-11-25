@@ -66,7 +66,7 @@
           :groups (categories/group-view model)
           :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
                                                    :started-at-ms :release-at-ms :duration-ms
-                                                   :priority :order :render-order :phase :launch-mode])
+                                                   :priority :order :render-priority :render-order :phase :launch-mode])
                                   :categories (categories/definition-categories (:definition %))
                                   :system (merge {:opacity 1.0 :paused? false}
                                                  (select-keys (:system %) [:opacity :paused? :attack :release])))

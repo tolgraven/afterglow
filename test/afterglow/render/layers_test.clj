@@ -141,6 +141,38 @@
       (is (= ["0:1" "0:2" "0:3"] (get-in reverse-move [:ack :instance-ids])))
       (is (= 255 (bit-and 255 (aget ^bytes (get-in (render reversed) [:universes 0]) 3)))))))
 
+(deftest standalone-cross-tier-reorder-preserves-bright-output-through-release
+  (let [effect {:id :dimmer :version 1 :params {:level {:type :number :default 1}}}
+        model (control/new-show {:registry {:effects {:dimmer effect}
+                                            :cues {:dimmer {:id :dimmer :version 1 :effect-id :dimmer}}}})
+        apply! (fn [model op fields]
+                 (let [result (control/apply-command model
+                                (merge {:command-id (str (:revision model)) :show-id (:show-id model)
+                                        :epoch (:epoch model) :time-ms (:time-ms model) :source :test :op op}
+                                       fields))]
+                   (is (= :accepted (get-in result [:ack :status])))
+                   (:model result)))
+        show (-> model
+                 (apply! :cue/launch {:cue-id :dimmer :launch {:params {:level 0.8}
+                                                               :system {:release {:ms 50}}}})
+                 (apply! :cue/launch {:cue-id :dimmer :launch {:priority 10}}))
+        compile-step (fn [_] #(update % :assignments conj (row :dimmer (get-in % [:instance :params :level]))))
+        advance (fn [model time]
+                  (engine/advance model {:time-ms time} compile-step
+                                  (fn [f xs] (reverse (mapv f xs)))))
+        first-frame (advance show 0)
+        moved (apply! (:model first-frame) :instance/move-after {:instance-id "0:1" :after-instance-id "0:2"})
+        moved-frame (advance moved 10)
+        released (apply! (:model moved-frame) :instance/end {:instance-id "0:1"})
+        release-frame (advance released 35)
+        final-frame (advance (:model release-frame) 60)
+        dmx (fn [result]
+              (bit-and 255 (aget ^bytes (get-in (frame/resolve-contributions patch (:contributions result))
+                                                [:universes 0]) 3)))]
+    (is (= [255 204 230 255] (mapv dmx [first-frame moved-frame release-frame final-frame])))
+    (is (= ["0:2" "0:1"] (mapv #(get-in % [:source :instance-id]) (:contributions release-frame))))
+    (is (= #{"0:2"} (set (keys (get-in final-frame [:model :instances])))))))
+
 (deftest muted-members-without-an-upstream-dont-change-the-frame
   (let [b (layer 0 1 [{:attribute :focus :value (field :previous :focus)}] (block (row :focus 0.5)))]
     (doseq [stream [[(assoc-in b [:native-layer :opacity] 0)]

@@ -161,37 +161,54 @@
   (or (= (:id instance) (:id other))
       (when-let [layer (layer-id instance)] (= layer (layer-id other)))))
 
+(defn- priority-tiers [ordered]
+  (reduce (fn [tiers instance]
+            (update tiers (instance-order/effective-priority instance) (fnil conj []) instance))
+          (sorted-map) ordered))
+
 (defn- commit-order [model before after]
-  (let [changed-tiers (into (sorted-set)
-                            (keep (fn [[old new]] (when (not= (:id old) (:id new)) (:priority old))))
-                            (map vector before after))
+  (let [old-tiers (priority-tiers before)
+        changed-tiers (into [] (keep (fn [[priority tier]]
+                                     (when (not= (mapv :id (get old-tiers priority)) (mapv :id tier))
+                                       tier))) (priority-tiers after))
         ids (mapv :id after)]
-    {:model (reduce-kv (fn [model rank {:keys [id priority]}]
-                         (if (contains? changed-tiers priority)
-                           (assoc-in model [:instances id :render-order] rank)
-                           model)) model after)
+    {:model (reduce (fn [model tier]
+                      (reduce-kv (fn [model rank instance]
+                                   (assoc-in model [:instances (:id instance)] (assoc instance :render-order rank)))
+                                 model tier)) model changed-tiers)
      :events (if (seq changed-tiers) [{:type :instances/reordered :instance-ids ids}] [])
      :result {:instance-ids ids}}))
 
 (defn- move-after [model {:keys [instance-id after-instance-id]}]
   (let [source (running-instance! model instance-id)
         target (running-instance! model after-instance-id)
+        target-priority (instance-order/effective-priority target)
         before (instance-order/ordered model)
         moved (filterv (partial same-unit? source) before)
         destination (filterv (partial same-unit? target) before)]
     (require! (not (same-unit? source target)) :same-render-unit
               "Choose a different instance or compound layer")
-    (require! (every? #(zero? (compare (:priority source) (:priority %))) (concat moved destination))
-              :priority-mismatch "Reordering requires one priority tier for both instances and their compound members")
+    (when (or (layer-id source) (layer-id target))
+      (require! (every? #(zero? (compare target-priority (instance-order/effective-priority %)))
+                        (concat moved destination))
+                :priority-mismatch "Compound reordering requires one effective priority tier"))
     (let [kept (remove (partial same-unit? source) before)
           [prefix from-target] (split-with (complement (partial same-unit? target)) kept)
-          [target-run suffix] (split-with (partial same-unit? target) from-target)]
+          [target-run suffix] (split-with (partial same-unit? target) from-target)
+          after (vec (concat prefix target-run moved suffix))]
       ;; A native layer renders where its last contributing member appears.
       ;; A split destination can have another effect after that position.
       (require! (= (count destination) (count target-run)) :interleaved-native-layer
                 "The target compound layer has interleaved members")
-      (update (commit-order model before (vec (concat prefix target-run moved suffix)))
-              :result assoc :instance-id instance-id :after-instance-id after-instance-id))))
+      (let [after (if (and (not= before after)
+                           (not (zero? (compare (instance-order/effective-priority source) target-priority))))
+                    (assoc after (+ (count prefix) (count target-run))
+                           (if (zero? (compare (:priority source) target-priority))
+                             (dissoc source :render-priority)
+                             (assoc source :render-priority target-priority)))
+                    after)]
+        (update (commit-order model before after)
+                :result assoc :instance-id instance-id :after-instance-id after-instance-id)))))
 
 (defn- shuffle-tier [^SplittableRandom random tier]
   (let [slots (into [] (keep-indexed (fn [index instance]
@@ -209,9 +226,7 @@
             :invalid-seed "Seed must be a signed 64-bit integer")
   (let [random (SplittableRandom. (long seed))
         before (instance-order/ordered model)
-        tiers (reduce (fn [tiers instance] (update tiers (:priority instance) (fnil conj []) instance))
-                      (sorted-map) before)
-        after (into [] (mapcat (partial shuffle-tier random)) (vals tiers))]
+        after (into [] (mapcat (partial shuffle-tier random)) (vals (priority-tiers before)))]
     (commit-order model before after)))
 
 (defn- time! [model command]
@@ -463,9 +478,10 @@
   rather than replay commands after receipts have been evicted. Restart changes
   epoch and drops active instances; old epoch requests cannot alter the new show.
 
-  :instance/move-after takes :instance-id and :after-instance-id within one
-  priority tier. Compound members move together. :instances/shuffle takes a
-  signed 64-bit :seed and shuffles running standalone slots within each tier.
+  :instance/move-after takes :instance-id and :after-instance-id. Standalone
+  moves can change effective priority. Compound members move together within
+  one tier. :instances/shuffle takes a signed 64-bit :seed and shuffles running
+  standalone slots within each effective tier.
   Both return committed :instance-ids in render input order. Capture
   :expected-revision when the operation depends on a previously displayed order."
   [model command]

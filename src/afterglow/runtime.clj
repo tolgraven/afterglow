@@ -69,7 +69,7 @@
                    (finite-number? (:priority instance))
                    (integer? (:order instance))
                    (not (neg? (:order instance)))
-                   (instance-order/valid-render-order? instance)
+                   (instance-order/valid-render-position? instance)
                    (contains? instance :state)
                    (ifn? (:step instance)))
       (invalid! "Expected an effect instance with :id, finite :priority, nonnegative integer :order, :state and callable :step"
@@ -181,7 +181,8 @@
   Context contains a :frame map (the immutable show/time/input snapshot) and an
   :effects vector. Each instance requires :id, numeric finite :priority,
   nonnegative integer :order (launch order), :state, and a pure :step function.
-  An optional :render-order explicitly positions an instance within its tier.
+  An optional :render-order positions an instance within its tier, and
+  :render-priority can override that tier for composition.
 
   A step takes a map with :frame, :effect-id, :instance, :state, :assignments [], :intents []
   and :done? false. It returns that map with updated :state, assignment/intent
