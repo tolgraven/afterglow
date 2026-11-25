@@ -103,3 +103,13 @@
     (is (= [0.5 0.0 0.0] (edit/edit schema [1 0 0] 0.5 {:mode :absolute :component 2})))
     (is (== 1 (edit/position schema [1 0 0] {:component 2})))
     (is (= (edit/color-grid-value 3 4) (edit/color-grid-value schema 3 4)))))
+
+(deftest gradients-are-not-scalar-edited-by-controls
+  (let [schema {:type :gradient :default [{:position 0 :color [1 0 0]} {:position 1 :color [0 0 1]}]}
+        value (:default schema)]
+    (is (= [:value] (edit/components schema)))
+    (is (= value (edit/edit schema value 5 {})))
+    (is (= value (edit/edit schema value 0.7 {:mode :absolute})))
+    (is (= 0.0 (edit/position schema value {})))
+    (is (thrown? clojure.lang.ExceptionInfo (edit/edit schema [] 1 {})))
+    (is (thrown? clojure.lang.ExceptionInfo (edit/position schema [] {})))))

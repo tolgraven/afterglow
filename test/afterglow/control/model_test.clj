@@ -789,6 +789,28 @@
   (is (not (params/valid-value? {:type :range :bounds [0 10]} [7 2])))
   (is (not (params/valid-value? {:type :enum :values 8} :a))))
 
+(deftest gradient-parameter-contract
+  (let [red {:position 0 :color [1 0 0]}
+        blue {:position 1.0 :color [0 0 1]}
+        schema {:type :gradient :default [red blue]}
+        valid? #(params/valid-value? schema %)]
+    (is (params/valid-schema? schema))
+    (is (true? (valid? [red blue])))
+    (is (true? (valid? [blue])) "a single stop is a solid color")
+    (is (true? (valid? [red {:position 0.25 :color [0.5 0.5 0.5]} blue])))
+    (doseq [invalid [nil [] '() (list red blue) red [1] [nil]
+                     [blue red] [red red]
+                     [red (assoc blue :position 1.5)] [(assoc red :position -0.1) blue]
+                     [(assoc red :position Double/NaN) blue]
+                     [red (assoc blue :position Double/POSITIVE_INFINITY)]
+                     [(assoc red :position nil) blue]
+                     [(assoc red :color [1 0]) blue] [red (assoc blue :color [0 -1 1])]
+                     [red (assoc blue :color [0 0 1.5])] [red (assoc blue :color '(0 0 1))]
+                     [(assoc red :alpha 1) blue] [(dissoc red :color) blue] [(dissoc red :position)]]]
+      (is (false? (valid? invalid)) (pr-str invalid)))
+    (is (false? (params/valid-schema? (assoc schema :default []))))
+    (is (false? (params/valid-schema? (assoc schema :default [blue red]))))))
+
 (deftest invalid-default-in-trusted-initial-registry-still-rejects-launch
   (let [show (-> (configured)
                  (assoc-in [:registry :effects :wash :params :level :default] 2)
