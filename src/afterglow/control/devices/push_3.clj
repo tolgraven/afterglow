@@ -6,6 +6,7 @@
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
             [afterglow.control.devices.push-launch :as launch]
+            [afterglow.control.devices.push-pad-editor :as pad-editor]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.display :as display]
@@ -19,7 +20,7 @@
   (assoc codec/capabilities :adapter :composable-session
          :controls #{:pad-cues :held-release :parameter-encoders :master-encoder
                      :parameter-pressure :parameter-touch-strip :page-scroll
-                     :manual-handoff :reconnect :shift-fine}
+                     :manual-handoff :reconnect :shift-fine :compound-pad-editor}
          :feedback :semantic-view :display-protocol :tethered-descriptor-replay))
 
 (defn- valid! [condition message data]
@@ -27,6 +28,7 @@
 
 (defn- reset-interactions [state]
   (assoc (targets/clear-selection state) :pads {} :holds {} :buttons #{} :touches #{}
+         :pad-editor (pad-editor/initial-state)
          :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
 
 (defn- cue-at [state model [x y]]
@@ -150,17 +152,48 @@
         {:state state})))
       {:state state})))
 
+(defn- touch-encoder [options state {:keys [control-id pressed?]} model envelope]
+  (if (= pressed? (contains? (:touches state) control-id))
+    {:state state}
+    (let [instance (get-in model [:instances (:selected-instance state)])
+          param (get-in options [:encoder-bindings control-id :param])
+          target (when (and param (= :running (:phase instance)))
+                   {:instance-id (:id instance) :param param
+                    :schema (get-in instance [:definition :params param])
+                    :value (get-in instance [:params param])})
+          result (pad-editor/encoder-touch (:pad-editor state)
+                   {:encoder-id control-id :pressed? pressed? :target target
+                    :gesture-id (:command-id envelope)})]
+      {:state (-> state
+                  (update :touches (if pressed? conj disj) control-id)
+                  (assoc :pad-editor (:state result)))
+       :commands (filterv (fn [{:keys [instance-id param value]}]
+                            (let [instance (get-in model [:instances instance-id])]
+                              (and (= :running (:phase instance))
+                                   (not= value (get-in instance [:params param])))))
+                          (:commands result))})))
+
+(defn- overlay-pad-event [state event]
+  (when-let [result (pad-editor/pad-event (:pad-editor state) event)]
+    (assoc state :pad-editor (:state result))))
+
+(defn- pad [options state {:keys [gesture-key control-id pressed?] :as event} model envelope]
+  (let [editor-state (when-not (contains? (:pads state) gesture-key)
+                       (overlay-pad-event state {:type (if pressed? :note-on :note-off)
+                                                 :voice-id gesture-key :cell control-id}))]
+    (cond
+      (contains? (:picker-pads state) gesture-key)
+      {:state (if pressed? state (targets/release-pad state gesture-key))}
+      editor-state {:state editor-state}
+      (not pressed?) (release-pad state gesture-key envelope)
+      (:target-picker state) {:state (targets/pad state gesture-key control-id)}
+      :else (targets/launch state (press-pad options state event model envelope)))))
+
 (defn- input [options state event model envelope]
   (case (:type event)
-     :pad (let [key (:gesture-key event)]
-           (cond
-             (contains? (:picker-pads state) key)
-             {:state (if (:pressed? event) state (targets/release-pad state key))}
-             (not (:pressed? event)) (release-pad state key envelope)
-             (:target-picker state) {:state (targets/pad state key (:control-id event))}
-             :else (targets/launch state (press-pad options state event model envelope))))
+    :pad (pad options state event model envelope)
     :encoder (encoder options state event model)
-    :encoder-touch {:state (update state :touches (if (:pressed? event) conj disj) (:control-id event))}
+    :encoder-touch (touch-encoder options state event model envelope)
     (:poly-pressure :mono-pressure :touch-strip) (expression options state event model)
     :button (button options state event model)
     {:state state}))
@@ -176,6 +209,7 @@
   [state model]
   (let [state (surface-state state)]
    (merge (display/view-options state model)
+          (when-let [overlay (pad-editor/view (:pad-editor state))] {:pad-overlay overlay})
           {:page (:page-id state) :origin (:origin state)
    :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
    :target-picker (targets/view state)
@@ -199,7 +233,8 @@
   "Construct a pure profile from a captured :layout. Explicit :user-mode? true
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
-  :step n} or {:target :master}; :button-bindings maps IDs to semantic actions.
+  :step n} or {:target :master}; color and gradient targets use captured touches.
+  :button-bindings maps IDs to semantic actions.
   :pressure-param and :touch-strip-param opt into expression parameter control."
   [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings]
     :or {page-id :main encoder-bindings {} button-bindings {}} :as options}]
@@ -215,7 +250,7 @@
                    (or (and (keyword? (:param binding)) (nil? (:target binding)))
                        (and (= :master (:target binding)) (nil? (:param binding))))
                    (or (nil? (:step binding)) (and (params/finite-number? (:step binding)) (pos? (:step binding)))))
-              "Encoder bindings need a captured ID, numeric parameter/master target and positive step" {:id id}))
+              "Encoder bindings need a captured ID, parameter/master target and positive step" {:id id}))
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
@@ -234,6 +269,21 @@
      :stop (fn [state _model envelope _disconnected?]
              {:state (reset-interactions state)
               :commands (bindings/release-holds (:holds state) envelope)})}))
+
+(defn- mpe-member-input [notes options state bytes model envelope]
+  (let [{note-state :state :keys [events]} ((:decode-events notes) (:mpe state) bytes)]
+    (reduce (fn [{:keys [state commands]} event]
+              (let [controls (:controls state)
+                    cell (get (:mpe-note-cells options) (:note event))]
+                (if-let [controls (overlay-pad-event controls (assoc event :cell cell))]
+                  {:state (assoc state :controls controls) :commands commands}
+                  (let [note-state (merge (:mpe state) (select-keys controls [:page-id :origin]))
+                        result ((:input-event notes) note-state event model envelope)
+                        routed (targets/launch controls (assoc result :state controls))]
+                    {:state (assoc state :controls (:state routed) :mpe (:state result))
+                     :commands (into commands (:commands routed))}))))
+            {:state (assoc state :mpe note-state) :commands []}
+            events)))
 
 (defn- mpe-profile [options]
   (valid! (seq (:mpe-note-cells options))
@@ -270,13 +320,11 @@
                             (cond
                               (contains? (:picker-pads control-state) key)
                               {:state (assoc state :controls (if released? (targets/release-pad control-state key) control-state))}
-                              (and (:target-picker control-state) press? cell)
+                              (and (:target-picker control-state) press? cell
+                                   (not (pad-editor/active? (:pad-editor control-state))))
                               {:state (assoc state :controls (targets/pad control-state key cell))}
                               :else
-                              (let [note-state (merge (:mpe state) (select-keys control-state [:page-id :origin]))
-                                    result ((:input notes) note-state bytes model envelope)
-                                    routed (targets/launch control-state (assoc result :state control-state))]
-                                (assoc routed :state (assoc state :controls (:state routed) :mpe (:state result))))))
+                              (mpe-member-input notes options (assoc state :controls control-state) bytes model envelope)))
                   (and control-event (not (#{:pad :poly-pressure :mono-pressure} (:type control-event))))
                   (let [result ((:input controls) control-state control-event model envelope)]
                     (assoc result :state (assoc state :controls (:state result))))
@@ -300,8 +348,10 @@
                           {:instance-id (:id instance) :param k :component 0})))
                     (sort-by str (:touches controls)))
         selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
-        view (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
-                    :fine? (boolean (shift-held? options controls)))
+        view (cond-> (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
+                            :fine? (boolean (shift-held? options controls)))
+               (pad-editor/active? (:pad-editor controls))
+               (assoc :pad-overlay (pad-editor/view (:pad-editor controls))))
         selected (assoc selected :selected-instance (:id instance) :last-display view)
         next-state (if (:controls state)
                      (-> state (assoc :controls selected) (assoc-in [:mpe :selected-instance] (:id instance)))
@@ -312,7 +362,8 @@
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
-  MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates.
+  Captured color and gradient encoder touches open a pad editor. MPE fine hue
+  and lightness use normalized Glide and Slide rather than calibrated positions.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
   (let [grid (launch/grid options)

@@ -110,12 +110,32 @@ address:
      :page-id :main}))
 ```
 
-MPE member channels belong exclusively to the expressive receiver. Fixed controls
-must be captured on channels outside that member range. Each note launches a
-held cue activation; member pressure/bend/slide address that activation. This
-mode exposes Strike, Pressure, Glide and Slide. Push 3 Lift capability is not
-assumed merely because MIDI note-off has a velocity field. Native display,
-automatic LEDs and offscreen web rendering remain separate work.
+MPE member channels belong exclusively to the expressive receiver. Capture
+fixed controls on channels outside that member range. In the cue grid, each
+note launches a held cue activation. Member pressure, bend and slide address
+that activation. This mode exposes Strike, Pressure, Glide and Slide.
+
+### Color and gradient pad editors
+
+Bind a captured touch and encoder to a color or gradient parameter of the
+selected running instance. The touch opens an 8 × 8 palette in the semantic
+`:pad-overlay` view. In Poly or Mono Aftertouch mode, tap pads for palette
+choices. In MPE mode a held pad's Glide makes a fine hue adjustment within
+half a palette column in either direction. Slide sets HSL lightness. Expression
+belongs to that pad voice, and pressure leaves the draft unchanged.
+
+A color edit uses the latest choice. A gradient edit keeps choices in press
+order, with evenly spaced positions in a vector of
+`{:position t :color [r g b]}` stops. The most recently touched compound
+encoder receives new pad presses. Earlier touches retain their drafts and
+held voices. Releasing an encoder commits its draft once. Pads already assigned
+to it stay consumed until their own release. Handoff or disconnect discards
+uncommitted drafts.
+
+The JVM replay uses synthetic User Mode input with explicit address bindings.
+Capture actual controller-mode MIDI before qualifying the hue and lightness
+response. The semantic palette is available to view consumers. Physical
+palette LEDs, Push 2 and Studio gradient inputs, and Undo remain separate work.
 
 ## Seaboard and generic MPE
 

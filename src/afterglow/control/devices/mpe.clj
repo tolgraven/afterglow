@@ -84,18 +84,25 @@
        :commands (into (vec (:commands expression)) (:commands release))})
     {:state state}))
 
-(defn- input [zone options state bytes model envelope]
+(defn- decode-events [zone state bytes]
   (let [decoded (codec/advance zone (:decoder state) bytes)
         state (-> state (assoc :decoder (:state decoded)) (diagnose (:diagnostics decoded)))]
+    {:state state :events (:events decoded)}))
+
+(defn- input-event [options state event model envelope]
+  (case (:type event)
+    :note-on (note-on options state event model envelope)
+    :note-off (note-off options state event model envelope)
+    :axis (expression options state (:voice-id event) {(:axis event) (:value event)} model)
+    :zone-axis {:state (diagnose state [{:code :zone-expression-unmapped
+                                       :axis (:axis event) :channel (:channel event)}])}))
+
+(defn- input [decode handle state bytes model envelope]
+  (let [{:keys [state events]} (decode state bytes)]
     (reduce (fn [{:keys [state commands]} event]
-              (let [result (case (:type event)
-                             :note-on (note-on options state event model envelope)
-                             :note-off (note-off options state event model envelope)
-                             :axis (expression options state (:voice-id event) {(:axis event) (:value event)} model)
-                             :zone-axis {:state (diagnose state [{:code :zone-expression-unmapped
-                                                                :axis (:axis event) :channel (:channel event)}])})]
+              (let [result (handle state event model envelope)]
                 {:state (:state result) :commands (into commands (:commands result))}))
-            {:state state :commands []} (:events decoded))))
+            {:state state :commands []} events)))
 
 (defn- acknowledge [state command ack]
   (if-let [voice-id (:control/voice-id command)]
@@ -120,7 +127,8 @@
   :param-mappings/:cue-mappings and :mapping-policy provide explicit overrides.
   Persistent [:settings :expressive :devices mapping-id] policies override these
   defaults live. :mapping-id defaults to the session ID; disabling expression
-  leaves cue launch/release behavior intact."
+  leaves cue launch/release behavior intact. Composing profiles can route
+  :decode-events output by its voice ID before invoking :input-event."
   [{:keys [zone axes note-cues note-cells cue-id] :as options}]
   (let [zone (codec/compile-zone zone)]
     (expressive/normalize-policy (:mapping-policy options {}))
@@ -136,12 +144,15 @@
       (when-not (and (integer? note) (<= 0 note 127) (vector? cell) (= 2 (count cell))
                      (every? #(and (integer? %) (<= 0 %)) cell))
         (throw (ex-info "Invalid MPE note/page cell mapping" {:type ::invalid-options :note note}))))
-    {:id :mpe :capabilities (assoc capabilities :available-axes (select-keys codec/axes axes))
-     :initial-state (initial) :decode identity :input (partial input zone options)
-     :ack acknowledge :reset-model (fn [_] (initial))
-     :stop (fn [state _model envelope _disconnected?]
-             {:state (initial)
-              :commands (bindings/release-holds (:holds state) envelope)})}))
+    (let [decode (partial decode-events zone)
+          handle (partial input-event options)]
+      {:id :mpe :capabilities (assoc capabilities :available-axes (select-keys codec/axes axes))
+       :initial-state (initial) :decode identity :input (partial input decode handle)
+       :decode-events decode :input-event handle
+       :ack acknowledge :reset-model (fn [_] (initial))
+       :stop (fn [state _model envelope _disconnected?]
+               {:state (initial)
+                :commands (bindings/release-holds (:holds state) envelope)})})))
 
 (defn connect! [options]
   (session/open! (session/create (assoc options :profile (profile options)))))

@@ -39,6 +39,14 @@
               3 [0 x chroma] 4 [x 0 chroma] [chroma 0 x])]
     (mapv #(double (bindings/clamp (+ base %) [0 1])) rgb)))
 
+(defn rgb->hsl
+  "Convert normalized RGB components to normalized hue, saturation and lightness."
+  [rgb]
+  (let [[h s v] (rgb->hsv rgb)
+        l (* v (- 1.0 (/ s 2.0)))
+        limit (min l (- 1.0 l))]
+    [h (if (zero? limit) 0.0 (bindings/clamp (/ (- v l) limit) [0 1])) l]))
+
 (defn- color-to-control [schema rgb]
   (let [[low high] (params/color-bounds schema)]
     (mapv #(if (== low high) 0.0 (/ (- % low) (- high low))) rgb)))
@@ -46,6 +54,12 @@
 (defn- control-to-color [schema rgb]
   (let [[low high] (params/color-bounds schema)]
     (mapv #(bindings/clamp (+ low (* % (- high low))) [low high]) rgb)))
+
+(defn hsl->rgb
+  "Convert normalized hue, saturation and lightness to schema-bounded RGB."
+  [schema [h s l]]
+  (let [v (+ l (* s (min l (- 1.0 l))))]
+    (control-to-color schema (hsv->rgb [h (if (zero? v) 0.0 (* 2.0 (- 1.0 (/ l v)))) v]))))
 
 (defn- numeric-range [schema value]
   (or (:bounds schema) [(- (double value) 1.0) (+ (double value) 1.0)]))
@@ -76,7 +90,8 @@
   "Return a schema-valid value for relative delta or absolute normalized input.
   Options: :mode :relative|:absolute, :component index and :fine?. Enum values
   (including waveform selections) are returned unchanged. Range endpoints never
-  cross. Color components are HSV editing over the model's linear RGB values."
+  cross. Color components are HSV editing over the model's linear RGB values.
+  Gradients retain their value until edited through their stop editor."
   [schema value input {:keys [mode component fine?] :or {mode :relative} :as options}]
   (when-not (and (params/valid-value? schema value) (params/finite-number? input)
                  (#{:relative :absolute} mode))
@@ -109,6 +124,7 @@
                                  (if absolute? fraction
                                      (bindings/clamp (+ (nth hsv component) (* input (or (when fine? (resolution/fine-step (:dmx-bits options) [0 1])) (if fine? 0.001 0.01)))) [0 1])))]
                    (control-to-color schema (hsv->rgb (assoc hsv component changed))))
+          :gradient value
           (:vector :range)
           (let [bounds (numeric-range schema (nth value component))
                 bounds (if (= :range (:type schema))
@@ -140,6 +156,7 @@
       :enum (let [values (or (:values schema) (:options schema))]
               (if (= 1 (count values)) 0.0 (/ (discrete-index values value) (double (dec (count values))))))
       :color (nth (rgb->hsv (color-to-control schema value)) component)
+      :gradient 0.0
       :vector (normalized (nth value component) (numeric-range schema (nth value component)))
       :range (let [[low high] (numeric-range schema (nth value component))]
                (normalized (nth value component)

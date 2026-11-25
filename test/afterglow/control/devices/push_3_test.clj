@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is]]
             [afterglow.control.model :as model]
             [afterglow.control.pages :as pages]
+            [afterglow.control.parameter-edit :as edit]
             [afterglow.control.devices.push-3 :as push]
             [afterglow.control.devices.repl :as devices]
             [afterglow.control.devices.transports :as transports]
@@ -216,6 +217,107 @@
         (is (= [:held :latched] (mapv :cue-id (launched))))
         (@receive [0x81 40 0])
         (is (= first-instance (:instance-id (last (filter #(= :instance/end (:op %)) @log)))))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(def ^:private gradient-schema
+  {:type :gradient :default [{:position 0.0 :color [0.2 0.3 0.4]}]})
+
+(defn- compound-options [mode]
+  ;; Fixed addresses and rotating members below are synthetic. Only the
+  ;; message families are sourced from doc/architecture/expressive-devices.md.
+  (let [layout (-> layout
+                   (assoc :encoder-touches {:level {:channel 6 :note 9}
+                                            :tint {:channel 6 :note 10}})
+                   (assoc-in [:encoders :tint] {:channel 6 :controller 21})
+                   (assoc-in [:encoders :level :channel] 6))]
+    (cond-> {:layout layout :expression-mode mode
+             :encoder-bindings {:level {:param :gradient} :tint {:param :tint}}}
+      (= :mpe mode) (assoc :zone {:manager-channel 0 :member-channels [1 2 3]}
+                           :mpe-note-cells {40 [5 7] 41 [2 7] 42 [0 0]}))))
+
+(defn- add-compound-params [show]
+  (swap! show update-in [:registry :effects :wash :params] assoc
+         :gradient gradient-schema :tint {:type :color :default [1.0 1.0 1.0]}))
+
+(deftest synthetic-mpe-replay-commits-two-independent-stops-once
+  (let [{:keys [show log receive device]} (harness (compound-options :mpe))
+        view #(push/control-view (:local (session/snapshot device)) @show)
+        stops #(get-in (view) [:pad-overlay :value])]
+    (try
+      (add-compound-params show)
+      (swap! show update-in [:pages :main :cells] assoc [5 7] :held [2 7] :latched)
+      (session/open! device)
+      (@receive [0x93 42 100])
+      (let [id (:selected-instance (view))
+            before @log
+            original (:default gradient-schema)]
+        (@receive [0x96 9 127])
+        (is (= :gradient (get-in (view) [:pad-overlay :type])))
+        (is (= 64 (count (get-in (view) [:pad-overlay :cells]))))
+        (@receive [0x91 40 100])
+        (@receive [0x92 41 96])
+        (let [unmoved (stops)]
+          (@receive [0x82 40 0])
+          (@receive [0xe1 127 127])
+          (@receive [0xb1 74 32])
+          (is (= (second unmoved) (second (stops))))
+          (is (= (edit/hsl->rgb {} [0.6875 1.0 (/ 32 127.0)]) (get-in (stops) [0 :color]))))
+        (let [first-stop (first (stops))]
+          (@receive [0xe2 0 0])
+          (@receive [0xb2 74 95])
+          (is (= first-stop (first (stops))))
+          (is (= (edit/hsl->rgb {} [0.1875 1.0 (/ 95 127.0)]) (get-in (stops) [1 :color]))))
+        (let [draft (stops)]
+          (is (= [0.0 1.0] (mapv :position draft)))
+          (@receive [0xd1 127])
+          (@receive [0x81 40 0])
+          (@receive [0xe1 0 0])
+          (is (= draft (stops)))
+          (is (= before @log))
+          (is (= original (get-in @show [:instances id :params :gradient])))
+          (@receive [0x96 9 0])
+          (is (= draft (get-in @show [:instances id :params :gradient])))
+          (is (nil? (:pad-overlay (view))))
+          (is (= [:param/set] (mapv :op (subvec @log (count before)))))
+          (@receive [0xb2 74 36])
+          (@receive [0x92 41 0])
+          (@receive [0x96 9 0])
+          (is (= [:param/set] (mapv :op (subvec @log (count before)))))
+          (@receive [0x91 41 96])
+          (is (= [:param/set :cue/launch] (mapv :op (subvec @log (count before)))))
+          (is (= :latched (:cue-id (peek @log))))
+          (is (empty? (:errors (session/snapshot device))))))
+      (finally (session/close! device)))))
+
+(deftest synthetic-poly-fallback-retains-drafts-for-simultaneous-touches
+  (let [{:keys [show log receive device]} (harness (compound-options :poly-aftertouch))
+        overlay #(:pad-overlay (push/control-view (:local (session/snapshot device)) @show))]
+    (try
+      (add-compound-params show)
+      (session/open! device)
+      (@receive [0x93 13 95])
+      (@receive [0x83 13 0])
+      (let [id (:id (first (vals (:instances @show))))]
+        (@receive [0x96 10 127])
+        (@receive [0x93 12 100])
+        (is (= [0.0 0.0 0.0] (:value (overlay))))
+        (@receive [0x96 9 127])
+        (@receive [0x93 13 100])
+        (@receive [0xa3 12 127])
+        (is (= :gradient (:type (overlay))))
+        (let [draft (:value (overlay))]
+          (@receive [0x96 9 0])
+          (is (= draft (get-in @show [:instances id :params :gradient]))))
+        (is (= :color (:type (overlay))))
+        (@receive [0x93 13 100])
+        (is (= [0.0 0.0 0.0] (:value (overlay))))
+        (@receive [0x96 10 0])
+        (@receive [0x83 12 0])
+        (@receive [0x83 13 0])
+        (is (nil? (overlay)))
+        (is (= [0.0 0.0 0.0] (get-in @show [:instances id :params :tint])))
+        (is (= [:cue/launch :param/set :param/set] (mapv :op @log)))
         (is (empty? (:errors (session/snapshot device)))))
       (finally (session/close! device)))))
 
