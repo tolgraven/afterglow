@@ -109,9 +109,14 @@ reducer. The movement shader receives the resulting targets, solves mounting
 rotations, calibration and wrap from the captured pans, then returns the axes
 to the same physical DMX packer. Direct pan/tilt and zero-opacity assignments
 retain the CPU renderer’s behavior. The output adds a `:movement` map with
-`:backend`, `:gpu-heads` and `:cpu-heads`. Native float32 values can round to an
-adjacent 16-bit DMX word. Exact coordinates, unstable float32 subtraction, and
-ambiguous wrap, clamp or pole decisions go through the reference solver.
+`:backend`, `:gpu-heads` and `:cpu-heads`. If a small float32 margin around a native axis
+straddles a physical rounding boundary, the reference solver resolves that
+head. The check uses the packed channel format, including 8-bit, fine, and
+inverted channels. Exact coordinates, unstable float32 subtraction, and
+ambiguous wrap, clamp or pole decisions also go through the reference solver.
+This guard applies to the movement solve. When an effect supplies a target
+from native float32 expression evaluation, it still carries that upstream
+precision.
 
 The host can pass `:deadline-nanos` from its frame clock (`System/nanoTime`).
 The GPU stage honors the earlier of that deadline and the owner's frame budget.

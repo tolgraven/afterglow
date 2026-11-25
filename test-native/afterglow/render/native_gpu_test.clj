@@ -115,6 +115,68 @@
         byte-at (fn [[universe offset]] (bit-and (aget ^bytes (get-in frame [:universes universe]) offset) 255))]
     (+ (* 256 (byte-at coarse)) (byte-at fine))))
 
+(deftest physical-movement-resolves-a-rounding-boundary-on-the-reference
+  (let [head {:position [0 0 0] :universe 1 :channels {:pan [1 2] :tilt [3 4]}}
+        patch (frame/compile-patch [(assoc head :id :boundary :address 512)
+                                    (assoc head :id :stable :address 50)])
+        blocks [{:kind :assignments
+                 :assignments [{:target-id :boundary :attribute :direction :value [0.0 0.25 1.0]}
+                               {:target-id :stable :attribute :direction :value [0.45 0.33 1.0]}]}]
+        expected (frame/resolve-contributions patch blocks)]
+    (with-open [owner (movement/open! {:budget-ms 10000})]
+      (let [actual (movement/resolve-contributions! owner patch blocks)]
+        (is (= {:backend :native-gpu :gpu-heads 1 :cpu-heads 1} (:movement actual)))
+        (is (= 32768 (motor-word actual (get-in patch [:by-id :boundary]) :pan)))
+        (is (= (update-vals (:universes expected) vec)
+               (update-vals (:universes actual) vec)))))))
+
+(deftest a-seeded-movement-sweep-packs-the-reference-bytes
+  ;; Every driver must publish the reference bytes. The guard margin was
+  ;; measured on Apple Silicon hardware; Mesa llvmpipe 26.0.8 reached about
+  ;; twice the margin, so its unguarded error and native retention are only
+  ;; reported. Software renderers must not be treated as qualified for the margin.
+  (let [n 32
+        patch (frame/compile-patch
+               (mapv (fn [i]
+                       {:id i :position [(- (mod i 8) 4) (+ 2.0 (mod i 3)) (- (quot i 8) 2)]
+                        :rotation-deg [(if (odd? i) 180 0) (- (mod (* i 31) 340) 170) (mod i 27)]
+                        :universe 0 :address (inc (* 4 i)) :channels {:pan [1 2] :tilt [3 4]}
+                        :calibration (if (even? i)
+                                       {:pan {:min-deg -270 :max-deg 270} :tilt [120 150]}
+                                       {:pan [125 -170] :tilt {:min-deg -45 :max-deg 55}})})
+                     (range n)))
+        margin @#'gpu/rounding-margin
+        rng (java.util.Random. 555)
+        coordinate #(* % (- (.nextDouble rng) 0.5))]
+    (with-open [solver (gpu/open! patch)
+                owner (movement/open! {:budget-ms 10000})]
+      (let [renderer (str (get-in solver [:resources :renderer]))
+            qualified? (boolean (re-find #"^Apple M\d" renderer))]
+        (loop [frame 0 history {} retained 0 worst 0.0]
+          (if (< frame 40)
+            (let [targets (into {} (for [id (range n)] [id [(coordinate 6.0) (coordinate 3.0) (coordinate 6.0)]]))
+                  blocks [{:kind :assignments
+                           :assignments (vec (for [[id aim] targets] {:target-id id :attribute :aim :value aim}))}]
+                  options (assoc history :compact-values? true)
+                  expected (frame/resolve-contributions patch blocks options)
+                  actual (movement/resolve-contributions! owner patch blocks options)
+                  solved (gpu/solve! solver targets history)
+                  error (reduce max 0.0 (for [[id values] solved axis [:pan :tilt]]
+                                          (abs (- (get-in expected [:values id axis]) (axis values)))))]
+              (is (= (update-vals (:universes expected) vec) (update-vals (:universes actual) vec))
+                  (str "frame " frame))
+              (recur (inc frame) {:previous-compact (:compact expected)}
+                     (+ retained (get-in actual [:movement :gpu-heads])) (max worst error)))
+            (do
+              (println "Movement sweep" {:renderer renderer :qualified-margin? qualified?
+                                         :max-axis-error worst :error-over-margin (/ worst margin)
+                                         :gpu-heads retained :heads (* n 40)})
+              (when qualified?
+                (is (< worst margin) "Unguarded axis error must stay inside the rounding margin")
+                ;; Roughly a quarter of heads have an axis within the margin of
+                ;; a 16-bit step; the rest must stay on the native path.
+                (is (< (* 0.5 n 40) retained))))))))))
+
 (deftest published-frames-use-only-effective-selected-movement
   (let [patch (frame/compile-patch fixtures)
         reordered (frame/compile-patch (vec (reverse fixtures)))

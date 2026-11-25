@@ -216,6 +216,22 @@
         (is (= [0 255] (bytes-at {:universes idle} 3 1 2)))
         (is (every? zero? (concat (idle 2) (drop 2 (idle 3)) (idle 9))))))))
 
+(deftest movement-uncertainty-uses-the-physical-channel-quantizer
+  (let [fixture {:id :head :position [0 0 0] :universe 2 :address 512
+                 :channels {:pan [1 2] :tilt 3
+                            :focus {:offset 4 :fine-offset 5 :inverted-from 128}}}
+        patch (frame/compile-patch [fixture])
+        channel (get-in patch [:by-id :head :compiled-channels])
+        margin 9.5e-7]
+    (is (= [[2 511] [3 0]] ((juxt :coarse :fine) (:pan channel))))
+    (is (frame/stable-channel-code? (:pan channel) (/ 30000.0 65535) margin))
+    (is (not (frame/stable-channel-code? (:pan channel) (/ 30000.5 65535) margin)))
+    (is (frame/stable-channel-code? (:tilt channel) (/ 128.0 255) margin))
+    (is (not (frame/stable-channel-code? (:tilt channel) (/ 128.5 255) margin)))
+    (is (not (frame/stable-channel-code? (:focus channel) (/ 128.0 255) margin)))
+    (is (frame/stable-channel-code? (:pan channel) 0.0 margin))
+    (is (frame/stable-channel-code? (:pan channel) 1.0 margin))))
+
 (deftest invalid-patches-and-assignments-are-rejected
   (doseq [fixtures [[rgb rgb]
                     [(assoc rgb :address 0)]
