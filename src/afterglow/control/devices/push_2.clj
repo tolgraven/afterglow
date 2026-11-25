@@ -8,6 +8,7 @@
             [afterglow.control.pages :as pages]
             [afterglow.control.views :as views]
             [afterglow.control.display :as display]
+            [afterglow.control.devices.push-launch :as launch]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.target-picker :as targets]))
@@ -165,7 +166,7 @@
         {:state state :commands (if (= ::missing value) []
                                     [{:op :param/set :instance-id instance-id :param param :value value}])}))))
 
-(defn- press-pad [state event model envelope]
+(defn- press-pad [grid state event model envelope]
   (if-let [cue (cue-at state model (:note event))]
     (let [mode (or (:launch-mode cue) (when (:held cue) :held) :persistent)
           mode (if (and (= :held mode) (:shift? state)) :persistent mode)
@@ -179,26 +180,32 @@
           launch-data {:mode mode :velocity (:value event) :params launch-params}
           active (active-for-cue model (:id cue))]
       (cond
-        (get-in state [:pads (:note event)]) {:state state}
+        (or (get-in state [:pads note]) (and grid (contains? (:pressed-pads state) note))) {:state state}
         (= mode :held)
-        (let [hold (bindings/begin-hold (:holds state) (:id cue) envelope)]
-          {:state (-> state (assoc :holds (:state hold) :selected-cue (:id cue))
-                      (update :pressed-pads conj note)
-                      (assoc-in [:pads note] (:gesture-id hold)))
+        (let [hold (bindings/begin-hold (:holds state) (:id cue) envelope grid)]
+          {:state (cond-> (-> state (assoc :holds (:state hold) :selected-cue (:id cue))
+                              (update :pressed-pads conj note)
+                              (assoc-in [:pads note] (:gesture-id hold)))
+                    grid (assoc :grid-selection (:command-id envelope))
+                    grid (assoc-in [:grid-presses note] (:command-id envelope)))
            :commands (mapv #(assoc % :launch launch-data :pad-note note) (:commands hold))})
         (and (= mode :persistent) active (nil? (:target-once state)))
         {:state (-> state (assoc :selected-cue (:id cue) :selected-instance (:id active))
+                    (dissoc :grid-selection)
                     (update :pressed-pads disj note) (update :pad-instances dissoc note))
          :commands [{:op :instance/end :instance-id (:id active)
                      :force? (= :releasing (:phase active))}]}
         :else
-        {:state (-> state (assoc :selected-cue (:id cue)) (update :pressed-pads conj note))
+        {:state (cond-> (-> state (assoc :selected-cue (:id cue)) (update :pressed-pads conj note))
+                  grid (assoc :grid-selection (:command-id envelope))
+                  grid (assoc-in [:grid-presses note] (:command-id envelope)))
          :commands [{:op :cue/launch :cue-id (:id cue)
                      :pad-note note :launch launch-data}]}))
     {:state state}))
 
 (defn- release-pad [state note envelope]
-  (let [state (-> state (update :pressed-pads disj note) (update :pad-instances dissoc note))]
+  (let [state (cond-> (-> state (update :pressed-pads disj note) (update :pad-instances dissoc note))
+                (:grid-presses state) (update :grid-presses dissoc note))]
    (if-let [gesture (get-in state [:pads note])]
     (let [release (bindings/end-hold (:holds state) gesture envelope)]
       {:state (-> state (assoc :holds (:state release)) (update :pads dissoc note))
@@ -247,7 +254,7 @@
         {:state (-> state (update :display-buttons (fnil conj #{}) controller)
                     (display/apply-action model action))}))))
 
-(defn- input [device-id state event model envelope]
+(defn- input [device-id grid state event model envelope]
   (let [state (selected-state state model)
         display-input (display-button state model event)]
    (cond
@@ -286,7 +293,7 @@
     (if (:record? state) (preset-command state model)
         (component-button state model (- (:controller event) 20)))
     (and (= :note-on (:type event)) (codec/pad-coordinates (:note event)))
-    (or (picker-pad state model (:note event)) (press-pad state event model envelope))
+    (or (picker-pad state model (:note event)) (press-pad grid state event model envelope))
     (= :note-off (:type event)) (release-pad state (:note event) envelope)
     (= :poly-pressure (:type event)) (pressure-pad state event model)
     (and (= :control-change (:type event)) (<= 71 (:controller event) 78))
@@ -406,12 +413,12 @@
       display-changed? (assoc :display display)
       (:fault state) (assoc :lifecycle :disconnect))))
 
-(defn- stop [device-id state _model _envelope disconnected?]
-  {:state (assoc (targets/clear-selection state) :pads {} :holds {} :ready? false :last-leds {} :last-display nil
+(defn- stop [device-id state _model envelope disconnected?]
+  {:state (assoc (dissoc (targets/clear-selection state) :grid-selection :grid-presses)
+                 :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                        :last-touch-strip nil :display-buttons #{}
                        :touches {} :touch-order [] :shift? false :shift-patch nil :record? false :pressed-pads #{} :pad-instances {})
-   :commands (mapv (fn [id] {:op :instance/end :instance-id id})
-                   (keep :instance-id (vals (get-in state [:holds :gestures]))))
+   :commands (bindings/release-holds (:holds state) envelope)
    :midi (if (or disconnected? (not (:ready? state))) []
              (into (into [(codec/touch-strip-mode device-id :default)]
                          (for [note (range 36 100)] [0x80 note 0]))
@@ -421,14 +428,16 @@
 (defn profile
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
   Sequential palette acquisition precedes writes; LEDs use acknowledged batches.
-  Missing responses are reported on refresh!, never guessed."
-  [{:keys [device-id page-id timeout-ms led-batch-size target-search display]
-    :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8}}]
+  Missing responses are reported on refresh!, never guessed. :launch-grid
+  optionally routes pad launches to a musical grid owned by the host."
+  [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt]
+    :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
-  (let [{:keys [modes actions] :as display-capabilities} (:display-capabilities display)
+  (let [grid (launch/grid options)
+        {:keys [modes actions] :as display-capabilities} (:display-capabilities display)
         _ (when-not (and (or (nil? modes) (and (set? modes) (seq modes) (every? display/modes modes)))
                          (or (nil? actions) (set? actions)))
             (throw (ex-info "Invalid Push 2 display capabilities" {:display-capabilities display-capabilities})))
@@ -437,7 +446,8 @@
                          :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                          :pressed-pads #{} :pad-instances {}}
                   display-capabilities (assoc :display-capabilities display-capabilities))]
-    {:id :push-2 :capabilities capabilities :initial-state initial
+    (launch/with-grid
+     {:id :push-2 :capabilities capabilities :initial-state initial
      :decode (partial decode device-id)
      :start (fn [state _model envelope]
               {:state (assoc state :palette-start-ms (:time-ms envelope))
@@ -452,24 +462,30 @@
                   (contains? (:picker-pads state) (:note event))
                   {:state (if (= :note-off (:type event)) (targets/release-pad state (:note event)) state)}
                   (and (:target-picker state) x) {:state (targets/pad state (:note event) [x y])}
-                  :else (targets/launch state (input device-id state event model envelope)))))
+                  :else (targets/launch state (input device-id grid state event model envelope)))))
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc (targets/clear-selection %) :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
+     :reset-model #(assoc (dissoc (targets/clear-selection %) :grid-selection :grid-presses)
+                           :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                            :pressed-pads #{} :pad-instances {})
      :ack (fn [state command ack]
             (let [hold (when-let [gesture (:gesture-id command)]
-                         (bindings/acknowledge-hold (:holds state) gesture ack))]
+                         (bindings/acknowledge-hold (:holds state) gesture ack))
+                  accepted? (and (= :cue/launch (:op command)) (= :accepted (:status ack)))
+                  note (:pad-note command)
+                  token (:command-id command)
+                  gridded? (contains? command :grid)]
               {:state (cond-> state
                         hold (assoc :holds (:state hold))
-                        (and (= :cue/launch (:op command)) (= :accepted (:status ack)))
+                        (and accepted? (or (not gridded?) (= token (:grid-selection state))))
                         (assoc :selected-instance (:instance-id ack))
-                        (and (= :cue/launch (:op command)) (= :accepted (:status ack))
-                             (contains? (:pressed-pads state) (:pad-note command)))
-                        (assoc-in [:pad-instances (:pad-note command)] (:instance-id ack)))
-               :commands (:commands hold)}))}))
+                        (and accepted? (contains? (:pressed-pads state) note)
+                             (or (not gridded?) (= token (get-in state [:grid-presses note]))))
+                        (assoc-in [:pad-instances note] (:instance-id ack)))
+               :commands (:commands hold)}))}
+     grid launch-receipt)))
 
 (defn connect!
   "REPL facade: options are session options plus :device-id/:page-id. Supply MIDI

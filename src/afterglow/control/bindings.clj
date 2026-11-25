@@ -73,14 +73,33 @@
 (defn begin-hold
   "Launch a held cue. Retain the returned gesture ID until its corresponding
   physical release; never look up an instance by cue identity."
-  [state cue-id envelope]
-  (let [id (or (:gesture-id envelope) (:command-id envelope))]
-    (when (contains? (:gestures state) id)
-      (throw (ex-info "Gesture already exists" {:gesture-id id})))
-    {:state (assoc-in state [:gestures id] {:pressed? true})
-     :gesture-id id
-     :commands [(merge envelope {:op :cue/launch :cue-id cue-id :gesture-id id
-                                 :launch {:mode :held}})]}))
+  ([state cue-id envelope] (begin-hold state cue-id envelope nil))
+  ([state cue-id envelope grid]
+   (let [id (or (:gesture-id envelope) (:command-id envelope))]
+     (when (contains? (:gestures state) id)
+       (throw (ex-info "Gesture already exists" {:gesture-id id})))
+     {:state (assoc-in state [:gestures id]
+                      (cond-> {:pressed? true}
+                        grid (assoc :launch-command-id id
+                                    :launch-context (select-keys envelope [:show-id :epoch :source]))))
+      :gesture-id id
+      :commands [(cond-> (merge envelope {:op :cue/launch :cue-id cue-id :gesture-id id
+                                         :launch {:mode :held}})
+                   grid (assoc :grid grid :command-id id))]})))
+
+(defn- hold-release-command [{:keys [instance-id launch-command-id launch-context]} envelope]
+  (cond
+    launch-command-id (merge envelope launch-context
+                             {:op :cue/cancel-launch :launch-command-id launch-command-id
+                              :reason :held-release})
+    instance-id (assoc envelope :op :instance/end :instance-id instance-id)))
+
+(defn release-holds
+  "Return teardown commands for this owner's holds. The show owner resolves
+  grid launches by their stable ID whether admission has happened yet or not."
+  [state envelope]
+  (into [] (comp (keep #(hold-release-command % envelope)) (distinct))
+        (vals (:gestures state))))
 
 (defn end-hold
   "Release a gesture, retaining early release data until launch acknowledgement
@@ -89,9 +108,9 @@
   (if-let [gesture (get-in state [:gestures gesture-id])]
     (cond
       (not (:pressed? gesture)) {:state state :commands []}
-      (:instance-id gesture)
+      (or (:instance-id gesture) (:launch-command-id gesture))
       {:state (update state :gestures dissoc gesture-id)
-       :commands [(merge envelope {:op :instance/end :instance-id (:instance-id gesture)})]}
+       :commands [(hold-release-command gesture envelope)]}
       :else {:state (assoc-in state [:gestures gesture-id]
                              (assoc gesture :pressed? false :release-envelope envelope))
              :commands []})

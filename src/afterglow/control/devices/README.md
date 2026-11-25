@@ -44,6 +44,15 @@ toggles blackout, and User toggles suspend/resume. LED changes use acknowledged
 batches. The display shows page, transport/master, selected parameters and labels.
 This is a working core adapter, not complete feature parity with every old overlay.
 
+In Tolglow, pass `:launch-grid {:beats 1/2}` to a Push 2 or Push 3 device
+connection for half-beat pad launches. Use one positive `:beats`, `:bars`, or
+`:phrases` interval, or `:off` for immediate launch, the default. A held pad
+release cancels its queued launch or releases the exact instance that fired.
+Blackout and stopping a running cue take effect immediately. An embedding host
+that opts in routes the grid launch and cancel commands through its show owner.
+It can supply `:launch-receipt` to reconcile pending receipts for selection and
+expression feedback.
+
 Native display is optional and requires Wayang on the application classpath.
 Wayang exposes one global display, so a second native display lease is rejected.
 MIDI sessions and injected displays are independent. On suspend, held gestures
