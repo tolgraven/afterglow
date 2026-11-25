@@ -89,17 +89,19 @@
   [instances overrides]
   (if-not (map? overrides)
     [{:path [] :message "Priority overrides must be an instance ID to priority map"}]
-    (let [invalid (into [] (keep (fn [[id priority]]
+    (let [known (filter #(contains? instances (key %)) overrides)
+          invalid (into [] (keep (fn [[id priority]]
                                    (when-not (and (number? priority) (Double/isFinite (double priority)))
                                      {:path [id] :message "Priority override must be finite"})))
-                        overrides)
+                        known)
           by-layer (reduce (fn [layers [id priority]]
-                             (if-let [layer (some-> (get instances id) layer-id)]
-                               (update layers layer (fnil conj #{}) (bigdec priority))
+                             (if-let [layer (layer-id (get instances id))]
+                               (update layers layer (fnil conj []) priority)
                                layers))
-                           {} (when (empty? invalid) overrides))]
-      (into invalid (keep (fn [[layer values]]
-                            (when (> (count values) 1)
+                           {} (when (empty? invalid) known))]
+      ;; Compare exactly; bigdec cannot represent ratios such as 1/3.
+      (into invalid (keep (fn [[layer [value & others]]]
+                            (when (some #(not (zero? (compare-priority value %))) others)
                               {:path [layer] :message "Native layer members need one priority override"})))
             by-layer))))
 

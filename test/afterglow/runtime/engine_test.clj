@@ -374,7 +374,8 @@
     (testing "an override equal to the effective priority keeps the explicit position"
       (is (= ["a" "b" "d" "c"] (sources (engine/advance show (frame {"d" 5}) compiler)))))
     (testing "lowering a layer below every tier and ignoring ended instances"
-      (is (= ["c" "a" "b" "d"] (sources (engine/advance show (frame {"c" -1 "gone" 9}) compiler)))))
+      (is (= ["c" "a" "b" "d"] (sources (engine/advance show (frame {"c" -1 "gone" 9}) compiler))))
+      (is (= ["a" "b" "d" "c"] (sources (engine/advance show (frame {"gone" ##NaN}) compiler)))))
     (testing "threaded evaluation merges by the overridden order"
       (with-open [^java.io.Closeable pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
         (is (= (engine/advance show (frame {"a" 5}) compiler)
@@ -387,6 +388,13 @@
                            (instance "x" :order 2))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"priority overrides"
               (engine/advance layered (frame {"m1" 1 "m2" 2}) compiler)))
+        (testing "exact ratios and equal values across numeric types are accepted within a layer"
+          (is (= ["x" "m1" "m2"] (mapv (comp :id :instance)
+                                       (get-in (engine/advance layered (frame {"m1" 1/3 "m2" 1/3}) compiler)
+                                               [::engine/evaluation :results]))))
+          (is (engine/advance layered (frame {"m1" 1/2 "m2" 0.5}) compiler)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"priority overrides"
+              (engine/advance layered (frame {"m1" 1/3 "m2" 0.3333}) compiler)))
         (is (= ["x" "m1" "m2"] (mapv (comp :id :instance)
                                      (get-in (engine/advance layered (frame {"m1" 1}) compiler)
                                              [::engine/evaluation :results]))))))))
