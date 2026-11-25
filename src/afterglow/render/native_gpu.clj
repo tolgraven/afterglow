@@ -120,11 +120,26 @@
     (.glBufferSubData gl GL/GL_ARRAY_BUFFER 0 (* n 20) targets)
     (context/capture! gl output n data (:timeout-ms solver))))
 
-(defn- stable-channel-axes? [patch id pan tilt margin]
+(def ^:private ^:const pan-secant-limit
+  ;; Row margins are measured with the pan error scaled back to this
+  ;; amplification, which a beam reaches about 7.2 degrees from the pan axis.
+  8.0)
+
+(defn pan-margin
+  "Pan guard margin for a head whose requested elevation is elevation-deg.
+  The float32 pan error grows with the secant of the elevation as the beam
+  nears the pan axis. Beyond a secant of 8 the margin grows with it."
+  ^double [^double margin ^double elevation-deg]
+  (let [cosine (abs (Math/cos (Math/toRadians elevation-deg)))]
+    (cond (zero? cosine) Double/POSITIVE_INFINITY
+          (< (* pan-secant-limit cosine) 1.0) (/ margin (* pan-secant-limit cosine))
+          :else margin)))
+
+(defn- stable-channel-axes? [patch id pan tilt elevation margin]
   ;; Reserve the renderer's margin before a physical coarse/fine rounding
   ;; boundary. The ordinary shader result is still a float32 estimate.
   (let [channels (get-in patch [:by-id id :compiled-channels])]
-    (and (frame/stable-channel-code? (:pan channels) pan margin)
+    (and (frame/stable-channel-code? (:pan channels) pan (pan-margin margin elevation))
          (frame/stable-channel-code? (:tilt channels) tilt margin))))
 
 (defn- values [patch ids targets ^FloatBuffer data angles? margin]
@@ -137,7 +152,7 @@
                                  (Float/isFinite yaw) (Float/isFinite elevation)
                                  (or (= reachable 0.0) (= reachable 1.0)))
                     (throw (ex-info "Invalid aim result or zero-distance target" {:fixture-id id})))
-                  (if (and angles? (not (stable-channel-axes? patch id pan tilt margin)))
+                  (if (and angles? (not (stable-channel-axes? patch id pan tilt elevation margin)))
                     result
                     (assoc result id (cond-> {:pan (double pan) :tilt (double tilt) :aim-reachable? (= reachable 1.0)}
                                        angles? (assoc :pan-deg (double yaw) :tilt-deg (double elevation))))))
@@ -164,6 +179,7 @@
   "Solve active targets by stable fixture ID for this frame. In addition to
   normalized axes, return the requested pan/tilt degrees for rich fixture state.
   Omit ambiguous wraps, mechanical stops, singulars and axes within the
-  renderer's :rounding margin of a DMX rounding boundary for CPU resolution."
+  renderer's :rounding margin of a DMX rounding boundary for CPU resolution.
+  pan-margin widens that margin for a beam near the pan axis."
   [solver targets history]
   (solve-batch! solver targets history false))

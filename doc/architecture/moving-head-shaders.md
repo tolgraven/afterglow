@@ -128,10 +128,10 @@ margin from the table `afterglow.render.native-gpu/rounding-margins`. Rows are
 tried in order and must match the whole renderer string. One ulp is the
 float32 step at 1.0, about 1.19e-7 of a normalized axis.
 
-| Row | `GL_RENDERER` | Margin | Largest measured axis error |
+| Row | `GL_RENDERER` | Margin | Largest scaled axis error measured |
 | --- | --- | ---: | --- |
-| `:apple-m-series` | `Apple M<n>`, optionally ` Pro`, ` Max` or ` Ultra` | 8 ulp, 9.54e-7 | 4.90e-7 on an M4 Pro, 3.77e-7 on an M4, 51,200 samples each |
-| `:mesa-llvmpipe` | `llvmpipe (LLVM …)` | 128 ulp, 1.53e-5 | 1.89e-6 on Mesa 26.0.8 with LLVM 21.1.8, 1,344 samples |
+| `:apple-m-series` | `Apple M<n>`, optionally ` Pro`, ` Max` or ` Ultra` | 8 ulp, 9.54e-7 | 1.83e-7 on an M4 Pro with `4.1 Metal - 91.7`, 1.5 million samples |
+| `:mesa-llvmpipe` | `llvmpipe (LLVM …)` | 128 ulp, 1.53e-5 | 1.89e-6 unscaled on Mesa 26.0.8 with LLVM 21.1.8, 1,344 samples |
 | `:unqualified` | anything else | 256 ulp, 3.05e-5 | none |
 
 A solver reports its row as `:rounding {:row … :ulps … :margin …}` beside
@@ -153,26 +153,48 @@ samples from one seed. Four times that error is already half a 16-bit step,
 so no margin with that headroom keeps 16-bit axes native on llvmpipe. The
 wider value costs nothing more for those axes and little for 8-bit axes.
 llvmpipe runs on the CPU, so the native path there is a test lane and not a
-faster backend. The Apple row matches only Apple's own driver. The Mesa driver
-for the same chips reports names such as `Apple M1 (G13G B0)` and is
-unqualified, like Apple Software Renderer, other vendors' GPUs and
-translation layers.
+faster backend. The Apple row matches only the exact chip names of Apple's own
+driver. Apple Software Renderer, a chip name with any other suffix, other
+vendors' GPUs and translation layers are unqualified.
 
-The table is static. A measurement at `open!` would be a small sample, and the
-largest error grows with the sample: the M4 Pro reached 1.14e-7 over 2,560
-samples and 4.90e-7 over 51,200. A quick sweep would understate the error and
-would give each host a different margin. A row is therefore a reviewed
-measurement. To qualify another driver, run the native test lane on it. The
-test `a-seeded-movement-sweep-packs-the-reference-bytes` prints one
+#### Pan error near the pan axis
+
+The pan error has no fixed bound. The shader rotates the aim into the fixture
+frame in float32 and takes the pan angle from the two components that lie
+across the pan axis. As the beam nears that axis those components shrink, and
+the same rounding error becomes a larger angle. The error grows with the
+secant of the requested elevation. Over 256,000 heads on the M4 Pro the
+largest unguarded pan error was 1.2e-7 beyond 30° from the pan axis and
+1.15e-6 within 0.3° of it. That is 1.2 times the Apple margin.
+
+`native-gpu/pan-margin` therefore widens the pan margin in proportion once the
+secant exceeds 8, about 7.2° from the pan axis. On Apple hardware a 16-bit pan
+within about 0.9° of the axis always resolves on the reference. The tilt
+margin is the row margin everywhere. The errors in the table are scaled the
+same way: the tilt error, and the pan error divided by the factor that widens
+its margin. With that scaling the M4 Pro maximum was 1.55e-7, 1.70e-7 and
+1.83e-7 in three sweeps of 512,000 samples, against 1.5e-7 over 51,200. All
+12,000 frames packed the reference bytes. The scaling moved 2 of 1,280 heads
+in the 32-head sweep to the reference (1,026 stay native).
+
+The table is static. A measurement at `open!` would be a small sample of
+targets that the show may never use, and its largest raw error depends on how
+near one sample came to a pan axis. Each host would get a different margin and
+a different share of native heads. A row is therefore a reviewed measurement.
+To qualify another driver, run the native test lane on it. The test
+`a-seeded-movement-sweep-packs-the-reference-bytes` prints one
 `Movement sweep` line per rig with the renderer, the matched row, the largest
-unguarded axis error and the number of heads that stayed native. It fails if
-the error reaches the row's margin or any frame differs from the reference
-bytes. Add a row only with a margin of at least four times the largest error
-over at least 51,200 samples, and record the driver version here.
+scaled and raw axis errors and the number of heads that stayed native. It
+fails if the scaled error reaches the row's margin or any frame differs from
+the reference bytes. Add a row only with a margin of at least four times the
+largest scaled error over at least 51,200 samples, and record the driver
+version here.
 
 The rows were measured with pan ranges of 270° and 540° and tilt ranges of
 100° and about 306°. A narrower calibrated range turns the same angular error
-into a larger normalized error and has not been qualified.
+into a larger normalized error. A 60° pan range with a 40° tilt range reached
+a scaled error of 4.6e-7 on the M4 Pro, about half the Apple margin. Narrower
+ranges have not been measured.
 
 The host can pass `:deadline-nanos` from its frame clock (`System/nanoTime`).
 The GPU stage honors the earlier of that deadline and the owner's frame budget.

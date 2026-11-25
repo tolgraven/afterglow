@@ -115,7 +115,8 @@ history. Native results must stay with their submitting frame. Check the
 published rich and compact poses and coarse/fine DMX, including fallback.
 The rounding guard takes its margin from `native-gpu/rounding-margins` by
 `GL_RENDERER`. Add or narrow a row only from the seeded sweep's measured error
-on that driver, and keep unmeasured drivers on the final row.
+on that driver, and keep unmeasured drivers on the final row. Pan error grows
+without bound toward the pan axis, so compare the scaled error with a margin.
 
 Keep compound cue members in their declared order through native composition.
 Resolve fields and group opacity before edge tracking, pan/tilt solving, RGBW
