@@ -48,6 +48,17 @@
        (catch clojure.lang.ExceptionInfo error
          (if (identical? error uncacheable) missing (throw error)))))
 
+(defn immutable-inputs?
+  "Whether a value fits the bounded immutable input contract used by reuse."
+  [value]
+  (not (identical? missing (capture value 65536 false))))
+
+(defn retained-output
+  "Admit bounded effect output data and detach its primitive arrays."
+  [value]
+  (let [saved (capture value 65536 true)]
+    (when-not (identical? missing saved) saved)))
+
 (defn- inputs-for [paths context]
   (reduce (fn [inputs path]
             (let [v (get-in context path missing)]

@@ -85,14 +85,18 @@
 (deftest a-batch-freezes-sources-even-when-a-handler-writes-a-ratom
   (let [system (reactive/create-system {}) cell (reactive/ratom system ::value 1)
         writer (reactive/reaction system ::writer #(let [before @cell] (when (= before 2) (reset! cell 3)) [before @cell]))
-        reader (reactive/reaction system ::reader #(identity @cell))]
-    (is (= [1 1] @writer)) (is (= 1 @reader))
-    (reset! cell 2)
-    (reactive/publish! system)
-    (is (= 3 @cell) "source writes retain immediate atom semantics")
-    (is (= [[2 2] 2] [@writer @reader]) "every derivation reads the same captured value")
-    (reactive/publish! system)
-    (is (= [[3 3] 3] [@writer @reader]))))
+        _ (reactive/reg-sub! system ::reader (fn [_ _] @cell))
+        {:keys [signal close!]} (reactive/acquire! system [::reader] (constantly nil))
+        bindings {:source [:source ::value] :derived [:subscription [::reader]]}]
+    (try
+      (is (= [1 1] @writer)) (is (= 1 @signal))
+      (reset! cell 2)
+      (is (= {:source 2 :derived 2} (:inputs (reactive/publish! system {} bindings))))
+      (is (= 3 @cell) "source writes retain immediate atom semantics")
+      (is (= [[2 2] 2] [@writer @signal]) "every derivation reads the same captured value")
+      (is (= {:source 3 :derived 3} (:inputs (reactive/publish! system {} bindings))))
+      (is (= [[3 3] 3] [@writer @signal]))
+      (finally (close!) (reactive/close! system)))))
 
 (deftest real-threads-cannot-mix-a-publish-snapshot
   (let [system (reactive/create-system {}) cell (reactive/ratom system ::value 1)

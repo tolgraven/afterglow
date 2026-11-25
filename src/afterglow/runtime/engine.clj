@@ -264,7 +264,8 @@
                    result (if expired?
                             (assoc context :done? true)
                             (let [ctx (assoc context :frame private-frame :instance step-instance :state input-state)]
-                              (if (or (:keyframes program) (:measure-effect private-frame) (seq (:keyframe-intervals private-frame)))
+                              (if (or (:keyframes program) (keyframes/dependency-driven? step)
+                                      (:measure-effect private-frame) (seq (:keyframe-intervals private-frame)))
                                 (keyframes/evaluate step ctx) (step ctx))))
                    valid? (valid-step-shape? result)
                    ;; Validate block shapes before opacity can discard a hidden
@@ -279,6 +280,7 @@
                                       blocks (cond-> (:contributions flushed)
                                                (and (or (= :previous (:targets layer)) (seq (:target-ids layer)))
                                                     (not expired?)
+                                                    (not (::keyframes/inputs-unavailable? result))
                                                     (empty? (:contributions flushed)))
                                                (conj {:kind :assignments :assignments []}))]
                                   (assoc flushed :contributions (mapv #(assoc % :native-layer tag) blocks)))
