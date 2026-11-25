@@ -113,6 +113,9 @@ For physical native output, feed the ordered contribution stream to
 before rotation. Keep one bounded owner per show and pass only accepted movement
 history. Native results must stay with their submitting frame. Check the
 published rich and compact poses and coarse/fine DMX, including fallback.
+The rounding guard takes its margin from `native-gpu/rounding-margins` by
+`GL_RENDERER`. Add or narrow a row only from the seeded sweep's measured error
+on that driver, and keep unmeasured drivers on the final row.
 
 Keep compound cue members in their declared order through native composition.
 Resolve fields and group opacity before edge tracking, pan/tilt solving, RGBW

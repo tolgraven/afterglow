@@ -15,6 +15,12 @@
 (def expressions {:focus {:op :position :axis :x}
                   :direction {:op :vec3 :args [{:op :param :key :x} {:op :const :value 0.25} {:op :const :value 1.0}]}})
 
+(defn- fine-native?
+  "Whether the resident renderer's guard window fits inside one 16-bit code
+  step. Wider rows resolve every coarse/fine axis on the reference."
+  [owner]
+  (< (* 2.0 65535 (get-in (movement/renderer (:movement owner)) [:rounding :margin])) 1.0))
+
 (defn- blocks [x]
   (let [group (compute/prepare-group expressions [[0.5 0 0]] (ir/compile-batch expressions))]
     [{:kind :assignments :source :low
@@ -23,7 +29,8 @@
       :batch {:target-ids [:spot] :opacity 0.5 :field-request {:group group :env {:params {:x x}}}}}]))
 
 (deftest render-owner-produces-and-retires-real-native-expression-and-movement-output
-  ;; The native success path uses axes clear of the physical rounding guard.
+  ;; The native success path uses axes clear of the Apple M-series rounding
+  ;; guard. A renderer with a wider row leaves these 16-bit axes to the reference.
   (let [layers (blocks 0.5)
         owner (compute/open! {:compute-backend :native-gpu :movement-backend :native-gpu :budget-ms 5000})]
     (try
@@ -36,7 +43,9 @@
                                     (+ (* 256 (bit-and 255 (aget universe i)))
                                        (bit-and 255 (aget universe (inc i))))))]
         (is (= (frame/portable-frame native) (frame/portable-frame retried)))
-        (is (= {:requested :native-gpu :backend :native-gpu :gpu-heads 1 :cpu-heads 0}
+        (is (= (if (fine-native? owner)
+                 {:requested :native-gpu :backend :native-gpu :gpu-heads 1 :cpu-heads 0}
+                 {:requested :native-gpu :backend :cpu :gpu-heads 0 :cpu-heads 1 :reason :ambiguous})
                (compute/movement-status owner native)))
         (is (= 1 (:native-dispatches (compute/status owner))) "Retries reuse this frame's healthy fields")
         (is (= 0 (:cpu-fallbacks (compute/status owner))))
@@ -139,6 +148,6 @@
           (is (every? #(< (abs %) 1.0e-8) (map - direction (map #(/ % length) world)))))
         (is (= direction (get-in ref [:values :spot :direction])))
         (is (= 1 (:native-dispatches (compute/status owner))))
-        (is (= 1 (:gpu-heads (compute/movement-status owner out))))
+        (is (= (if (fine-native? owner) 1 0) (:gpu-heads (compute/movement-status owner out))))
         (is (< (abs (- (get-in ref [:values :spot :pan]) (get-in out [:values :spot :pan]))) 1.0e-5)))
       (finally (compute/close! owner)))))

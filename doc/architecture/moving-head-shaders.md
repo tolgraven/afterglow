@@ -111,12 +111,68 @@ to the same physical DMX packer. Direct pan/tilt and zero-opacity assignments
 retain the CPU renderer’s behavior. The output adds a `:movement` map with
 `:backend`, `:gpu-heads` and `:cpu-heads`. If a small float32 margin around a native axis
 straddles a physical rounding boundary, the reference solver resolves that
-head. The check uses the packed channel format, including 8-bit, fine, and
+head. The margin depends on the driver, as the next section describes.
+The check uses the packed channel format, including 8-bit, fine, and
 inverted channels. Exact coordinates, unstable float32 subtraction, and
 ambiguous wrap, clamp or pole decisions also go through the reference solver.
 This guard applies to the movement solve. When an effect supplies a target
 from native float32 expression evaluation, it still carries that upstream
 precision.
+
+### Rounding guard by renderer
+
+The guard only keeps the packed bytes equal to the reference while the
+driver's float32 axis error is smaller than the margin. That error differs
+between drivers, so `native-gpu/open!` reads `GL_RENDERER` and takes the
+margin from the table `afterglow.render.native-gpu/rounding-margins`. Rows are
+tried in order and must match the whole renderer string. One ulp is the
+float32 step at 1.0, about 1.19e-7 of a normalized axis.
+
+| Row | `GL_RENDERER` | Margin | Largest measured axis error |
+| --- | --- | ---: | --- |
+| `:apple-m-series` | `Apple M<n>`, optionally ` Pro`, ` Max` or ` Ultra` | 8 ulp, 9.54e-7 | 4.90e-7 on an M4 Pro, 3.77e-7 on an M4, 51,200 samples each |
+| `:mesa-llvmpipe` | `llvmpipe (LLVM …)` | 128 ulp, 1.53e-5 | 1.89e-6 on Mesa 26.0.8 with LLVM 21.1.8, 1,344 samples |
+| `:unqualified` | anything else | 256 ulp, 3.05e-5 | none |
+
+A solver reports its row as `:rounding {:row … :ulps … :margin …}` beside
+`:renderer` and `:version` under `:resources`. A movement owner returns the
+same three keys from `(movement/renderer owner)` once a frame has opened its
+context. The `:movement` map of a frame is unchanged.
+
+The margin decides how much work stays native. A 16-bit axis has a code step of
+1/65535, about 1.53e-5. The Apple window of twice 8 ulp covers an eighth of
+that step, so about three quarters of 16-bit heads stay native. The llvmpipe
+and unqualified windows are two and four steps wide. Under those rows every
+16-bit axis resolves on the reference, and a frame with only 16-bit heads
+reports `:backend :cpu` with `:reason :ambiguous`. The native draw still runs.
+An 8-bit axis has a step of 1/255, so it stays native under every row for all
+but about 1% (llvmpipe) or 2% (unqualified) of its range.
+
+The llvmpipe margin is eight times an error that was measured on only 1,344
+samples from one seed. Four times that error is already half a 16-bit step,
+so no margin with that headroom keeps 16-bit axes native on llvmpipe. The
+wider value costs nothing more for those axes and little for 8-bit axes.
+llvmpipe runs on the CPU, so the native path there is a test lane and not a
+faster backend. The Apple row matches only Apple's own driver. The Mesa driver
+for the same chips reports names such as `Apple M1 (G13G B0)` and is
+unqualified, like Apple Software Renderer, other vendors' GPUs and
+translation layers.
+
+The table is static. A measurement at `open!` would be a small sample, and the
+largest error grows with the sample: the M4 Pro reached 1.14e-7 over 2,560
+samples and 4.90e-7 over 51,200. A quick sweep would understate the error and
+would give each host a different margin. A row is therefore a reviewed
+measurement. To qualify another driver, run the native test lane on it. The
+test `a-seeded-movement-sweep-packs-the-reference-bytes` prints one
+`Movement sweep` line per rig with the renderer, the matched row, the largest
+unguarded axis error and the number of heads that stayed native. It fails if
+the error reaches the row's margin or any frame differs from the reference
+bytes. Add a row only with a margin of at least four times the largest error
+over at least 51,200 samples, and record the driver version here.
+
+The rows were measured with pan ranges of 270° and 540° and tilt ranges of
+100° and about 306°. A narrower calibrated range turns the same angular error
+into a larger normalized error and has not been qualified.
 
 The host can pass `:deadline-nanos` from its frame clock (`System/nanoTime`).
 The GPU stage honors the earlier of that deadline and the owner's frame budget.
@@ -131,5 +187,8 @@ allows a bounded shutdown wait while any native cleanup continues.
 
 The native tests exercise layered aim and opacity, direct axes, exact values,
 ID-based compact history across rig changes, coarse/fine DMX across universes,
-deadline expiry, and an intentionally delayed draw. Physical fixture travel
+deadline expiry, and an intentionally delayed draw. Their expectations follow
+the active renderer's row: on llvmpipe the 16-bit scenes resolve on the
+reference, and 8-bit copies of the boundary, published-frame and sweep scenes
+keep native results in the compared bytes. Physical fixture travel
 and GPU speed on show hardware still require measurement.
