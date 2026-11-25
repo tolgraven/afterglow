@@ -22,6 +22,22 @@
 (defn- selected? [instance control]
   (contains? (::selected instance) control))
 
+(defn- solo-active? [instances]
+  (boolean (some #(selected? % :solo) instances)))
+
+(defn- suppression [solo-active? soloed? muted?]
+  (cond muted? :mute (and solo-active? (not soloed?)) :solo))
+
+(defn suppressed-instance-ids
+  "IDs whose output is gated among the instances participating in this frame."
+  [instances]
+  (if (some ::selected instances)
+    (let [solo? (solo-active? instances)]
+      (into #{} (keep (fn [instance]
+                        (when (suppression solo? (selected? instance :solo) (selected? instance :mute))
+                          (:id instance)))) instances))
+    #{}))
+
 (defn- select-targets [model selector instances]
   (let [layer? (and (map? selector) (contains? selector :layer-id))
         layer (:layer-id selector)
@@ -99,20 +115,19 @@
   caller can pass the already ordered instances from the same model."
   ([model] (projection model (instance-order/ordered model)))
   ([model instances]
-   (let [solo-active? (boolean (some #(selected? % :solo) instances))
+   (let [solo? (solo-active? instances)
          rows (mapv (fn [instance]
                       (let [soloed? (selected? instance :solo)
                             muted? (selected? instance :mute)
-                            layer (layer-id instance)
-                            suppression (cond muted? :mute (and solo-active? (not soloed?)) :solo)]
+                            layer (layer-id instance)]
                         (cond-> {:id (:id instance) :soloed? soloed? :muted? muted?
-                                 :suppressed-by suppression}
+                                 :suppressed-by (suppression solo? soloed? muted?)}
                           layer (assoc :layer-id layer))))
                     instances)
          layers (group-by :layer-id rows)
          layer-ids (into [] (comp (keep :layer-id) (distinct)) rows)]
      {:modes (modes model)
-      :solo-active? solo-active?
+      :solo-active? solo?
       :included-instance-ids (into [] (comp (remove :suppressed-by) (map :id)) rows)
       :instances rows
       :layers (mapv (fn [id]

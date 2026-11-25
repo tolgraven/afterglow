@@ -8,6 +8,7 @@
             [afterglow.runtime.faults :as faults]
             [afterglow.runtime.keyframes :as keyframes]
             [afterglow.time :as musical-time]
+            [afterglow.control.effect-selection :as effect-selection]
             [afterglow.control.model :as control]
             [afterglow.control.instance-order :as instance-order]
             [afterglow.control.params :as params]
@@ -395,7 +396,10 @@
     (assoc result :before before :prepared prepared)))
 
 (defn- assemble [model snapshot descriptors evaluations]
-  (let [evaluated (runtime/merge-results {:frame snapshot :effects descriptors} evaluations)
+  (let [live-instances (eduction (remove #(get-in % [:prepared :expired?])) (map :instance) evaluations)
+        suppressed (effect-selection/suppressed-instance-ids live-instances)
+        evaluated (runtime/merge-results {:frame snapshot :effects descriptors ::runtime/suppressed-instance-ids suppressed}
+                                         evaluations)
         instances (into {} (keep (fn [result]
                                   (when-not (:done? result)
                                     [(:id result) (runtime/observable-instance result)]))) evaluations)
@@ -458,6 +462,11 @@
   opacity and AR level at the contribution boundary, including native member
   opacity. Factors stay outside the effect context and committed instance.
   A removed registry definition leaves captured running instances valid.
+
+  Solo and Mute filter contributions without interrupting private clocks, effect
+  state or intents. An expired instance leaves the selection before the frame
+  is composed. A step that finishes during evaluation is still eligible to
+  contribute to that frame.
 
   Duration expiry enters release at the exact logical deadline. During a positive
   :release-duration-ms the compiled step sees the releasing instance and owns its

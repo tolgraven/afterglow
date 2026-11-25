@@ -439,6 +439,42 @@
       (is (= :running (get-in frozen [:instance :phase])))
       (is (false? (:expired? frozen))))))
 
+(deftest selection-gates-output-while-effect-state-and-intents-advance
+  (let [base (control/new-show
+              (model (instance "wash" :priority 1) (instance "accent" :priority 2)
+                     (instance "modifier" :priority 3
+                               :source {:native-layer {:id :compound :member 0 :targets :previous}})))
+        toggle (fn [m control id]
+                 (control! m {:op :effect-selection/toggle :control control :selector {:instance-ids [id]}}))
+        selected (-> base (toggle :solo "wash") (toggle :mute "wash"))
+        compile-step (fn [effect]
+                       (fn [{:keys [effect-id] :as context}]
+                         (-> ((compiler effect) context)
+                             (update :intents conj {:type :frame-sample :instance-id effect-id}))))
+        reverse-order (fn [f prepared] (reverse (mapv f prepared)))
+        result (engine/advance selected {:time-ms 20} compile-step reverse-order)
+        restored (-> (:model result) (toggle :solo "wash") (toggle :mute "wash"))
+        next-frame (engine/advance restored {:time-ms 40} compile-step)]
+    (is (= [] (:assignments result) (:contributions result)))
+    (is (= ["wash" "accent" "modifier"] (mapv :instance-id (:intents result))))
+    (is (= (:intents result) (:intents next-frame)))
+    (is (= ["wash" "accent" "modifier"] (mapv #(get-in % [:source :instance-id]) (:contributions next-frame))))
+    (is (= :compound (get-in next-frame [:contributions 2 :native-layer :id])))
+    (doseq [id ["wash" "accent" "modifier"]]
+      (is (= 1 (get-in result [:model :instances id :state :frames])))
+      (is (= 2 (get-in next-frame [:model :instances id :state :frames]))))))
+
+(deftest expired-solo-admits-the-rest-of-the-show-on-the-same-frame
+  (let [shot (instance "shot" :duration-ms 100 :release-duration-ms 50)
+        show (control! (control/new-show (model shot (instance "rest")))
+                       {:op :effect-selection/toggle :control :solo :selector {:instance-ids ["shot"]}})
+        releasing (engine/advance show {:time-ms 149} compiler)
+        expired (engine/advance (:model releasing) {:time-ms 150} compiler)]
+    (is (= ["shot"] (mapv :source (:assignments releasing))))
+    (is (= ["rest"] (mapv :source (:assignments expired))))
+    (is (= :release-complete (-> expired :intents last :reason)))
+    (is (= #{"rest"} (set (keys (get-in expired [:model :instances])))))))
+
 (deftest external-opacity-factors-are-owned-by-the-frame-and-preserve-source-order
   (let [plain (instance "plain" :system {:opacity 0.5})
         native (instance "native" :priority 1 :system {:opacity 0.5}
