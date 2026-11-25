@@ -93,7 +93,8 @@ button ID or to `:shift` when a captured button is bound to `:shift`. Hold the
 modifier before touching the encoder. A temporary edit changes the live value
 while the encoder is held and restores the original value on encoder lift,
 including when the modifier was released first. A dedicated modifier ID
-consumes that button's input. Shift retains its fine adjustment while held.
+uses that button only for temporary edits, even if it also has a button binding.
+The `:shift` setting retains Shift's fine adjustment while held.
 The same setup works with configured MPE when the fixed controls use channels
 outside the zone's member channels. Virtual recordings cover the software
 path. Qualification on a physical Push 3 needs MIDI input recorded from the

@@ -31,8 +31,8 @@
 (defn- reset-interactions [state]
   (assoc (dissoc (targets/clear-selection state) :encoder-gestures :encoder-releases :encoder-touch-modes
                  :temporary-release-tails :temporary-release-time-ms)
-         :pads {} :holds {} :buttons #{} :touches #{} :selected-instance nil :selected-cue nil
-         :selection-token nil :shift-patch nil :last-display nil))
+         :pads {} :holds {} :buttons #{} :dedicated-modifier-down? false :touches #{}
+         :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
 
 (defn- cue-at [state model [x y]]
   (let [[left bottom] (:origin state)
@@ -101,7 +101,7 @@
 (defn- temporary-modifier-held? [{:keys [temporary-encoder-modifier] :as options} state]
   (if (= :shift temporary-encoder-modifier)
     (shift-held? options state)
-    (contains? (:buttons state) temporary-encoder-modifier)))
+    (:dedicated-modifier-down? state)))
 
 (defn- release-encoder [state control-id time-ms]
   (let [mode (get-in state [:encoder-touch-modes control-id])
@@ -178,11 +178,16 @@
                     (fn [_ bounds _] (bindings/scale (:value event) [0 1] bounds))))]
     {:state state :commands (if command [command] [])}))
 
+(defn- set-held-button [options state id down?]
+  (if (= id (::dedicated-modifier options))
+    (assoc state :dedicated-modifier-down? down?)
+    (cond-> (update state :buttons (if down? conj disj) id)
+      (and (not down?) (= :shift (get-in options [:button-bindings id]))) (dissoc :shift-patch))))
+
 (defn- button [options state event model]
   (let [id (:control-id event) down? (:pressed? event)
         previously-down? (contains? (:buttons state) id)
-        state (cond-> (update state :buttons (if down? conj disj) id)
-                (and (not down?) (= :shift (get-in options [:button-bindings id]))) (dissoc :shift-patch))
+        state (set-held-button options state id down?)
         [x y] (:origin state)]
     (if (and down? (not previously-down?) (not= id (::dedicated-modifier options)))
       (let [action (get-in options [:button-bindings id])]
@@ -305,7 +310,7 @@
   ;; A fresh show drops the gesture and its target. Held temporary touches need
   ;; their physical lift before a detent may edit the new selection.
   (let [physical (select-keys (encoder-gesture/reset-ownership state)
-                              [:encoder-touch-modes :temporary-release-tails])
+                              [:encoder-touch-modes :temporary-release-tails :dedicated-modifier-down?])
         held-modifiers (into #{} (filter (modifier-ids options)) (:buttons state))]
     (cond-> (merge (reset-model state) physical)
       (seq held-modifiers) (assoc :buttons held-modifiers))))
@@ -320,7 +325,7 @@
          (temporary-modifier-held? options state))
     (assoc-in state [:encoder-touch-modes control-id] :temporary)
     (and (= :button type) (contains? modifiers control-id))
-    (update state :buttons (if pressed? conj disj) control-id)
+    (set-held-button options state control-id pressed?)
     :else state))
 
 (defn- user-profile
