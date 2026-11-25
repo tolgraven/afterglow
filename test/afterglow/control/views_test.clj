@@ -53,7 +53,9 @@
                   (assoc-in [:instances "a" :system] {:opacity 0.25 :paused? true})
                   (assoc-in [:instances "b" :system :opacity] 0.6)
                   (assoc ::views/pad-colors {:red [0 1 0]})
-                  (update :instances into (map instance (range 9))))
+                  (update :instances into (map instance (range 9)))
+                  (update-in [:instances "effect-8"]
+                             #(-> % (dissoc :cue-id) (assoc :definition {:name "Direct effect" :swatch "#ffff00"}))))
         state {:display-mode :mixer :page-id :main :origin [0 0] :selected-instance "b"
                :selected-cue :red :mixer-touches ["b" "a"]}
         project (fn [s] (:mixer (push-view/view s model (push-view/cue-index model) {})))
@@ -72,6 +74,8 @@
     (is (nil? (:expanded (project (dissoc state :mixer-touches)))))
     (is (nil? (:expanded (project next-state))))
     (is (= ["effect-6" "effect-7" "effect-8"] (mapv :id (:slots (project next-state)))))
+    (is (= {:name "Direct effect" :opacity 1.0 :color [1.0 1.0 0.0]}
+           (select-keys (last (:slots (project next-state))) [:name :opacity :color])))
     (is (= {:page 1 :pages 2 :count 11} (select-keys (project next-state) [:page :pages :count])))
     (is (= next-state (display/apply-action next-state model :display/mixer-next-page)))
     (is (= 0 (:page (project (display/apply-action next-state model :display/mixer-previous-page)))))

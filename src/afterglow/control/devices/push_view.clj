@@ -37,7 +37,9 @@
         cue-view (views/pad-view model cue-id {cue-id [instance]})]
     {:id id :cue-id cue-id :effect-id effect-id
      :name (or (:name cue) (:name definition) (:name cue-view) (some-> (or cue-id effect-id) name) id)
-     :color (:color cue-view) :phase phase
+     :color (or (:color cue-view) (get-in instance [:params :color])
+                (:color definition) (views/swatch-rgb (:swatch definition)))
+     :phase phase
      :opacity (:opacity system 1.0) :paused? (boolean (:paused? system))}))
 
 (defn- mixer [state model active touched-parameter]
