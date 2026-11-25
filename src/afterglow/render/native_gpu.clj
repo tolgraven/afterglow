@@ -97,7 +97,17 @@
     (.glBufferSubData gl GL/GL_ARRAY_BUFFER 0 (* n 20) targets)
     (context/capture! gl output n data (:timeout-ms solver))))
 
-(defn- values [ids targets ^FloatBuffer data angles?]
+(def ^:private rounding-margin
+  ;; Reserve several float32 steps before a physical coarse/fine rounding
+  ;; boundary. The ordinary shader result is still a float32 estimate.
+  (* 8.0 (Math/ulp (float 1.0))))
+
+(defn- stable-channel-axes? [patch id pan tilt]
+  (let [channels (get-in patch [:by-id id :compiled-channels])]
+    (and (frame/stable-channel-code? (:pan channels) pan rounding-margin)
+         (frame/stable-channel-code? (:tilt channels) tilt rounding-margin))))
+
+(defn- values [patch ids targets ^FloatBuffer data angles?]
   (reduce (fn [result id]
             (let [pan (.get data) tilt (.get data) reachable (.get data) valid (.get data)
                   yaw (.get data) elevation (.get data) stable (.get data)]
@@ -107,8 +117,10 @@
                                  (Float/isFinite yaw) (Float/isFinite elevation)
                                  (or (= reachable 0.0) (= reachable 1.0)))
                     (throw (ex-info "Invalid aim result or zero-distance target" {:fixture-id id})))
-                  (assoc result id (cond-> {:pan (double pan) :tilt (double tilt) :aim-reachable? (= reachable 1.0)}
-                                     angles? (assoc :pan-deg (double yaw) :tilt-deg (double elevation)))))
+                  (if (and angles? (not (stable-channel-axes? patch id pan tilt)))
+                    result
+                    (assoc result id (cond-> {:pan (double pan) :tilt (double tilt) :aim-reachable? (= reachable 1.0)}
+                                       angles? (assoc :pan-deg (double yaw) :tilt-deg (double elevation))))))
                 result))) {} ids))
 
 (defn- solve-batch! [solver targets history all?]
@@ -116,7 +128,7 @@
     (fn []
       (let [input (target-buffer! solver targets history all?)]
         (context/invoke! solver #(dispatch! % solver input))
-        (values (:ids solver) targets (:output-buffer solver) (not all?))))))
+        (values (:patch solver) (:ids solver) targets (:output-buffer solver) (not all?))))))
 
 (defn solve!
   "Solve one batch of world-space targets/directions keyed by fixture ID. A
@@ -130,6 +142,7 @@
 (defn solve-selected!
   "Solve active targets by stable fixture ID for this frame. In addition to
   normalized axes, return the requested pan/tilt degrees for rich fixture state.
-  Omit ambiguous wraps, mechanical stops and singulars for CPU resolution."
+  Omit ambiguous wraps, mechanical stops, singulars and nearby DMX rounding
+  boundaries for CPU resolution."
   [solver targets history]
   (solve-batch! solver targets history false))

@@ -115,6 +115,21 @@
         byte-at (fn [[universe offset]] (bit-and (aget ^bytes (get-in frame [:universes universe]) offset) 255))]
     (+ (* 256 (byte-at coarse)) (byte-at fine))))
 
+(deftest physical-movement-resolves-a-rounding-boundary-on-the-reference
+  (let [head {:position [0 0 0] :universe 1 :channels {:pan [1 2] :tilt [3 4]}}
+        patch (frame/compile-patch [(assoc head :id :boundary :address 512)
+                                    (assoc head :id :stable :address 50)])
+        blocks [{:kind :assignments
+                 :assignments [{:target-id :boundary :attribute :direction :value [0.0 0.25 1.0]}
+                               {:target-id :stable :attribute :direction :value [0.45 0.33 1.0]}]}]
+        expected (frame/resolve-contributions patch blocks)]
+    (with-open [owner (movement/open! {:budget-ms 10000})]
+      (let [actual (movement/resolve-contributions! owner patch blocks)]
+        (is (= {:backend :native-gpu :gpu-heads 1 :cpu-heads 1} (:movement actual)))
+        (is (= 32768 (motor-word actual (get-in patch [:by-id :boundary]) :pan)))
+        (is (= (update-vals (:universes expected) vec)
+               (update-vals (:universes actual) vec)))))))
+
 (deftest published-frames-use-only-effective-selected-movement
   (let [patch (frame/compile-patch fixtures)
         reordered (frame/compile-patch (vec (reverse fixtures)))

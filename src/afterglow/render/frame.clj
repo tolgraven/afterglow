@@ -701,21 +701,32 @@
   (let [^bytes buffer (get universes universe)]
     (aset-byte buffer (int index) (unchecked-byte (int value)))))
 
+(defn- encoded-channel-code ^long [{:keys [fine inverted-from] :as channel} ^double value]
+  (let [value (if (and (some? inverted-from) (>= value (double inverted-from)))
+                (- 255.0 (- value (double inverted-from))) value)]
+    (if fine (dmx/fine-word value (::coarse-range? channel)) (Math/round value))))
+
+(defn stable-channel-code?
+  "Whether a compiled channel keeps one physical code within the supplied
+  normalized margin. Treat an inversion pivot as a reference-solver boundary."
+  [{:keys [inverted-from] :as channel} level margin]
+  (let [low (* 255.0 (max 0.0 (- (double level) (double margin))))
+        high (* 255.0 (min 1.0 (+ (double level) (double margin))))]
+    (and (not (and (some? inverted-from) (<= low (double inverted-from) high)))
+         (= (encoded-channel-code channel low) (encoded-channel-code channel high)))))
+
 (defn pack-value!
   "Write normalized [0,1] channel level to exclusively owned byte arrays.
   This low-level function mutates supplied buffers; resolve-frame creates and
   owns them. Continuous coarse/fine pairs span codes 0 through 65535. Profiled
   function ranges retain their physical coarse-byte boundaries."
-  [universes {:keys [coarse fine inverted-from] :as channel} level]
+  [universes {:keys [coarse fine] :as channel} level]
   (when-not (unit? level) (fail! "Channel level must be finite and within [0,1]" {:value level}))
-  (let [value (* 255.0 (double level))
-        value (if (and (some? inverted-from) (>= value inverted-from))
-                (- 255.0 (- value inverted-from)) value)]
+  (let [code (encoded-channel-code channel (* 255.0 (double level)))]
     (if fine
-      (let [code (dmx/fine-word value (::coarse-range? channel))]
-        (put-byte! universes coarse (unsigned-bit-shift-right code 8))
-        (put-byte! universes fine (bit-and code 255)))
-      (put-byte! universes coarse (Math/round value)))))
+      (do (put-byte! universes coarse (unsigned-bit-shift-right code 8))
+          (put-byte! universes fine (bit-and code 255)))
+      (put-byte! universes coarse code))))
 
 (defn- write-packed-assignment!
   [^doubles values ^booleans present index value blend opacity target-id attribute extended?]

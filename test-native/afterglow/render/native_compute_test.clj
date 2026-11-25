@@ -23,7 +23,8 @@
       :batch {:target-ids [:spot] :opacity 0.5 :field-request {:group group :env {:params {:x x}}}}}]))
 
 (deftest render-owner-produces-and-retires-real-native-expression-and-movement-output
-  (let [layers (blocks 0.75)
+  ;; The native success path uses axes clear of the physical rounding guard.
+  (let [layers (blocks 0.5)
         owner (compute/open! {:compute-backend :native-gpu :movement-backend :native-gpu :budget-ms 5000})]
     (try
       (is (compute/expressions-enabled? owner))
@@ -40,7 +41,7 @@
         (is (= 1 (:native-dispatches (compute/status owner))) "Retries reuse this frame's healthy fields")
         (is (= 0 (:cpu-fallbacks (compute/status owner))))
         (is (= (pack-word cpu 4) (pack-word native 4)))
-        (doseq [i [0 2]] (is (<= (abs (- (pack-word cpu i) (pack-word native i))) 1)))
+        (doseq [i [0 2]] (is (= (pack-word cpu i) (pack-word native i))))
         (doseq [axis [:pan :tilt]]
           (is (< (abs (- (get-in cpu [:values :spot axis]) (get-in native [:values :spot axis]))) 1.0e-5))))
       (finally (compute/close! owner)))
