@@ -581,7 +581,190 @@
                                                        :sample (constantly nil)}))))
       (finally (reactive/close! sys)))))
 
-(deftest frame-paced-samples-from-an-old-epoch-cannot-reach-retained-watchers
+(deftest cycle-paced-coeffects-follow-the-selected-unwrapped-musical-position
+  (let [model {:show-id :show :epoch 0 :frame-number 0 :value :steady
+               :transport {:beat 0 :bpm 120 :playing? true}}
+        sys (reactive/create-system model {:on-fault! (fn [_ _])})
+        calls (LinkedBlockingQueue.) delivered (LinkedBlockingQueue.)
+        release (CountDownLatch. 1) interrupted (CountDownLatch. 1)
+        publish! (fn [db expected]
+                   (is (= expected (some (fn [_]
+                                           (reactive/publish! sys db)
+                                           (.poll calls 20 TimeUnit/MILLISECONDS))
+                                         (range 150)))))
+        expect-value! (fn [expected]
+                        (is (= expected (some (fn [_]
+                                                (reactive/publish! sys)
+                                                (.poll delivered 20 TimeUnit/MILLISECONDS))
+                                              (range 150)))))
+        no-sample! #(is (nil? (.poll calls 20 TimeUnit/MILLISECONDS)))]
+    (try
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1/2} :initial :waiting
+                                        :cycle-position (fn [db] (get-in db [:oscillator :position]))
+                                        :sample (fn [{:keys [oscillator value block?]}]
+                                                  (.offer calls (:position oscillator))
+                                                  (when block?
+                                                    (try (.await release)
+                                                         (catch InterruptedException e
+                                                           (.countDown interrupted)
+                                                           (throw e))))
+                                                  value)})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [first-cycle (assoc-in model [:oscillator :position] 1/8)]
+        (reactive/publish! sys first-cycle)
+        (no-sample!)
+        (reactive/publish! sys model)
+        (let [a (reactive/acquire! sys [::reading] identity)
+              b (reactive/acquire! sys [::reading] #(.offer delivered %))]
+          (is (= [:waiting :waiting] [(:value a) (:value b)]))
+          (no-sample!)
+          (publish! first-cycle 1/8)
+          (expect-value! :steady)
+          (reactive/publish! sys (assoc first-cycle :frame-number 100 :time-ms 10000
+                                                   :transport {:beat 25 :bpm 90 :playing? true}))
+          (no-sample!)
+          (reactive/publish! sys (assoc-in first-cycle [:oscillator :position] 49/100))
+          (no-sample!)
+          (publish! (assoc-in first-cycle [:oscillator :position] 1/2) 1/2)
+          (reactive/publish! sys (-> first-cycle (assoc-in [:oscillator :position] 3/2)
+                                    (assoc-in [:transport :playing?] false)))
+          (no-sample!)
+          (is (.isEmpty delivered) "An equal sampled value must not notify a reader.")
+          ((:close! a))
+          (publish! (-> first-cycle (assoc-in [:oscillator :position] 4) (assoc :value :jumped)) 4)
+          (expect-value! :jumped)
+          (no-sample!)
+          (publish! (-> first-cycle (assoc-in [:oscillator :position] 9/2) (assoc :block? true)) 9/2)
+          (reactive/publish! sys (assoc-in first-cycle [:oscillator :position] 5))
+          (no-sample!)
+          ((:close! b))
+          (is (.await interrupted 3 TimeUnit/SECONDS))
+          (reactive/publish! sys (assoc-in first-cycle [:oscillator :position] 11/2))
+          (no-sample!)))
+      (finally (.countDown release) (reactive/close! sys)))))
+
+(deftest cycle-cadence-validation-and-projection-errors-use-the-coeffect-boundary
+  (let [sys (reactive/create-system {:value 1} {:on-fault! (fn [_ _])})
+        project (fn [db] (if (:fail? db) (throw (ex-info "Cycle source failed" {})) (:position db)))
+        changes (LinkedBlockingQueue.)
+        definition {:mode :background :interval {:cycles 1} :cycle-position project
+                    :initial :waiting :sample (constantly :ready)}]
+    (try
+      (doseq [invalid [(dissoc definition :cycle-position)
+                       (assoc definition :cycle-position :keyword)
+                       (assoc definition :interval {:cycles 1 :beats 1})
+                       (assoc definition :interval {:beats 1})
+                       (assoc definition :mode :frame :interval nil)]
+              :let [interval (:interval invalid)]]
+        (is (thrown? clojure.lang.ExceptionInfo (reactive/reg-cofx! sys ::reading invalid)) (pr-str interval)))
+      (doseq [value [0 -1 ##NaN ##Inf "2"]]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (reactive/reg-cofx! sys ::reading (assoc definition :interval {:cycles value})))))
+      (reactive/reg-cofx! sys ::reading definition)
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (reactive/reg-sub! sys ::healthy value-sub)
+      (let [reading (reactive/acquire! sys [::reading] #(.offer changes %))
+            healthy (reactive/acquire! sys [::healthy] identity)]
+        (is (= :waiting (:value reading)))
+        (doseq [db [{:fail? true :value 2} {:position ##NaN :value 3}]]
+          (let [{:keys [faults]} (reactive/publish! sys db)]
+            (is (= [{:stage :cofx :id ::reading}] (mapv #(select-keys % [:stage :id]) faults)))
+            (is (= :waiting @(:signal reading)))
+            (is (= (:value db) @(:signal healthy)))))
+        (is (= :ready (some (fn [_]
+                              (reactive/publish! sys {:position 1/4 :value 4})
+                              (.poll changes 20 TimeUnit/MILLISECONDS))
+                            (range 150))))
+        ((:close! reading))
+        ((:close! healthy)))
+      (finally (reactive/close! sys)))))
+
+(defn- assert-cycle-samples [interval positions]
+  (let [sys (reactive/create-system {})
+        calls (LinkedBlockingQueue.)]
+    (try
+      (reactive/reg-cofx! sys ::reading
+                          {:mode :background :interval {:cycles interval} :cycle-position (fn [db] (:position db))
+                           :sample (fn [db] (.offer calls (:position db)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (doseq [[position expected] positions]
+          (testing (str "cycle position " position)
+            (is (= (when expected position)
+                   (some (fn [_]
+                           (reactive/publish! sys {:position position})
+                           (.poll calls 20 TimeUnit/MILLISECONDS))
+                         (range (if expected 150 3)))))))
+        (close!))
+      (finally (reactive/close! sys)))))
+
+(deftest exact-cycle-boundaries-use-floor-across-numeric-representations
+  (assert-cycle-samples 1/5 [[-7/10 true] [-601/1000 false] [-3/5 true] [-599/1000 false]
+                             [-1E-400M true] [0 true] [599/1000 true] [3/5 true]
+                             [0.60M false] [0.61 false] [0.6 true] [3/5 true]
+                             [(Math/nextDown 0.8) false] [0.8 true] [4/5 false]]))
+
+(deftest exact-cycle-buckets-handle-underflowed-decimal-positions
+  (let [half-min (.divide (BigDecimal. Double/MIN_VALUE) 2M)
+        interval (rationalize (- half-min 1E-350M))
+        position (- half-min 1E-351M)
+        tiny (BigDecimal. BigInteger/ONE Integer/MAX_VALUE)]
+    (is (= Double/MIN_VALUE (double interval)))
+    (is (zero? (double position)))
+    (assert-cycle-samples interval [[tiny true] [0 false] [position true] [interval false]
+                                    [(- tiny) true] [(- interval) false] [(- position) true]])))
+
+(deftest cycle-projection-linkage-errors-are-isolated-at-acquisition-and-publication
+  (let [reported (atom [])
+        sys (reactive/create-system {:failure "initial linkage" :value 1}
+                                    {:on-fault! (fn [fault error] (swap! reported conj [fault (ex-cause error)]))})
+        project (fn [{:keys [failure position]}]
+                  (when failure (throw (NoClassDefFoundError. failure)))
+                  position)]
+    (try
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1} :cycle-position project :initial :waiting
+                                        :sample (constantly :ready)})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)) {:fallback :waiting})
+      (reactive/reg-sub! sys ::healthy value-sub)
+      (let [healthy (reactive/acquire! sys [::healthy] identity)
+            reading (reactive/acquire! sys [::reading] identity)]
+        (is (true? (:available? reading)))
+        (is (= :waiting (:value reading)))
+        (is (= 1 (:value healthy)))
+        (is (= [{:stage :cofx :id ::reading :message "initial linkage"}]
+               (mapv #(select-keys % [:stage :id :message]) (reactive/faults sys))))
+        (reactive/publish! sys {:value 2})
+        (let [{:keys [faults]} (reactive/publish! sys {:failure "linked during publish" :value 3})]
+          (is (= [{:stage :cofx :id ::reading :message "linked during publish"}]
+                 (mapv #(select-keys % [:stage :id :message]) faults)))
+          (is (= [[NoClassDefFoundError "initial linkage"] [NoClassDefFoundError "linked during publish"]]
+                 (mapv (fn [[_ cause]] [(class cause) (ex-message cause)]) @reported)))
+          (is (= :waiting @(:signal reading)))
+          (is (= 3 @(:signal healthy))))
+        ((:close! reading))
+        ((:close! healthy)))
+      (finally (reactive/close! sys)))))
+
+(deftest cycle-projection-interruption-and-vm-failure-reach-the-owner
+  (let [sys (reactive/create-system {:phase :initial})
+        interrupt (InterruptedException. "owner interrupted")
+        fatal (ex-info "wrapped VM failure" {} (InternalError. "VM failed"))
+        project (fn [{:keys [phase]}]
+                  (case phase :initial (throw interrupt) :fatal (throw fatal) nil))]
+    (try
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1} :cycle-position project
+                                        :sample (constantly :ready)})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (is (identical? interrupt (try (reactive/acquire! sys [::reading] identity) (catch Throwable e e))))
+      (is (false? (reactive/demanded? sys #{::reading})))
+      (reactive/publish! sys {:phase :normal})
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (is (identical? fatal (try (reactive/publish! sys {:phase :fatal}) (catch Throwable e e))))
+        (is (empty? (reactive/faults sys)))
+        (close!))
+      (finally (reactive/close! sys)))))
+
+(defn- assert-old-epoch-sample-is-retired [cadence]
   (let [model {:show-id :show :epoch 0 :frame-number 0}
         sys (reactive/create-system model)
         old-started (CountDownLatch. 1) old-interrupted (CountDownLatch. 1)
@@ -590,20 +773,20 @@
         changes (LinkedBlockingQueue.)]
     (try
       (reactive/reg-cofx! sys ::reading
-                          {:mode :background :interval {:frames 2} :initial :waiting
-                           :sample (fn [{:keys [epoch]}]
-                                     (if (zero? epoch)
-                                       (do
-                                         (.countDown old-started)
-                                         (try (.await release-old)
-                                              (catch InterruptedException _
-                                                (.countDown old-interrupted)
-                                                (.await release-old)))
-                                         :stale)
-                                       (do
-                                         (.countDown new-started)
-                                         (.await release-new)
-                                         :current)))})
+                          (assoc cadence :mode :background :initial :waiting
+                                 :sample (fn [{:keys [epoch]}]
+                                           (if (zero? epoch)
+                                             (do
+                                               (.countDown old-started)
+                                               (try (.await release-old)
+                                                    (catch InterruptedException _
+                                                      (.countDown old-interrupted)
+                                                      (.await release-old)))
+                                               :stale)
+                                             (do
+                                               (.countDown new-started)
+                                               (.await release-new)
+                                               :current)))))
       (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
       (reactive/reg-fx! sys ::launch
                         (fn [_ value _]
@@ -618,8 +801,8 @@
         (is (.await new-started 3 TimeUnit/SECONDS))
         ;; Both sampler threads are occupied. The probe can only start once
         ;; the old worker has handled its result because the new one stays held.
-        (reactive/reg-cofx! sys ::probe {:mode :background :interval {:frames 2}
-                                        :sample (fn [_] (.countDown probe-started))})
+        (reactive/reg-cofx! sys ::probe (assoc cadence :mode :background
+                                             :sample (fn [_] (.countDown probe-started))))
         (reactive/reg-sub! sys ::probe (fn [{:keys [cofx]} _] (cofx ::probe)))
         (let [{:keys [close!]} (reactive/acquire! sys [::probe] identity)]
           (.countDown release-old)
@@ -641,6 +824,12 @@
         (.countDown release-old)
         (.countDown release-new)
         (reactive/close! sys)))))
+
+(deftest frame-paced-samples-from-an-old-epoch-cannot-reach-retained-watchers
+  (assert-old-epoch-sample-is-retired {:interval {:frames 2}}))
+
+(deftest cycle-paced-samples-from-an-old-epoch-cannot-reach-retained-watchers
+  (assert-old-epoch-sample-is-retired {:interval {:cycles 1/2} :cycle-position (constantly 0)}))
 
 (deftest invalid-db-does-not-stop-independent-sources-or-drop-diagnostics
   (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])}) src (reactive/ratom system ::x 1)]

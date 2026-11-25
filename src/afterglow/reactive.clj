@@ -435,7 +435,16 @@
 (defn reg-cofx!
   "Register an on-demand, per-frame, watched, or background input. A sample
   receives the last committed db. Background work uses an owned bounded pool.
-  The first active reader starts sampling and the last release cancels it."
+  The first active reader starts sampling and the last release cancels it.
+
+  Background intervals can use :fps, :ms, :beats, :bars, :phrases, :frames or
+  :cycles. With :interval {:cycles n}, supply a fast, pure :cycle-position
+  function of the committed db. Return a finite, unwrapped musical cycle count
+  with the chosen phase origin, or nil while that clock is unavailable. The
+  owner submits work on entering a bucket (floor of position divided by n),
+  skipping missed buckets and pausing new reads when transport is stopped.
+  A rational position and interval use exact boundaries. Frame and cycle
+  buckets are scoped to the show identity and epoch."
   [system id options]
   (locking (:lock system)
     (ensure-open! system) (outside-evaluation!)
