@@ -1,0 +1,311 @@
+{:tolglow "237501cc3ff3b53b6d709a25aa38e7060be7d0c5",
+ :afterglow "26027b16e090538bb9b4910105c2c90fc7a9ee16",
+ :capture
+ [{:reload-policy :preserve-state,
+   :batch? false,
+   :frames
+   [{:input
+     {:op :effect-groups/configure,
+      :config
+      {:active-overlay :fixtures,
+       :overlays
+       {:fixtures [{:id :silent, :fixture-ids [:muted], :level 0}]}}},
+     :time-ms 0,
+     :label :configure,
+     :ack {:status :accepted, :revision 1},
+     :instance {},
+     :reload-fault {},
+     :mixer {},
+     :dmx [0 0]}
+    {:input
+     {:op :cue/launch,
+      :cue-id :dimmer,
+      :launch {:reload-policy :preserve-state}},
+     :time-ms 10,
+     :label :launch,
+     :ack {:status :accepted, :revision 2},
+     :instance {:id "0:1", :effect-version 1, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 2,
+       :params {},
+       :targets [:muted],
+       :outputs {:dimmer 1}}},
+     :time-ms 20,
+     :label :reload-into-mute,
+     :ack {:status :accepted, :revision 3},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 3,
+       :params {:divisor {:type :number, :default 0}},
+       :targets [:open],
+       :outputs
+       {:dimmer
+        {:op :divide, :args [1 {:op :param, :key :divisor}]}}}},
+     :time-ms 30,
+     :label :reject-reload,
+     :ack {:status :accepted, :revision 4},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 10},
+     :reload-fault {:effect-version 3, :stage :evaluate},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 4,
+       :params {},
+       :targets [:open],
+       :outputs {:dimmer 1}}},
+     :time-ms 40,
+     :label :reload-out-of-mute,
+     :ack {:status :accepted, :revision 5},
+     :instance {:id "0:1", :effect-version 4, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}]}
+  {:reload-policy :preserve-state,
+   :batch? true,
+   :frames
+   [{:input
+     {:op :effect-groups/configure,
+      :config
+      {:active-overlay :fixtures,
+       :overlays
+       {:fixtures [{:id :silent, :fixture-ids [:muted], :level 0}]}}},
+     :time-ms 0,
+     :label :configure,
+     :ack {:status :accepted, :revision 1},
+     :instance {},
+     :reload-fault {},
+     :mixer {},
+     :dmx [0 0]}
+    {:input
+     {:op :cue/launch,
+      :cue-id :dimmer,
+      :launch {:reload-policy :preserve-state}},
+     :time-ms 10,
+     :label :launch,
+     :ack {:status :accepted, :revision 2},
+     :instance {:id "0:1", :effect-version 1, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 2,
+       :params {},
+       :targets [:muted],
+       :outputs {:dimmer 1}}},
+     :time-ms 20,
+     :label :reload-into-mute,
+     :ack {:status :accepted, :revision 3},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 3,
+       :params {:divisor {:type :number, :default 0}},
+       :targets [:open],
+       :outputs
+       {:dimmer
+        {:op :divide, :args [1 {:op :param, :key :divisor}]}}}},
+     :time-ms 30,
+     :label :reject-reload,
+     :ack {:status :accepted, :revision 4},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 10},
+     :reload-fault {:effect-version 3, :stage :evaluate},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 4,
+       :params {},
+       :targets [:open],
+       :outputs {:dimmer 1}}},
+     :time-ms 40,
+     :label :reload-out-of-mute,
+     :ack {:status :accepted, :revision 5},
+     :instance {:id "0:1", :effect-version 4, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}]}
+  {:reload-policy :restart,
+   :batch? false,
+   :frames
+   [{:input
+     {:op :effect-groups/configure,
+      :config
+      {:active-overlay :fixtures,
+       :overlays
+       {:fixtures [{:id :silent, :fixture-ids [:muted], :level 0}]}}},
+     :time-ms 0,
+     :label :configure,
+     :ack {:status :accepted, :revision 1},
+     :instance {},
+     :reload-fault {},
+     :mixer {},
+     :dmx [0 0]}
+    {:input
+     {:op :cue/launch,
+      :cue-id :dimmer,
+      :launch {:reload-policy :restart}},
+     :time-ms 10,
+     :label :launch,
+     :ack {:status :accepted, :revision 2},
+     :instance {:id "0:1", :effect-version 1, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 2,
+       :params {},
+       :targets [:muted],
+       :outputs {:dimmer 1}}},
+     :time-ms 20,
+     :label :reload-into-mute,
+     :ack {:status :accepted, :revision 3},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 20},
+     :reload-fault {},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 3,
+       :params {:divisor {:type :number, :default 0}},
+       :targets [:open],
+       :outputs
+       {:dimmer
+        {:op :divide, :args [1 {:op :param, :key :divisor}]}}}},
+     :time-ms 30,
+     :label :reject-reload,
+     :ack {:status :accepted, :revision 4},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 20},
+     :reload-fault {:effect-version 3, :stage :evaluate},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 4,
+       :params {},
+       :targets [:open],
+       :outputs {:dimmer 1}}},
+     :time-ms 40,
+     :label :reload-out-of-mute,
+     :ack {:status :accepted, :revision 5},
+     :instance {:id "0:1", :effect-version 4, :started-at-ms 40},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}]}
+  {:reload-policy :restart,
+   :batch? true,
+   :frames
+   [{:input
+     {:op :effect-groups/configure,
+      :config
+      {:active-overlay :fixtures,
+       :overlays
+       {:fixtures [{:id :silent, :fixture-ids [:muted], :level 0}]}}},
+     :time-ms 0,
+     :label :configure,
+     :ack {:status :accepted, :revision 1},
+     :instance {},
+     :reload-fault {},
+     :mixer {},
+     :dmx [0 0]}
+    {:input
+     {:op :cue/launch,
+      :cue-id :dimmer,
+      :launch {:reload-policy :restart}},
+     :time-ms 10,
+     :label :launch,
+     :ack {:status :accepted, :revision 2},
+     :instance {:id "0:1", :effect-version 1, :started-at-ms 10},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 2,
+       :params {},
+       :targets [:muted],
+       :outputs {:dimmer 1}}},
+     :time-ms 20,
+     :label :reload-into-mute,
+     :ack {:status :accepted, :revision 3},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 20},
+     :reload-fault {},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 3,
+       :params {:divisor {:type :number, :default 0}},
+       :targets [:open],
+       :outputs
+       {:dimmer
+        {:op :divide, :args [1 {:op :param, :key :divisor}]}}}},
+     :time-ms 30,
+     :label :reject-reload,
+     :ack {:status :accepted, :revision 4},
+     :instance {:id "0:1", :effect-version 2, :started-at-ms 20},
+     :reload-fault {:effect-version 3, :stage :evaluate},
+     :mixer {:overlay-group :silent, :member-level 0.0},
+     :dmx [0 0]}
+    {:input
+     {:op :registry/publish,
+      :kind :effects,
+      :definition
+      {:id :dimmer,
+       :version 4,
+       :params {},
+       :targets [:open],
+       :outputs {:dimmer 1}}},
+     :time-ms 40,
+     :label :reload-out-of-mute,
+     :ack {:status :accepted, :revision 5},
+     :instance {:id "0:1", :effect-version 4, :started-at-ms 40},
+     :reload-fault {},
+     :mixer {:overlay-group nil, :member-level 1.0},
+     :dmx [255 0]}]}]}
