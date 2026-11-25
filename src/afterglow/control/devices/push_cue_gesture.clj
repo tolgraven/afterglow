@@ -56,9 +56,10 @@
 (defn- expression-plan [options model device-id cue-id schemas]
   (let [policy (expressive/policy model device-id cue-id (expressive/profile-defaults options cue-id))
         overrides (:params policy)
+        disabled-axes (into #{} (map keyword) (:disabled-axes policy))
         legacy-axes (when (and (:legacy-velocity? options) (:enabled? policy))
                       (into #{} (filter #(and (contains? (:axes options) %)
-                                              (not (contains? (:disabled-axes policy) %))))
+                                              (not (contains? disabled-axes %))))
                             [:strike :pressure]))
         legacy-params (when (seq legacy-axes)
                         (into #{} (keep (fn [[param schema]]

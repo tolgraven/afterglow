@@ -214,7 +214,7 @@
         {launched :model ack :ack} (model/apply-command show command)
         state (:state (gesture/acknowledge (:state pressed) command ack))
         pressure (run-event options state launched "pressure" 1 (axis key :pressure 0.25))
-        off (gesture/configure {:legacy-velocity? true :mapping-policy {:disabled-axes #{:strike :pressure}}})
+        off (gesture/configure {:legacy-velocity? true :mapping-policy {:disabled-axes ["strike" "pressure"]}})
         disabled (run-event off (gesture/initial-state) show "off" 0 (pad key [1 0] true))]
     (is (= 3.5 (get-in command [:launch :params :speed])))
     (is (= {:speed 6.5 :level 0.25} (into {} (map (juxt :param :value)) (:commands pressure))))
