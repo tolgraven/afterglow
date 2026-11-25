@@ -679,6 +679,78 @@
         ((:close! healthy)))
       (finally (reactive/close! sys)))))
 
+(deftest exact-cycle-boundaries-use-floor-across-numeric-representations
+  (let [sys (reactive/create-system {})
+        calls (LinkedBlockingQueue.)]
+    (try
+      (reactive/reg-cofx! sys ::reading
+                          {:mode :background :interval {:cycles 1/5} :cycle-position (fn [db] (:position db))
+                           :sample (fn [db] (.offer calls (:position db)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (doseq [[position expected] [[-7/10 true] [-601/1000 false] [-3/5 true] [-599/1000 false]
+                                     [-1E-400M true] [0 true] [599/1000 true] [3/5 true]
+                                     [0.60M false] [0.61 false] [0.6 true] [3/5 true]
+                                     [(Math/nextDown 0.8) false] [0.8 true] [4/5 false]]]
+          (testing (str "cycle position " position)
+            (is (= (when expected position)
+                   (some (fn [_]
+                           (reactive/publish! sys {:position position})
+                           (.poll calls 20 TimeUnit/MILLISECONDS))
+                         (range (if expected 150 3)))))))
+        (close!))
+      (finally (reactive/close! sys)))))
+
+(deftest cycle-projection-linkage-errors-are-isolated-at-acquisition-and-publication
+  (let [reported (atom [])
+        sys (reactive/create-system {:failure "initial linkage" :value 1}
+                                    {:on-fault! (fn [fault error] (swap! reported conj [fault (ex-cause error)]))})
+        project (fn [{:keys [failure position]}]
+                  (when failure (throw (NoClassDefFoundError. failure)))
+                  position)]
+    (try
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1} :cycle-position project :initial :waiting
+                                        :sample (constantly :ready)})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)) {:fallback :waiting})
+      (reactive/reg-sub! sys ::healthy value-sub)
+      (let [healthy (reactive/acquire! sys [::healthy] identity)
+            reading (reactive/acquire! sys [::reading] identity)]
+        (is (true? (:available? reading)))
+        (is (= :waiting (:value reading)))
+        (is (= 1 (:value healthy)))
+        (is (= [{:stage :cofx :id ::reading :message "initial linkage"}]
+               (mapv #(select-keys % [:stage :id :message]) (reactive/faults sys))))
+        (reactive/publish! sys {:value 2})
+        (let [{:keys [faults]} (reactive/publish! sys {:failure "linked during publish" :value 3})]
+          (is (= [{:stage :cofx :id ::reading :message "linked during publish"}]
+                 (mapv #(select-keys % [:stage :id :message]) faults)))
+          (is (= [[NoClassDefFoundError "initial linkage"] [NoClassDefFoundError "linked during publish"]]
+                 (mapv (fn [[_ cause]] [(class cause) (ex-message cause)]) @reported)))
+          (is (= :waiting @(:signal reading)))
+          (is (= 3 @(:signal healthy))))
+        ((:close! reading))
+        ((:close! healthy)))
+      (finally (reactive/close! sys)))))
+
+(deftest cycle-projection-interruption-and-vm-failure-reach-the-owner
+  (let [sys (reactive/create-system {:phase :initial})
+        interrupt (InterruptedException. "owner interrupted")
+        fatal (ex-info "wrapped VM failure" {} (InternalError. "VM failed"))
+        project (fn [{:keys [phase]}]
+                  (case phase :initial (throw interrupt) :fatal (throw fatal) nil))]
+    (try
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1} :cycle-position project
+                                        :sample (constantly :ready)})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (is (identical? interrupt (try (reactive/acquire! sys [::reading] identity) (catch Throwable e e))))
+      (is (false? (reactive/demanded? sys #{::reading})))
+      (reactive/publish! sys {:phase :normal})
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (is (identical? fatal (try (reactive/publish! sys {:phase :fatal}) (catch Throwable e e))))
+        (is (empty? (reactive/faults sys)))
+        (close!))
+      (finally (reactive/close! sys)))))
+
 (defn- assert-old-epoch-sample-is-retired [cadence]
   (let [model {:show-id :show :epoch 0 :frame-number 0}
         sys (reactive/create-system model)

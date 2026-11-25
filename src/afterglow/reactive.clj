@@ -443,7 +443,8 @@
   with the chosen phase origin, or nil while that clock is unavailable. The
   owner submits work on entering a bucket (floor of position divided by n),
   skipping missed buckets and pausing new reads when transport is stopped.
-  Frame and cycle buckets are scoped to the show identity and epoch."
+  A rational position and interval use exact boundaries. Frame and cycle
+  buckets are scoped to the show identity and epoch."
   [system id options]
   (locking (:lock system)
     (ensure-open! system) (outside-evaluation!)

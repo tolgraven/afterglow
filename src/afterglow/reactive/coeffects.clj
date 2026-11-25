@@ -1,7 +1,8 @@
 (ns afterglow.reactive.coeffects
   "Demand-owned sources for the JVM reaction graph. The graph lock serializes
   registration, lifetime and scheduling. Workers only update their private slot."
-  (:require [afterglow.time :as time])
+  (:require [afterglow.runtime.faults :as faults]
+            [afterglow.time :as time])
   (:import [java.util.concurrent ArrayBlockingQueue Future RejectedExecutionException ThreadFactory
             ScheduledThreadPoolExecutor ThreadPoolExecutor ThreadPoolExecutor$AbortPolicy TimeUnit]))
 
@@ -127,15 +128,26 @@
   (when (and (not= bucket @timer) (submit! manager entry db))
     (vreset! timer bucket)))
 
+(defn- cycle-bucket [position cycles]
+  (let [bucket (if (and (rational? position) (rational? cycles))
+                 (if (zero? (double position))
+                   ;; An exact position that rounds to zero is smaller than the validated interval.
+                   (if (neg? position) -1 0)
+                   (let [quotient (/ (rationalize position) (rationalize cycles))
+                         whole (quot quotient 1)]
+                     (if (< quotient whole) (dec' whole) whole)))
+                 (Math/floor (/ (double position) (double cycles))))]
+    (when-not (time/finite-number? bucket)
+      (throw (ex-info "Sampling cycle bucket exceeds the finite range" {})))
+    ;; Represent both paths as integers so one bucket survives a numeric type change.
+    (if (float? bucket) (.toBigInteger (BigDecimal. (double bucket))) bucket)))
+
 (defn- schedule-cycle! [manager {:keys [cycle-position] :as entry} db cycles]
   (when (not= false (:playing? (time/frame-clock db)))
     (when-some [position (cycle-position db)]
       (when-not (time/finite-number? position)
         (throw (ex-info "Sampling cycle position must be finite or nil" {})))
-      (let [bucket (Math/floor (/ (double position) (double cycles)))]
-        (when-not (Double/isFinite bucket)
-          (throw (ex-info "Sampling cycle bucket exceeds the finite range" {})))
-        (schedule-bucket! manager entry db bucket)))))
+      (schedule-bucket! manager entry db (cycle-bucket position cycles)))))
 
 (defn- schedule! [manager {:keys [interval schedule] :as entry} db]
   (let [[unit amount] (first interval)]
@@ -172,8 +184,8 @@
         :demand {:value (sample db)}
         :frame {:value (sample db)}
         :background (do (when-not restoring? (schedule! manager entry db)) @slot))
-      (catch Exception e {:error e})
-      (catch AssertionError e {:error e}))))
+      (catch Throwable e
+        (if (faults/recoverable? e) {:error e} (throw e))))))
 
 (defn demand-only? [manager id]
   (= :demand (get-in @(:definitions manager) [id :mode])))
