@@ -193,6 +193,36 @@
         (is (= :releasing (get-in @(:show h) [:instances held-id :phase]))))
       (finally (finish! h)))))
 
+(deftest active-held-pad-release-cannot-adopt-a-new-epoch-at-dispatch
+  (let [{:keys [show options] :as base}
+        (fixture/harness {:profile (push/profile {:active-cue-grid? true})})
+        replacement-on-read (atom nil)
+        model! (fn []
+                 (let [captured @show]
+                   (when-let [replacement (first (reset-vals! replacement-on-read nil))]
+                     (reset! show replacement))
+                   captured))
+        device (session/create (assoc options :model! model!))
+        h (assoc base :session device)]
+    (try
+      (fixture/ready! h)
+      (receive! h [0x90 36 127])
+      (receive! h [0xb0 48 127])
+      (let [held-id (:selected-instance (local h))
+            before (admitted-commands h)
+            replacement (model/new-show (update @show :epoch inc))]
+        (is (= [:cue/launch] (mapv :op before)))
+        (is (= :select (get-in (local h) [:active-grid :mode])))
+        (is (= :running (get-in replacement [:instances held-id :phase])))
+        ;; Input sees the previous epoch. Dispatch sees a trusted replacement
+        ;; containing the same captured instance ID in a new epoch.
+        (reset! replacement-on-read replacement)
+        (receive! h [0x80 36 0])
+        (is (= :stale-epoch (get-in (session/snapshot device) [:last-ack :reason])))
+        (is (= before (admitted-commands h)))
+        (is (identical? replacement @show)))
+      (finally (finish! h)))))
+
 (defn- pending-sample-harness []
   (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
                                                      push-operator)
