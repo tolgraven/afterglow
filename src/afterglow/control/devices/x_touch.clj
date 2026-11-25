@@ -32,7 +32,8 @@
     (when-let [instance (get-in model [:instances (:instance-id target)])]
       (let [schema (get-in instance [:definition :params (:param target)])
             value (get-in instance [:params (:param target)]) component (:component target)
-            component? (and (integer? component) (vector? value) (< -1 component (count value)))
+            component? (and (integer? component) (not= :gradient (:type schema)) (vector? value)
+                            (< -1 component (count value)))
             schema (if component? {:type :number :bounds (if (= :color (:type schema)) (params/color-bounds schema) (:bounds schema))
                                    :default (get (:default schema) component)} schema)
             value (if component? (nth value component) value)]

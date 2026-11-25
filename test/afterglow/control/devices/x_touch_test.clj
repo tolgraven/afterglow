@@ -12,7 +12,9 @@
                                 :params {:level {:type :number :default 0.5 :bounds [0 1]}
                                          :enabled {:type :boolean :default false}
                                          :mode {:type :enum :values [:a :b :c] :default :b}
-                                         :color {:type :color :default [1 0 0]}}}}
+                                         :color {:type :color :default [1 0 0]}
+                                         :gradient {:type :gradient :default [{:position 0 :color [1 0 0]}
+                                                                              {:position 1 :color [0 0 1]}]}}}}
                :cues (into {} (for [n (range 40)] [(cue-id n) {:id (cue-id n) :version 1 :effect-id :wash :name (str "Cue " n)}]))}}))
 
 (defn harness []
@@ -214,3 +216,16 @@
                       [{:cue-id :cue-0 :fader {:param :color :component -1}}]]]
       (is (thrown? clojure.lang.ExceptionInfo (touch/connect! (options h "invalid" {:channels channels})))))
     (is (empty? @(:log h)))))
+
+(deftest gradient-component-bindings-stay-inert
+  (let [h (harness)
+        device (touch/connect! (options h "main" {:channels [{:cue-id :cue-0 :fader {:param :gradient :component 0}}]}))]
+    (try
+      (input! h "main" [144 24 127])
+      (input! h "main" [144 104 127])
+      (input! h "main" [224 127 127])
+      (let [instance (instance-for h :cue-0)]
+        (is instance "the cue still launches")
+        (is (= [{:position 0 :color [1 0 0]} {:position 1 :color [0 0 1]}] (get-in instance [:params :gradient]))))
+      (is (not-any? #(= :param/set (:op %)) @(:commands h)))
+      (finally (session/close! device)))))

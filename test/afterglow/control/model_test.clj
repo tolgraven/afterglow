@@ -809,7 +809,35 @@
                      [(assoc red :alpha 1) blue] [(dissoc red :color) blue] [(dissoc red :position)]]]
       (is (false? (valid? invalid)) (pr-str invalid)))
     (is (false? (params/valid-schema? (assoc schema :default []))))
-    (is (false? (params/valid-schema? (assoc schema :default [blue red]))))))
+    (is (false? (params/valid-schema? (assoc schema :default [blue red]))))
+    (is (false? (params/valid-schema? (assoc schema :bounds [0 1])))
+        "bounds would silently apply to stop colors only")
+    (is (false? (params/valid-schema? (assoc schema :size 2))))
+    (is (true? (params/valid-value? (assoc schema :bounds [0 0.5]) [blue]))
+        "stop colors stay linear RGB in [0,1] regardless of stray bounds")))
+
+(deftest gradient-parameters-launch-and-accept-only-valid-param-set-values
+  (let [red {:position 0 :color [1 0 0]}
+        blue {:position 1 :color [0 0 1]}
+        definition (assoc-in effect [:params :wash] {:type :gradient :default [red blue]})
+        show (-> (model/new-show {})
+                 (apply! {:op :registry/publish :kind :effects :definition definition})
+                 (apply! {:op :cue/put :cue {:id :fade :effect-id :wash :params {:wash [blue]}}})
+                 (apply! {:op :cue/launch :cue-id :fade}))
+        id (first (keys (:instances show)))
+        teal [{:position 0 :color [0 0.5 0.5]} {:position 0.5 :color [0 1 1]} blue]]
+    (is (= [blue] (get-in show [:instances id :params :wash])))
+    (is (= teal (get-in (apply! show {:op :param/set :instance-id id :param :wash :value teal})
+                        [:instances id :params :wash])))
+    (doseq [value [[] [blue red] [red red] 0.42 [(assoc red :alpha 1)] [(assoc red :color [0 0 2])]]]
+      (let [result (model/apply-command show (command show {:op :param/set :instance-id id :param :wash :value value}))]
+        (is (= :invalid-params (get-in result [:ack :code])) (pr-str value))
+        (is (= show (:model result)))))
+    (is (= :rejected (get-in (model/apply-command
+                              (-> (model/new-show {})
+                                  (apply! {:op :registry/publish :kind :effects :definition definition}))
+                              (command show {:op :cue/put :cue {:id :bad :effect-id :wash :params {:wash 0.42}}}))
+                             [:ack :status])))))
 
 (deftest invalid-default-in-trusted-initial-registry-still-rejects-launch
   (let [show (-> (configured)

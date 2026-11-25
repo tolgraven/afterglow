@@ -16,7 +16,8 @@
   "Does value satisfy a parameter schema? Bounds are inclusive; unknown types
   are rejected. Color is three linear RGB components in [0,1]. Gradients are
   nonempty vectors of {:position t :color rgb} stops in strictly increasing
-  position order within [0,1]. A single stop represents a solid color."
+  position order within [0,1]. A single stop represents a solid color.
+  Gradient stops ignore :bounds; valid-schema? rejects :bounds/:size on them."
   [{:keys [type bounds values options size]} value]
   (let [bounded? (fn [v]
                    (and (finite-number? v)
@@ -36,7 +37,7 @@
                                (and (map? stop) (= #{:position :color} (set (keys stop)))
                                     (let [{:keys [position color]} stop]
                                       (and (finite-number? position) (<= 0 position 1)
-                                           (linear-rgb? bounded? color)))))
+                                           (linear-rgb? finite-number? color)))))
                              value)
                      (apply < (map :position value)))
       :vector (and (vector? value) (or (nil? size) (= size (count value)))
@@ -55,6 +56,7 @@
                 (every? finite-number? bounds) (<= (first bounds) (second bounds))))
        (or (not= type :enum) (and (vector? (or values options)) (seq (or values options))))
        (or (not= type :vector) (and (integer? size) (pos? size)))
+       (or (not= type :gradient) (and (nil? bounds) (nil? size)))
        (contains? schema :default)
        (valid-value? schema (:default schema))))
 
