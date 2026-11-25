@@ -55,12 +55,14 @@ command carries the exact instance ID.
 
 ## Temporary parameter edits
 
-Connect Push 2 through the trusted show owner with `:operator-gestures? true`.
-Set `:temporary-encoder-modifier :shift` to use Shift, or set it to the MIDI CC
-of a mapped momentary button. A mapped CC takes precedence over that button's
-usual action. Shift continues to control step size.
+Tolglow enables operator gestures on dedicated Push 2 connections. A custom
+host can enable them with `:operator-gestures? true` and trusted command
+dispatch. Accent is the default temporary modifier. Set
+`:temporary-encoder-modifier` to another button's MIDI CC if desired. That CC
+takes precedence over the button's usual action. Shift controls encoder step
+size, and old `:shift` and CC 49 settings now select Accent. [Push 2 MIDI reference](https://github.com/Ableton/push-interface/blob/5eb352fe3da9d07891efb7447191c03a66d9fbdd/doc/AbletonPush2MIDIDisplayInterface.asc#L2061)
 
-Hold the modifier as you touch an authored parameter encoder. Turns, strip
+Hold Accent as you touch an authored parameter encoder. Turns, strip
 changes and the touched parameter's checkbox or picker apply live. Numeric,
 integer, boolean, enum, color, vector and range parameters are supported. The
 encoder remembers its mode until lift, even if you let go of the modifier first. On lift or disconnect, the show owner

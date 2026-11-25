@@ -255,7 +255,7 @@
                              (assoc-in [:encoder-touches :count] {:channel 2 :note 10}))
                   :encoder-bindings (assoc (:encoder-bindings options) :count {:param :count})
                   :button-bindings {:right :shift}
-                  :temporary-encoder-modifier :shift :operator-gestures? true
+                  :operator-gestures? true
                   :authority {:operator-id :push-3-test} :now-ms! #(deref now)}
         {:keys [show log receive device]} (harness settings)]
     (try
@@ -267,6 +267,7 @@
             params #(get-in @show [:instances id :params])
             history #(get-in @show [:control :edit-history])]
         (@receive [0xb4 23 127])
+        (@receive [0xb0 57 127])
         (@receive [0x92 9 127])
         (@receive [0x92 10 127])
         (@receive [0x92 9 127])
@@ -275,6 +276,7 @@
         (is (= (+ 0.5 (/ 1.0 65535)) (:level (params))))
         (is (= 6 (:count (params))))
         (is (= 2 (count (:open (history)))))
+        (@receive [0xb0 57 0])
         (@receive [0xb4 23 0])
         (@receive [0xb2 19 1])
         (is (= (+ 0.5 (/ 1.0 65535) 0.01) (:level (params))))
@@ -288,13 +290,55 @@
         (is (empty? (:open (history))))
         (is (= [0 0] ((juxt :cursor :position) (history))))
         (reset! now 210)
+        (@receive [0xb4 23 127])
         (@receive [0x92 9 127])
         (@receive [0xb2 19 1])
         (@receive [0x82 9 0])
-        (is (= 0.51 (:level (params))))
+        (@receive [0xb4 23 0])
+        (is (= (+ 0.5 (/ 1.0 65535)) (:level (params))))
         (is (= [1 1] ((juxt :cursor :position) (history))))
         (is (empty? (:errors (session/snapshot device)))))
       (finally (session/close! device)))))
+
+(deftest accent-default-keeps-captured-addresses-and-migrates-shift-configuration
+  (doseq [[settings press] [[{:temporary-encoder-modifier :shift} [0xb0 57]]
+                            [{:temporary-encoder-modifier :right} [0xb0 57]]
+                            [{:layout (assoc-in layout [:buttons :shift-capture] {:channel 0 :controller 49})
+                              :temporary-encoder-modifier :shift-capture} [0xb0 57]]
+                            [{:layout (assoc-in layout [:buttons :accent] {:channel 6 :controller 42})} [0xb6 42]]
+                            [{:layout (assoc-in layout [:buttons :emphasis] {:channel 0 :controller 57})} [0xb0 57]]]]
+    (let [{:keys [show log receive device]}
+          (harness (merge {:operator-gestures? true :authority {:operator-id :push-3-test}
+                           :button-bindings {:right :shift}} settings))]
+      (try
+        (session/open! device)
+        (@receive [0x93 12 100])
+        (let [level #(get-in @show [:instances "0:1" :params :level])]
+          (@receive (conj press 127))
+          (@receive [0x92 9 127])
+          (@receive [0xb2 19 1])
+          (is (= 0.51 (level)))
+          (@receive (conj press 0))
+          (@receive [0x82 9 0])
+          (is (= 0.5 (level)))
+          (is (= [:cue/launch :gesture/begin :gesture/sample :gesture/cancel] (mapv :op @log))))
+        (finally (session/close! device))))))
+
+(deftest factory-accent-keeps-occupied-ccs-and-mpe-member-routing
+  (let [base (assoc options :operator-gestures? true)
+        address {:channel 0 :controller 57}
+        occupied-button (-> base (assoc-in [:layout :buttons :occupied] address)
+                            (assoc-in [:button-bindings :occupied] :blackout))
+        occupied-encoder (assoc-in base [:layout :encoders :master] address)
+        member-zone (assoc base :expression-mode :mpe :mpe-note-cells {40 [0 0]}
+                                 :zone {:manager-channel 15 :member-channels (vec (range 15))})]
+    (doseq [settings [occupied-button occupied-encoder member-zone]]
+      (is (not (contains? (get-in (push/profile settings) [:capabilities :controls]) :temporary-encoder-edits))))
+    (is (= :occupied (:control-id ((:decode (push/profile occupied-button)) [0xb0 57 127]))))
+    (is (= :master (:control-id ((:decode (push/profile occupied-encoder)) [0xb0 57 127]))))
+    (is (contains? (get-in (push/profile (assoc occupied-button :temporary-encoder-modifier :right))
+                           [:capabilities :controls]) :temporary-encoder-edits))
+    (is (nil? ((:decode (push/profile options)) [0xb0 57 127])))))
 
 (deftest momentary-encoder-fails-closed-without-an-admitted-touch
   (doseq [[label overrides expected-rejection]
@@ -304,13 +348,13 @@
            ["unsupported schema" {:launch? true :encoder-bindings {:level {:param :flag}}} nil]]]
     (testing label
       (let [{:keys [show log receive device]}
-            (harness (merge {:temporary-encoder-modifier :right :operator-gestures? true
+            (harness (merge {:operator-gestures? true
                              :authority {:operator-id :push-3-test}} overrides))]
         (try
           (swap! show assoc-in [:registry :effects :wash :params :flag] {:type :boolean :default false})
           (session/open! device)
           (when (:launch? overrides) (@receive [0x93 12 100]))
-          (@receive [0xb4 23 127])
+          (@receive [0xb0 57 127])
           (is (= [0 0] (get-in (session/snapshot device) [:local :origin])))
           (@receive [0x92 9 127])
           (when expected-rejection
@@ -319,7 +363,7 @@
           (when (= label "missing selected instance")
             (@receive [0x93 12 100])
             (@receive [0x92 9 127])
-            (@receive [0xb4 23 0])
+            (@receive [0xb0 57 0])
             (@receive [0xb2 19 12]))
           (@receive [0x82 9 0])
           (is (not-any? #(#{:param/set :gesture/sample} (:op %)) @log))
@@ -408,11 +452,11 @@
         (finally (session/close! device))))))
 
 (deftest mpe-fixed-encoder-controls-restore-with-and-without-cue-gestures
-  (doseq [cue-gestures? [false true]]
+  (doseq [cue-gestures? [false true] [modifier press] [[nil [0xb0 57 127]] [:right [0xb4 23 127]]]]
     (let [{:keys [show log receive device]}
           (harness {:expression-mode :mpe :zone {:manager-channel 0 :member-channels [1]}
                     :cue-gestures? cue-gestures? :mpe-note-cells {40 [0 0]}
-                    :temporary-encoder-modifier :right :operator-gestures? true
+                    :temporary-encoder-modifier modifier :operator-gestures? true
                     :authority {:operator-id :push-3-test}})]
       (try
         (session/open! device)
@@ -421,7 +465,7 @@
               level #(get-in @show [:instances id :params :level])
               baseline (level)]
           (is (number? baseline))
-          (@receive [0xb4 23 127])
+          (@receive press)
           (@receive [0x92 9 127])
           (@receive [0xb2 19 1])
           (is (= (+ baseline 0.01) (level)))
@@ -477,7 +521,7 @@
                      :render! (fn [_ view] (swap! views conj view)) :close! (fn [_])}
             settings (cond-> {:expression-mode mode :cue-gestures? true :display display
                               :temporary-encoder-modifier :right :operator-gestures? true
-                              :button-bindings {:blackout :shift :right :shift}
+                              :button-bindings {:blackout :shift :right :page-right}
                               :authority {:operator-id :push-3-test}}
                        (= :mpe mode) (assoc :zone {:manager-channel 0 :member-channels [1]}
                                             :mpe-note-cells {40 [0 0]}))
