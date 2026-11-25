@@ -280,6 +280,7 @@
                                       blocks (cond-> (:contributions flushed)
                                                (and (or (= :previous (:targets layer)) (seq (:target-ids layer)))
                                                     (not expired?)
+                                                    (not (::keyframes/inputs-unavailable? result))
                                                     (empty? (:contributions flushed)))
                                                (conj {:kind :assignments :assignments []}))]
                                   (assoc flushed :contributions (mapv #(assoc % :native-layer tag) blocks)))

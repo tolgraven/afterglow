@@ -375,7 +375,7 @@
                      (assoc (if (time/finite-number? now) (reactive-sample prior now hdr?) prior) :beat now)
                      (reactive-window base prior (call ctx false #(reactive-contributions calculate inputs hdr?)) clock fixtures))]
         (assoc ctx :contributions (:result window) ::window window))
-      ctx)))
+      (assoc ctx ::inputs-unavailable? true))))
 
 (defn- evaluate-predictive [step ctx]
   (let [{:keys [frame instance]} ctx sampler (::sampler (meta step))

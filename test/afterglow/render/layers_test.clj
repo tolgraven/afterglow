@@ -3,6 +3,7 @@
             [afterglow.render.frame :as frame]
             [afterglow.render.layers :as layers]
             [afterglow.runtime.engine :as engine]
+            [afterglow.runtime.keyframes :as keyframes]
             [clojure.test :refer [deftest is testing]]
             [thi.ng.color.core :as color]))
 
@@ -212,6 +213,37 @@
     (doseq [finish? [false true]]
       (is (== 1/2 (get-in (frame/resolve-contributions patch (:contributions (advance m finish?)))
                            [:values :head :channels :focus]))))))
+
+(deftest an-unavailable-native-member-leaves-its-inherited-targets-alone
+  (let [base {:id :base :version 1 :params {}}
+        modifier {:id :adjust :version 1 :params {}
+                  :layer {:targets :previous :transforms [{:attribute :dimmer :value 0.75}]}}
+        show (control/new-show {:registry {:effects {:base base :adjust modifier}
+                                           :cues {:base {:id :base :version 1 :effect-id :base}
+                                                  :adjust {:id :adjust :version 1 :effect-id :adjust}}}})
+        launch (fn [m id]
+                 (:model (control/apply-command m {:op :cue/launch :cue-id id :command-id (name id) :source :test
+                                                    :show-id (:show-id m) :epoch (:epoch m) :time-ms 0})))
+        show (-> show (launch :base) (launch :adjust))
+        calls (atom [])
+        step (keyframes/dependency-driven {:inputs [:level]}
+                                          (fn [{:keys [level]}] (swap! calls conj level) {}))
+        compile-step (fn [definition]
+                       (if (= :adjust (:id definition)) step
+                           #(update % :assignments conj (row :dimmer 0.25))))
+        tick (fn [previous time inputs]
+               (engine/advance (or (:model previous) show)
+                               {:time-ms time :reactive-inputs inputs :keyframes (:keyframes previous)}
+                               compile-step))
+        missing (tick nil 0 {})
+        present (tick missing 1 {:level nil})
+        lost (tick present 2 {})
+        regained (tick lost 3 {:level 0.5})
+        samples [missing present lost regained]]
+    (is (= [nil 0.5] @calls))
+    (is (= [1 2 1 2] (mapv #(count (:contributions %)) samples)))
+    (is (= [0.25 0.75 0.25 0.75]
+           (mapv #(get-in (frame/resolve-contributions patch (:contributions %)) [:values :head :dimmer]) samples)))))
 
 (deftest opaque-replacements-remain-typed-blocks-at-their-group-anchor
   (let [prepared {:kind :batch :compiled {:target-ids [:head] :columns [{:attribute :focus}]

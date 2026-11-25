@@ -94,6 +94,30 @@
            (mapv #(mapv :value (:assignments %)) [changed before-step after-step midpoint endpoint])))
     (is (instance? Integer (get-in endpoint [:assignments 0 :value])))))
 
+(deftest scalar-and-typed-beat-ratios-use-the-same-step-boundaries
+  (doseq [batch? [false true]
+          [from to expected] [[1.0 5.0 [1.0 2.0 5.0]]
+                              [5/4 5/2 [1.40625 1.5625 2.5]]
+                              [1.0 5.5 [1.5625 2.125 5.5]]]]
+    (let [step (kf/dependency-driven {:inputs [:ratio] :transition {:beats 1}}
+                                     (fn [{:keys [ratio]}]
+                                       (if batch?
+                                         {:contributions [{:kind :batch
+                                                           :batch {:target-ids [:lamp]
+                                                                   :outputs {:beat-ratio {:type :number :components 1
+                                                                                          :values (double-array [ratio])}}}}]}
+                                         {:assignments [{:target-id :lamp :attribute :beat-ratio :value ratio}]})))
+          initial (reactive-frame (show nil) nil step [] 0 {:ratio from})
+          tick (fn [previous beat] (reactive-frame (:model previous) previous step [] beat {:ratio to}))
+          changed (tick initial 1/4)
+          early (tick changed 3/8)
+          step-time (tick early 1/2)
+          endpoint (tick step-time 5/4)
+          sampled (fn [frame]
+                    (first (:result (kf/inspect (get-in frame [:keyframes "0:1"]) :lamp :beat-ratio))))]
+      (is (= expected (mapv (comp double sampled) [early step-time endpoint])))
+      (is (= (if batch? (double to) to) (sampled endpoint))))))
+
 (deftest a-dependency-driven-tween-follows-the-private-transport-clock
   (let [calls (atom 0)
         step (kf/dependency-driven {:inputs [:level] :transition {:beats 1}}

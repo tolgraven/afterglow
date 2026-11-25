@@ -95,19 +95,31 @@
 (defn- discrete-value [a b t]
   (if (< t 1/2) a b))
 
+(defn- whole-number? [value]
+  (if (float? value)
+    (== (double value) (Math/rint (double value)))
+    (integer? (rationalize value))))
+
 (defn- integer-step [a b t]
-  (let [distance (-' b a)
+  (let [from (if (integer? a) a (bigint a))
+        to (if (integer? b) b (bigint b))
+        distance (-' to from)
         change (bigint (* (rationalize t) distance))]
-    (if (zero? change) a (+' a change))))
+    (if (zero? change)
+      a
+      (let [value (+' from change)]
+        (if (float? a) (double value) value)))))
+
+(defn- beat-ratio-sample [a b t]
+  (if (and (whole-number? a) (whole-number? b))
+    (integer-step a b t)
+    (scalar a b t Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)))
 
 (defn- field-blender [attr t hdr? reactive?]
   (let [[lo hi] (bounds attr hdr?)]
     (cond
       (and reactive? (discrete-fields attr)) #(discrete-value %1 %2 t)
-      (and reactive? (= :beat-ratio attr)) (fn [a b]
-                                            (if (and (integer? a) (integer? b))
-                                              (integer-step a b t)
-                                              (scalar a b t lo hi)))
+      (and reactive? (= :beat-ratio attr)) #(beat-ratio-sample %1 %2 t)
       :else #(scalar %1 %2 t lo hi))))
 
 (defn- assignment [t hdr? reactive? a b]
@@ -133,8 +145,8 @@
         (dotimes [i n]
           (let [x (aget a i) y (aget b i)]
             (aset-double out i
-                         (if (and beat-ratio? (== x (Math/rint x)) (== y (Math/rint y)))
-                           (double (integer-step (bigint x) (bigint y) t))
+                         (if beat-ratio?
+                           (double (beat-ratio-sample x y t))
                            (max lo (min hi (+ x (* phase (- y x)))))))))
         (assoc from :values out)))))
 
