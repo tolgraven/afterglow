@@ -505,8 +505,14 @@
                  :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                  :last-touch-strip nil :display-buttons #{}
                  :touches {} :touch-order [] :shift? false :shift-patch nil :record? false :pressed-pads #{} :pad-instances {})
-   :commands (into (into [] (keep (comp end-encoder-gesture val)) (sort-by key (:encoder-gestures state)))
-                   (bindings/release-holds (:holds state) envelope))
+   :gesture-ends (into []
+                       (keep (fn [{:keys [pending-end] :as gesture}]
+                               (if-let [[command completion] pending-end]
+                                 {:command command :completion completion}
+                                 (when-let [command (end-encoder-gesture gesture)]
+                                   {:command command}))))
+                       (vals (:encoder-gestures state)))
+   :commands (bindings/release-holds (:holds state) envelope)
    :midi (if (or disconnected? (not (:ready? state))) []
              (into (into [(codec/touch-strip-mode device-id :default)]
                          (for [note (range 36 100)] [0x80 note 0]))

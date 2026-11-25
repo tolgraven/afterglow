@@ -19,17 +19,23 @@
   A :feedback-source may supply :open! [], :project! [handle local model] and
   :close! [handle]. Only feedback sees its projection; input always receives
   the committed model. Its handle belongs to the active session.
+  Hosts should durably queue operator gesture ends, including teardown ends.
+  A host without durable admission can retain the session and call refresh!
+  until :pending-gesture-ends is empty, even after the transports close.
   Call open! explicitly; without schedule! the host owns the refresh cadence."
   [{:keys [session-id profile model! dispatch! now-ms!] :as options}]
   (when-not (and (or (keyword? session-id) (and (string? session-id) (seq session-id)))
                  (map? profile) (every? ifn? [model! dispatch! now-ms!]))
     (throw (ex-info "Session needs ID, profile, model!, dispatch! and now-ms!" {})))
-  {:options options :lock (Object.) :resources (atom {})
+  {:options options :lock (Object.) :resources (atom {}) :gesture-ends (atom {})
    :command-prefix (if (:grid-launches? profile) (str (java.util.UUID/randomUUID)) session-id)
    :state (atom {:status :closed :generation 0 :counter 0
                  :local (:initial-state profile {}) :errors []})})
 
-(defn snapshot [session] @(:state session))
+(defn snapshot [session]
+  (let [pending (seq @(:gesture-ends session))]
+    (cond-> @(:state session)
+      pending (assoc :pending-gesture-ends (mapv key (sort-by (comp pr-str key) pending))))))
 
 (defn- update-state! [session f & args]
   ;; Callers hold the session lock. No user functions run in a CAS retry loop.
@@ -65,46 +71,83 @@
 (defn- grid-launch? [template]
   (and (= :cue/launch (:op template)) (contains? template :grid)))
 
+(defn- dispatch-command! [session template]
+  (let [{:keys [dispatch! profile]} (:options session)
+        ;; Admission time and show identity are assigned here, including delayed releases.
+        envelope (envelope! session)
+        scheduled-launch? (grid-launch? template)
+        timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
+        gesture? (and (:operator-gestures? profile)
+                      (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
+        stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
+                   (and timed-cue? (some #(and (contains? template %)
+                                               (not= (get template %) (get envelope %)))
+                                         [:show-id :epoch])))
+        command (cond-> (merge template envelope)
+                  (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
+        response (cond
+                   stale? {:status :rejected :reason :stale-epoch}
+                   (and gesture? (= :gesture/begin (:op command))
+                        (contains? @(:gesture-ends session) (:control-id command)))
+                   {:status :rejected :reason :dispatch-busy}
+                   (and gesture? (= :gesture/end (:op command)))
+                   ;; Preserve feedback and continue releasing other controls.
+                   (try (dispatch! command)
+                        (catch Exception error
+                          (record-error! session error)
+                          {:status :rejected :reason :dispatch-error}))
+                   :else (dispatch! command))
+        ack (or (:ack response) response)
+        pending-gesture? (and gesture? (= :pending (:status ack))
+                              (instance? clojure.lang.IPending (:completion ack)))]
+    (when-not (or (#{:accepted :rejected} (:status ack))
+                  (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack)))
+                  pending-gesture?)
+      (throw (ex-info "dispatch! must return a synchronous command acknowledgement" {})))
+    (update-state! session assoc :last-ack (cond-> ack pending-gesture? (dissoc :completion)))
+    [command ack]))
+
 (defn- dispatch-commands! [session commands]
-  (let [{:keys [dispatch! profile]} (:options session)]
+  (let [acknowledge (get-in session [:options :profile :ack])]
     (loop [remaining (seq commands) count 0]
       (when-let [template (first remaining)]
         ;; Push 2 can release 64 held pads and close eight encoder edits at once.
         (when (>= count 72)
           (throw (ex-info "Device transition emitted too many commands" {})))
-        ;; Admission time/identity are assigned here, including delayed releases.
-        (let [envelope (envelope! session)
-              scheduled-launch? (grid-launch? template)
-              timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
-              gesture? (and (:operator-gestures? profile)
-                            (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
-              stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
-                         (and timed-cue? (some #(and (contains? template %)
-                                                     (not= (get template %) (get envelope %)))
-                                               [:show-id :epoch])))
-              command (cond-> (merge template envelope)
-                        (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
-              response (cond
-                         stale? {:status :rejected :reason :stale-epoch}
-                         (and gesture? (= :gesture/end (:op command)))
-                         ;; Preserve feedback and continue releasing other controls.
-                         (try (dispatch! command)
-                              (catch Exception error
-                                (record-error! session error)
-                                {:status :rejected :reason :dispatch-error}))
-                         :else (dispatch! command))
-              ack (or (:ack response) response)
-              pending-gesture? (and gesture? (= :pending (:status ack))
-                                    (instance? clojure.lang.IPending (:completion ack)))]
-          (when-not (or (#{:accepted :rejected} (:status ack))
-                        (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack)))
-                        pending-gesture?)
-            (throw (ex-info "dispatch! must return a synchronous command acknowledgement" {})))
-          (update-state! session assoc :last-ack (cond-> ack pending-gesture? (dissoc :completion)))
-          (let [result (when-let [acknowledge (:ack profile)]
-                         (acknowledge (:local @(:state session)) command ack))]
-            (when result (update-state! session assoc :local (:state result)))
-            (recur (concat (next remaining) (:commands result)) (inc count))))))))
+        (let [[command ack] (dispatch-command! session template)
+              result (when acknowledge (acknowledge (:local @(:state session)) command ack))]
+          (when result (update-state! session assoc :local (:state result)))
+          (recur (concat (next remaining) (:commands result)) (inc count)))))))
+
+(def ^:private gesture-end-retry-ms 100)
+(def ^:private gesture-end-limit 8)
+
+(defn- settle-gesture-end! [{:keys [gesture-ends]} command time-ms {:keys [status code reason completion]}]
+  (let [control-id (:control-id command)]
+    (cond
+      (= :pending status) (swap! gesture-ends assoc control-id {:command command :completion completion})
+      (#{:dispatch-busy :dispatch-error :queue-full} (or code reason))
+      (swap! gesture-ends assoc control-id {:command command :retry-at (+ time-ms gesture-end-retry-ms)})
+      ;; :gesture-end-queued means the host already owns the exact same end.
+      :else (swap! gesture-ends dissoc control-id))))
+
+(defn- retry-gesture-ends! [{:keys [gesture-ends] :as session}]
+  (when (seq @gesture-ends)
+    (let [envelope (envelope! session) time-ms (:time-ms envelope)]
+      (doseq [[control-id {:keys [command completion retry-at]}] (sort-by (comp pr-str key) @gesture-ends)]
+        (cond
+          (not= (show-identity command) (show-identity envelope))
+          (swap! gesture-ends dissoc control-id)
+
+          completion
+          (when (realized? completion)
+            (let [ack @completion]
+              (update-state! session assoc :last-ack (dissoc ack :completion))
+              (settle-gesture-end! session command time-ms ack)))
+
+          (or (nil? retry-at) (>= time-ms retry-at))
+          (let [[command ack] (dispatch-command! session command)]
+            (settle-gesture-end! session command (:time-ms command) ack)))))))
 
 (defn- send-midi! [session messages]
   (when (seq messages)
@@ -123,6 +166,14 @@
 (defn- enact! [session result]
   (when result
     (when (contains? result :state) (update-state! session assoc :local (:state result)))
+    (when (seq (:gesture-ends result))
+      ;; At most one detached end per control. A new begin waits for that end.
+      (let [ends (:gesture-ends session)
+            pending (into @ends (map (juxt (comp :control-id :command) identity)) (:gesture-ends result))]
+        (when (> (count pending) gesture-end-limit)
+          (throw (ex-info "Device teardown emitted too many gesture ends" {})))
+        (reset! ends pending)
+        (retry-gesture-ends! session)))
     (dispatch-commands! session (:commands result))
     (send-midi! session (:midi result))
     (render-display! session (:display result))
@@ -210,7 +261,8 @@
                (if (= :suspended (:status state))
                  (when (and (:resume-event? profile) ((:resume-event? profile) event))
                    (resume! session))
-                 (let [model (model!)]
+                 (let [_ (retry-gesture-ends! session)
+                       model (model!)]
                    (adopt-epoch! session model)
                    (let [reconciled (reconcile! session model)]
                      (when (= (show-identity model) (show-identity reconciled))
@@ -241,25 +293,27 @@
     model))
 
 (defn refresh!
-  "Render latest model with bounded profile feedback. No background scheduler
-  is allocated; callers can invoke this from a shared UI scheduler."
+  "Render latest model with bounded profile feedback while active. Also attempt
+  due teardown gesture ends even if suspended or closed. The caller owns any
+  retries after the session scheduler stops."
   [session]
   (locking (:lock session)
-    (when (= :active (:status @(:state session)))
-      (try
+    (try
+      (retry-gesture-ends! session)
+      (when (= :active (:status @(:state session)))
         (let [{:keys [profile model!]} (:options session)
               model (model!)]
           (adopt-epoch! session model)
           (let [model (reconcile! session model)]
             (when-let [feedback (:feedback profile)]
               (let [local (:local @(:state session))]
-                (enact! session (feedback local (feedback-model session local model) (envelope! session)))))))
-        (catch Exception error
-          (record-error! session error)
-          (when (:device/transport-failed (ex-data error))
-            (close! session true)
-            (update-state! session assoc :status :failed))
-          (throw error))))
+                (enact! session (feedback local (feedback-model session local model) (envelope! session))))))))
+      (catch Exception error
+        (record-error! session error)
+        (when (:device/transport-failed (ex-data error))
+          (close! session true)
+          (update-state! session assoc :status :failed))
+        (throw error)))
     (snapshot session)))
 
 (defn suspend!
