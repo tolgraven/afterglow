@@ -22,7 +22,7 @@
   (:require [afterglow.channels :as chan]
             [afterglow.controllers :as controllers]
             [afterglow.effects :as fx]
-            [afterglow.effects.channel]
+            [afterglow.effects.channel :as channel-fx]
             [afterglow.effects.color]
             [afterglow.effects.dimmer :refer [master master-set-level]]
             [afterglow.effects.movement]
@@ -474,15 +474,31 @@
     (ola/UpdateDmxData {:universe universe :data (ByteString/copyFrom levels)} nil)))
 
 (defn blackout-show
-  "Sends zero to every channel of every universe associated
-  with [[*show*]]. Will quickly be overwritten if the show is running
-  and there are any active effects, so this is mostly useful when a
-  show has been suspended and you want to darken the lights it left
-  on."
+  "Sends a dark DMX packet for each universe associated with [[*show*]].
+  Slots owned by a single fully inverted dimmer or color emitter with valid
+  addresses use its off encoding. Other slots, including overlaps in an invalid
+  patch, are zero. A running show can overwrite these values with its next frame."
   []
   {:pre [(some? *show*)]}
-  (doseq [universe (:universes *show*)]
-    (blackout-universe universe)))
+  (let [buffers (create-buffers *show*)
+        channels (mapcat :channels (chan/expand-heads (vals @(:fixtures *show*))))
+        valid-index? #(and (integer? %) (<= 0 % 511))
+        slot-owners (frequencies (for [{:keys [universe index fine-index]} channels
+                                      slot [index fine-index]
+                                      :when (valid-index? slot)]
+                                  [universe slot]))]
+    (doseq [{:keys [type inverted-from index fine-index] :as channel} channels
+            :when (and (#{:dimmer :color} type) (number? inverted-from) (zero? inverted-from)
+                       (valid-index? index) (or (nil? fine-index) (valid-index? fine-index)))]
+      (channel-fx/apply-channel-value buffers channel 0))
+    (doseq [[[universe index] owners] slot-owners
+            :when (> owners 1)
+            :let [^bytes levels (get buffers universe)]
+            :when levels]
+      (aset-byte levels (int index) (byte 0)))
+    (doseq [universe (:universes *show*)
+            :let [^bytes levels (get buffers universe)]]
+      (ola/UpdateDmxData {:universe universe :data (ByteString/copyFrom levels)} nil))))
 
 (defn stop-all!
   "Stops all running shows. Afterglow registers a shutdown hook to
@@ -1079,10 +1095,12 @@
   addresses in use in a given universe within a fixture map, and whose
   values are the fixture key using that universe address."
   [fixtures universe]
-  (reduce (fn [addr-map [k v]] (if (= universe (:universe (first (:channels v))))
-                                 (into addr-map (for [address (chan/all-addresses [v])]
-                                                  [address (or (:key v) (:key (:fixture v)))]))
-                                 addr-map)) (sorted-map) fixtures))
+  (into (sorted-map)
+        (for [fixture (vals fixtures)
+              channel (mapcat :channels (chan/expand-heads [fixture]))
+              :when (= universe (:universe channel))
+              address (keep channel [:address :fine-address])]
+          [address (or (:key fixture) (:key (:fixture fixture)))])))
 
 (defn address-map
   "Returns a sorted map whose keys are the IDs of the universes
@@ -1114,10 +1132,9 @@
   "Helper function which patches a fixture to a given address and universe, first removing
   any fixture which was previously assigned that key, and making sure there are no DMX
   channel collisions."
-  [show fixtures ^clojure.lang.Keyword key fixture]
+  [universe fixtures ^clojure.lang.Keyword key fixture]
   (let [base (dissoc fixtures key)
-        addrs-in-use (address-map-internal base (:universe (or (first (:channels fixture))
-                                                               (first (:channels (first (:heads fixture)))))))
+        addrs-in-use (address-map-internal base universe)
         addrs-wanted (chan/all-addresses [fixture])
         max-needed (apply max addrs-wanted)
         conflicts (select-keys addrs-in-use addrs-wanted)]
@@ -1231,7 +1248,7 @@
 
                          :default
                          (transform/transform-fixture-euler fixture x y z x-rotation y-rotation z-rotation))]
-    (swap! (:fixtures *show*) #(patch-fixture-internal *show* % (keyword key)
+    (swap! (:fixtures *show*) #(patch-fixture-internal universe % (keyword key)
                                                        (chan/patch-fixture positioned universe start-address next-id))))
   (reset! (:dimensions *show*) (calculate-dimensions *show*))
   key) ; Don't return the dimensions, it is a deep recursive structure which causes print spasms.
