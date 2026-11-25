@@ -95,11 +95,14 @@
 (defn- shift-held? [options state]
   (some #(= :shift (get-in options [:button-bindings %])) (:buttons state)))
 
-(defn- encoder [options state event model]
-  (let [{:keys [target param step]} (get-in options [:encoder-bindings (:control-id event)])
-        delta (:delta event) fine? (boolean (shift-held? options state))]
+(defn- encoder [options state {:keys [control-id delta]} model]
+  (let [{:keys [target param step]} (get-in options [:encoder-bindings control-id])
+        fine? (boolean (shift-held? options state))
+        editor (when-not (zero? delta)
+                 (pad-editor/encoder-turn (:pad-editor state) control-id delta {:step step :fine? fine?}))]
     (cond
       (zero? delta) {:state state}
+      editor {:state (assoc state :pad-editor editor)}
       (= target :master)
       (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
         {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
@@ -121,7 +124,8 @@
   (let [poly? (= :poly-pressure (:type event))
         enabled? (case (:type event)
                    :poly-pressure (= :poly-aftertouch (:expression-mode options))
-                   :mono-pressure (= :mono-aftertouch (:expression-mode options))
+                   :mono-pressure (and (= :mono-aftertouch (:expression-mode options))
+                                       (not (pad-editor/owns-pads? (:pad-editor state))))
                    :touch-strip true)
         parameter (get options (if (= :touch-strip (:type event)) :touch-strip-param :pressure-param))
         instance-id (if poly? (get-in state [:pads (:gesture-key event) :instance-id])
@@ -156,11 +160,11 @@
   (if (= pressed? (contains? (:touches state) control-id))
     {:state state}
     (let [instance (get-in model [:instances (:selected-instance state)])
-          param (get-in options [:encoder-bindings control-id :param])
+          {:keys [param xyz-bounds]} (get-in options [:encoder-bindings control-id])
           target (when (and param (= :running (:phase instance)))
                    {:instance-id (:id instance) :param param
                     :schema (get-in instance [:definition :params param])
-                    :value (get-in instance [:params param])})
+                    :value (get-in instance [:params param]) :xyz-bounds xyz-bounds})
           result (pad-editor/encoder-touch (:pad-editor state)
                    {:encoder-id control-id :pressed? pressed? :target target
                     :gesture-id (:command-id envelope)})]
@@ -233,7 +237,8 @@
   "Construct a pure profile from a captured :layout. Explicit :user-mode? true
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
-  :step n} or {:target :master}; color and gradient targets use captured touches.
+  :step n} or {:target :master}. Bindings may supply :xyz-bounds for a
+  three-component vector's pad editor.
   :button-bindings maps IDs to semantic actions.
   :pressure-param and :touch-strip-param opt into expression parameter control."
   [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings]
@@ -246,11 +251,13 @@
     (valid! (and (map? encoder-bindings) (map? button-bindings)) "Control bindings must be maps" {})
     (doseq [[id binding] encoder-bindings]
       (valid! (and (contains? (:encoders layout) id) (map? binding)
-                   (every? #{:param :target :step} (keys binding))
+                   (every? #{:param :target :step :xyz-bounds} (keys binding))
                    (or (and (keyword? (:param binding)) (nil? (:target binding)))
                        (and (= :master (:target binding)) (nil? (:param binding))))
+                   (or (not (contains? binding :xyz-bounds))
+                       (and (:param binding) (pad-editor/xyz-bounds? (:xyz-bounds binding))))
                    (or (nil? (:step binding)) (and (params/finite-number? (:step binding)) (pos? (:step binding)))))
-              "Encoder bindings need a captured ID, parameter/master target and positive step" {:id id}))
+              "Encoder bindings need a captured ID, parameter/master target and valid optional step/XYZ bounds" {:id id}))
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
@@ -362,8 +369,8 @@
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
-  Captured color and gradient encoder touches open a pad editor. MPE fine hue
-  and lightness use normalized Glide and Slide rather than calibrated positions.
+  Captured color, gradient, beat-ratio and XYZ encoder touches open a pad editor.
+  MPE fine hue and lightness use normalized Glide and Slide.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
   (let [grid (launch/grid options)

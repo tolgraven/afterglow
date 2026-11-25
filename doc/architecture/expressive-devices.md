@@ -115,7 +115,7 @@ fixed controls on channels outside that member range. In the cue grid, each
 note launches a held cue activation. Member pressure, bend and slide address
 that activation. This mode exposes Strike, Pressure, Glide and Slide.
 
-### Color and gradient pad editors
+### Compound pad editors
 
 Bind a captured touch and encoder to a color or gradient parameter of the
 selected running instance. The touch opens an 8 × 8 palette in the semantic
@@ -126,11 +126,28 @@ belongs to that pad voice, and pressure leaves the draft unchanged.
 
 A color edit uses the latest choice. A gradient edit keeps choices in press
 order, with evenly spaced positions in a vector of
-`{:position t :color [r g b]}` stops. The most recently touched compound
-encoder receives new pad presses. Earlier touches retain their drafts and
-held voices. Releasing an encoder commits its draft once. Pads already assigned
-to it stay consumed until their own release. Handoff or disconnect discards
-uncommitted drafts.
+`{:position t :color [r g b]}` stops.
+
+Touch an encoder bound to a nonnegative, bounded `:number` with `:unit :beats`
+to select a beat ratio. The two rightmost pad columns offer subdivisions such
+as `1/8`, `1/4`, and `1/3`, and longer choices from `1` to `32`. Only choices
+within the parameter's bounds are enabled. Taps on disabled cells are consumed
+while the overlay is open. Turning the touched encoder adjusts the same draft.
+Direct choices retain their exact rational values in the edit command.
+
+Touch an encoder bound to a three-component `:vector` to edit XYZ when ranges
+are available. X and Y span the pad columns and rows. Turning that encoder
+adjusts Z. The edit uses the vector's declared `:bounds` for each axis, or
+an encoder binding's `:xyz-bounds [[xmin xmax] [ymin ymax] [zmin zmax]]` for
+individual axes. Configured ranges are limited by any declared parameter bounds.
+An unbounded vector needs configured axes to open the editor. Pads change X
+and Y together while preserving Z, and release commits the full vector.
+
+The most recently touched compound encoder receives new pad presses. Earlier
+touches retain their drafts and held voices. Releasing an encoder commits its
+draft once. Pads assigned to it stay consumed until their own release. Mono
+Aftertouch pauses while an editor owns a held pad. Handoff or disconnect
+discards uncommitted drafts.
 
 The JVM replay uses synthetic User Mode input with explicit address bindings.
 Capture actual controller-mode MIDI before qualifying the hue and lightness

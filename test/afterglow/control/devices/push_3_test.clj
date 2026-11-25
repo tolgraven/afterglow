@@ -1,5 +1,6 @@
 (ns afterglow.control.devices.push-3-test
   (:require [clojure.test :refer [deftest is]]
+            [afterglow.control.codecs.push-3 :as codec]
             [afterglow.control.model :as model]
             [afterglow.control.pages :as pages]
             [afterglow.control.parameter-edit :as edit]
@@ -319,6 +320,169 @@
         (is (= [0.0 0.0 0.0] (get-in @show [:instances id :params :tint])))
         (is (= [:cue/launch :param/set :param/set] (mapv :op @log)))
         (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(defn- chooser-options [mode]
+  {:layout (reduce codec/capture layout
+                   [{:kind :encoder :id :position :bytes [0xb2 21 1]}
+                    {:kind :encoder-touch :id :position :bytes [0x92 10 127]}
+                    {:kind :pad :id [6 0] :bytes [0x93 14 95]}
+                    {:kind :pad :id [6 1] :bytes [0x93 15 95]}
+                    {:kind :pad :id [6 4] :bytes [0x93 16 95]}
+                    {:kind :pad :id [7 7] :bytes [0x93 17 95]}
+                    {:kind :pad :id [0 7] :bytes [0x93 18 95]}
+                    {:kind :pad :id [7 0] :bytes [0x93 19 95]}])
+   :expression-mode mode
+   :encoder-bindings {:level {:param :period :step 1/8}
+                      :position {:param :position :step 1 :xyz-bounds [[-14 7] [-6 15] [0 7]]}}
+   :pressure-param :period})
+
+(defn- chooser-parameters [show]
+  (swap! show update-in [:registry :effects :wash :params] assoc
+         :period {:type :number :unit :beats :default 1 :bounds [1/8 4]}
+         :position {:type :vector :size 3 :default [0 1 2]}))
+
+(defn- overlay-cell [overlay x y]
+  (nth (:cells overlay) (+ x (* 8 y))))
+
+(deftest synthetic-ratio-chooser-filters-presets-and-commits-an-exact-fraction-once
+  (let [{:keys [show log receive device]} (harness (chooser-options :mono-aftertouch))
+        view #(push/control-view (:local (session/snapshot device)) @show)
+        overlay #(get (view) :pad-overlay)]
+    (try
+      (chooser-parameters show)
+      (swap! show update-in [:pages :main :cells] assoc [6 0] :held [6 4] :held [14 4] :held)
+      (session/open! device)
+      (@receive [0x93 13 100])
+      (@receive [0x83 13 0])
+      (let [id (:selected-instance (view))]
+        (@receive [0x92 9 127])
+        (is (= :beat-ratio (:type (overlay))))
+        (is (= 1/8 (:value (overlay-cell (overlay) 6 1))))
+        (is (= 1/4 (:value (overlay-cell (overlay) 6 3))))
+        (is (:selected? (overlay-cell (overlay) 7 0)))
+        (is (:disabled? (overlay-cell (overlay) 6 0)))
+        (is (:disabled? (overlay-cell (overlay) 7 7)))
+        (@receive [0xb2 19 1])
+        (is (= 9/8 (:value (overlay))))
+        (@receive [0x93 14 100])
+        (@receive [0xd3 0])
+        (@receive [0x83 14 0])
+        (is (= 9/8 (:value (overlay))))
+        (@receive [0x93 15 100])
+        (@receive [0x83 15 0])
+        (is (= 1/8 (:value (overlay))))
+        (@receive [0x93 16 100])
+        (@receive [0xb4 23 127])
+        (is (= [8 0] (:origin (view))))
+        (is (= 1/3 (:value (overlay))))
+        (is (= 1 (get-in @show [:instances id :params :period])))
+        (is (= [:cue/launch] (mapv :op @log)))
+        (@receive [0x92 9 0])
+        (is (nil? (overlay)))
+        (is (= 1/3 (get-in @show [:instances id :params :period])))
+        (@receive [0x93 16 100])
+        (@receive [0xd3 0])
+        (@receive [0x83 16 0])
+        (@receive [0x92 9 0])
+        (is (= [:cue/launch :param/set] (mapv :op @log)))
+        (is (= {:op :param/set :instance-id id :param :period :value 1/3}
+               (select-keys (peek @log) [:op :instance-id :param :value])))
+        (@receive [0x93 16 100])
+        (is (= :held (:cue-id (peek @log))))
+        (@receive [0x83 16 0])
+        (is (= [:cue/launch :param/set :cue/launch :instance/end] (mapv :op @log)))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(deftest synthetic-xyz-chooser-uses-configured-axis-ranges-and-commits-a-single-vector
+  (let [{:keys [show log receive device]} (harness (chooser-options :poly-aftertouch))
+        view #(push/control-view (:local (session/snapshot device)) @show)
+        overlay #(get (view) :pad-overlay)]
+    (try
+      (chooser-parameters show)
+      (swap! show update-in [:pages :main :cells] assoc [7 0] :held [0 7] :held)
+      (session/open! device)
+      (@receive [0x93 13 100])
+      (@receive [0x83 13 0])
+      (let [id (:selected-instance (view))]
+        (@receive [0x92 9 127])
+        (@receive [0x93 16 100])
+        (@receive [0x92 10 127])
+        (is (= :xyz (:type (overlay))))
+        (is (= [[-14 7] [-6 15] [0 7]] (:ranges (overlay))))
+        (is (= [-14 15 2] (:value (overlay-cell (overlay) 0 7))))
+        (is (= [7 -6 2] (:value (overlay-cell (overlay) 7 0))))
+        (@receive [0x93 18 100])
+        (@receive [0x83 18 0])
+        (@receive [0xb2 21 63])
+        (is (= [-14 15 7] (:value (overlay))))
+        (@receive [0x93 19 100])
+        (@receive [0xa3 19 127])
+        (@receive [0xb2 21 127])
+        (is (:selected? (overlay-cell (overlay) 7 0)))
+        (is (= [7 -6 6] (:value (overlay))))
+        (is (= [0 1 2] (get-in @show [:instances id :params :position])))
+        (is (= [:cue/launch] (mapv :op @log)))
+        (@receive [0x92 10 0])
+        (is (= [7 -6 6] (get-in @show [:instances id :params :position])))
+        (is (= :beat-ratio (:type (overlay))))
+        (@receive [0x93 19 100])
+        (is (= 1/3 (:value (overlay))))
+        (@receive [0x83 19 0])
+        (@receive [0x83 16 0])
+        (@receive [0x92 9 0])
+        (is (nil? (overlay)))
+        (is (= [:cue/launch :param/set :param/set] (mapv :op @log)))
+        (is (= [{:param :position :value [7 -6 6]} {:param :period :value 1/3}]
+               (mapv #(select-keys % [:param :value]) (rest @log))))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(deftest synthetic-xyz-touch-requires-authoring-or-configured-bounds
+  (doseq [bounds [nil [-5 5]]]
+    (let [settings (update-in (chooser-options :poly-aftertouch) [:encoder-bindings :position] dissoc :xyz-bounds)
+          {:keys [show log receive device]} (harness settings)
+          view #(push/control-view (:local (session/snapshot device)) @show)]
+      (try
+        (chooser-parameters show)
+        (when bounds (swap! show assoc-in [:registry :effects :wash :params :position :bounds] bounds))
+        (session/open! device)
+        (@receive [0x93 13 100])
+        (@receive [0x83 13 0])
+        (@receive [0x92 10 127])
+        (if bounds
+          (let [overlay (:pad-overlay (view))]
+            (is (= :xyz (:type overlay)))
+            (is (= [-5 5 2] (:value (overlay-cell overlay 0 7)))))
+          (is (nil? (:pad-overlay (view)))))
+        (@receive [0x92 10 0])
+        (is (= [:cue/launch] (mapv :op @log)))
+        (finally (session/close! device))))))
+
+(deftest synthetic-overlay-turns-handle-fixed-and-wide-ranges
+  (let [settings (assoc-in (chooser-options :poly-aftertouch) [:encoder-bindings :position]
+                           {:param :position :xyz-bounds [[-1 1] [-1 1] [Long/MIN_VALUE Long/MAX_VALUE]]})
+        {:keys [show log receive device]} (harness settings)
+        view #(push/control-view (:local (session/snapshot device)) @show)]
+    (try
+      (chooser-parameters show)
+      (swap! show assoc-in [:registry :effects :wash :params :period]
+             {:type :number :unit :beats :default 1/3 :bounds [1/3 1/3]})
+      (session/open! device)
+      (@receive [0x93 13 100])
+      (@receive [0x83 13 0])
+      (@receive [0x92 9 127])
+      (@receive [0xb2 19 63])
+      (is (= 1/3 (get-in (view) [:pad-overlay :value])))
+      (@receive [0x92 9 0])
+      (is (= [:cue/launch] (mapv :op @log)))
+      (@receive [0x92 10 127])
+      (@receive [0xb2 21 1])
+      (is (< 0 (get-in (view) [:pad-overlay :value 2]) Long/MAX_VALUE))
+      (@receive [0x92 10 0])
+      (is (= [:cue/launch :param/set] (mapv :op @log)))
+      (is (empty? (:errors (session/snapshot device))))
       (finally (session/close! device)))))
 
 (deftest captured-shift-encoder-edits-one-patched-code
