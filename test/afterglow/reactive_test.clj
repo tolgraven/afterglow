@@ -831,6 +831,215 @@
 (deftest cycle-paced-samples-from-an-old-epoch-cannot-reach-retained-watchers
   (assert-old-epoch-sample-is-retired {:interval {:cycles 1/2} :cycle-position (constantly 0)}))
 
+(defn- transport-db [beat & {:as extra}]
+  (merge {:show-id :show :epoch 0 :frame-number 0 :value :steady
+          :transport {:beat beat :bpm 120 :playing? true}}
+         extra))
+
+(defn- oscillator-sampler
+  "Publish db. When a sample is expected, republish until the sampler reports
+  it and return the sampled beat. Otherwise publish once and return nil
+  without waiting. Each silent step is proven by the next expected one: a
+  source has at most one outstanding read and a busy source retries, so an
+  unexpected read would be reported first and fail that assertion."
+  [sys ^LinkedBlockingQueue calls]
+  (fn [db expected?]
+    (if expected?
+      (some (fn [_]
+              (reactive/publish! sys db)
+              (.poll calls 20 TimeUnit/MILLISECONDS))
+            (range 250))
+      (do (reactive/publish! sys db) nil))))
+
+(deftest named-oscillator-cycles-share-one-sampler-and-skip-missed-boundaries
+  (let [sys (reactive/create-system (transport-db 0) {:on-fault! (fn [_ _])})
+        calls (LinkedBlockingQueue.) levels (LinkedBlockingQueue.)
+        release (CountDownLatch. 1) interrupted (CountDownLatch. 1)
+        sampled (oscillator-sampler sys calls)]
+    (try
+      ;; position = 1/4 + beat/2, so quarter-cycle buckets change every half beat.
+      (is (= :groove (reactive/reg-oscillator! sys :groove {:period {:beats 2} :phase 1/4})))
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1/4} :oscillator :groove
+                                        :initial :waiting
+                                        :sample (fn [{:keys [transport value block?]}]
+                                                  (.offer calls (:beat transport))
+                                                  (when block?
+                                                    (try (.await release)
+                                                         (catch InterruptedException e
+                                                           (.countDown interrupted)
+                                                           (throw e))))
+                                                  [(:beat transport) value])})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (reactive/reg-sub! sys ::level (fn [{:keys [cofx]} _] (let [v (cofx ::reading)] (if (vector? v) (second v) v))))
+      (is (nil? (sampled (transport-db -1) false)) "Nothing samples before a reader exists.")
+      (is (nil? (sampled (transport-db 0) false)))
+      (let [a (reactive/acquire! sys [::reading] identity)
+            b (reactive/acquire! sys [::level] #(.offer levels %))]
+        (is (= 1/4 (reactive/oscillator-position sys :groove)))
+        (testing "both readers share the first bucket's one sample"
+          (is (= 0 (sampled (transport-db 0) true)))
+          (is (nil? (sampled (transport-db 1/4) false)))
+          ;; The first sample can land before the second lease reads it.
+          (is (= :steady (some (fn [_] (reactive/publish! sys) (#{:steady} @(:signal b))) (range 150))))
+          (.clear levels))
+        (testing "each crossed boundary requests one sample"
+          (is (= 1/2 (sampled (transport-db 1/2) true)))
+          (is (nil? (sampled (transport-db 3/4) false))))
+        (testing "a tempo change keeps boundaries in cycles"
+          (is (nil? (sampled (assoc-in (transport-db 7/8) [:transport :bpm] 90) false)))
+          (is (= 1 (sampled (assoc-in (transport-db 1) [:transport :bpm] 90) true))))
+        (testing "several boundaries in one frame request one sample, like skipped frames"
+          (is (= 4 (sampled (transport-db 4) true)))
+          (is (nil? (sampled (transport-db 17/4) false))))
+        (testing "a seek inside the bucket is silent; a seek elsewhere samples once"
+          (is (nil? (sampled (transport-db 33/8) false)))
+          (is (= 2 (sampled (transport-db 2 :frame-number 1) true)))
+          (is (nil? (sampled (transport-db 2 :frame-number 2) false)))
+          (is (nil? (sampled (transport-db 9/4 :frame-number 3) false))))
+        (testing "a stopped transport holds the bucket"
+          (is (nil? (sampled (assoc-in (transport-db 3) [:transport :playing?] false) false))))
+        ((:close! a))
+        (testing "the remaining reader keeps demand alive"
+          (is (= 5 (sampled (transport-db 5 :value :moved) true)))
+          (is (= :moved (some (fn [_] (reactive/publish! sys) (.poll levels 20 TimeUnit/MILLISECONDS)) (range 150)))))
+        (is (= 11/2 (sampled (transport-db 11/2 :block? true) true)))
+        ((:close! b))
+        (is (.await interrupted 3 TimeUnit/SECONDS) "The last lease cancels the running sample.")
+        (is (false? (reactive/demanded? sys #{::reading})))
+        (is (nil? (sampled (transport-db 8) false)))
+        (is (nil? (sampled (transport-db 9) false)))
+        (reactive/publish! sys (transport-db 10))
+        (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+          (is (= 10 (.poll calls 3 TimeUnit/SECONDS))
+              "A fresh lease's first read is the next one, so released frames started none.")
+          (close!)))
+      (finally (.countDown release) (reactive/close! sys)))))
+
+(deftest named-oscillator-validation-and-renames-are-explicit
+  (let [sys (reactive/create-system (transport-db 0) {:on-fault! (fn [_ _])})
+        calls (LinkedBlockingQueue.)
+        sampled (oscillator-sampler sys calls)
+        definition {:mode :background :interval {:cycles 1} :oscillator :groove :initial :waiting
+                    :sample (fn [{:keys [transport]}] (.offer calls (:beat transport)) (:beat transport))}]
+    (try
+      (doseq [invalid [nil {} {:period {:ms 500}} {:period {:beats 0}} {:period {:beats 1 :bars 1}}
+                       {:period {:beats ##Inf}} {:period {:beats 1} :phase ##NaN} {:period {:beats 1} :rate 2}]]
+        (is (= ::reactive/invalid-oscillator (error-type #(reactive/reg-oscillator! sys :groove invalid)))
+            (pr-str invalid)))
+      (is (= ::reactive/invalid-oscillator (error-type #(reactive/reg-oscillator! sys "groove" {:period {:beats 1}}))))
+      (let [error (try (reactive/reg-cofx! sys ::reading definition) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (= ::reactive/unknown-oscillator (:type (ex-data error))))
+        (is (= :groove (:oscillator (ex-data error))))
+        (is (re-find #"Unknown reactive oscillator :groove" (ex-message error))))
+      (reactive/reg-oscillator! sys :groove {:period {:bars 1}})
+      (doseq [invalid [(assoc definition :oscillator "groove")
+                       (assoc definition :interval {:beats 1})
+                       (assoc definition :mode :frame :interval nil)
+                       (assoc definition :cycle-position :position)]]
+        (is (thrown? clojure.lang.ExceptionInfo (reactive/reg-cofx! sys ::reading invalid)) (pr-str invalid)))
+      (reactive/reg-cofx! sys ::reading definition)
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [{:keys [signal close!]} (reactive/acquire! sys [::reading] identity)]
+        (is (= 0 (sampled (transport-db 0) true)))
+        (is (= 0 (some (fn [_] (reactive/publish! sys) (when (= 0 @signal) 0)) (range 150))))
+        (testing "renaming the oscillator reports a clear fault and keeps the last value"
+          (is (true? (reactive/remove-oscillator! sys :groove)))
+          (reactive/reg-oscillator! sys :swing {:period {:bars 1}})
+          (is (= {:swing {:period {:bars 1} :phase 0}} (reactive/oscillators sys)))
+          (let [{:keys [faults]} (reactive/publish! sys (transport-db 8))]
+            (is (= [{:stage :cofx :id ::reading}] (mapv #(select-keys % [:stage :id]) faults)))
+            (is (re-find #"Unknown reactive oscillator :groove; registered oscillators: \[:swing\]"
+                         (:message (first faults)))))
+          (is (empty? (:faults (reactive/publish! sys (transport-db 9)))) "The fault is reported once.")
+          (is (= 0 @signal)))
+        (testing "registering the name again resumes from the committed phase"
+          (reactive/reg-oscillator! sys :groove {:period {:bars 1}})
+          (is (= 12 (sampled (transport-db 12) true))))
+        (close!))
+      (finally (reactive/close! sys)))))
+
+(defn- replay-oscillator-samples [frames]
+  (let [sys (reactive/create-system (transport-db 0))
+        calls (LinkedBlockingQueue.)
+        sampled (oscillator-sampler sys calls)]
+    (try
+      ;; One 7/8 bar is 7/2 quarter-note beats, so the period is normalized by
+      ;; the committed meter rather than assuming four beats.
+      (reactive/reg-oscillator! sys :groove {:period {:bars 1} :phase 1/8})
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1/4} :oscillator :groove
+                                        :sample (fn [{:keys [transport]}] (.offer calls (:beat transport)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (try
+          (mapv (fn [[beat expected?]]
+                  (sampled (assoc-in (transport-db beat) [:transport :meter] {:beats-per-bar 7/2}) expected?))
+                frames)
+          (finally (close!))))
+      (finally (reactive/close! sys)))))
+
+(deftest named-oscillator-sampling-replays-deterministically
+  ;; position = 1/8 + 2 beat / 7; quarter-cycle boundaries fall at beats 7/16 + 7k/8.
+  (let [frames [[0 true] [3/8 false] [7/16 true] [1 false] [21/16 true] [5 true] [41/8 false] [4 true]]
+        first-run (replay-oscillator-samples frames)]
+    (is (= [0 nil 7/16 nil 21/16 5 nil 4] first-run))
+    (is (= first-run (replay-oscillator-samples frames)))))
+
+(deftest named-oscillator-bar-periods-continue-across-meter-changes
+  (let [sys (reactive/create-system (transport-db 0))
+        calls (LinkedBlockingQueue.)
+        sampled (oscillator-sampler sys calls)
+        at (fn [beat beats-per-bar] (assoc-in (transport-db beat) [:transport :meter] {:beats-per-bar beats-per-bar}))]
+    (try
+      (reactive/reg-oscillator! sys :bar {:period {:bars 1}})
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1} :oscillator :bar
+                                        :sample (fn [{:keys [transport]}] (.offer calls (:beat transport)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (is (= 0 (sampled (at 0 4) true)))
+        (is (= 639/10 (sampled (at 639/10 4) true)))
+        (testing "4/4 to 7/8 at beat 64 continues from bar 16 instead of jumping to 18.29"
+          (is (= 64.0M (sampled (at 64.0M 7/2) true)))
+          (is (= 16 (reactive/oscillator-position sys :bar)))
+          (is (nil? (sampled (at 66.5M 7/2) false)))
+          (is (= 117/7 (reactive/oscillator-position sys :bar)) "A decimal beat stays exact.")
+          (is (= 135/2 (sampled (at 135/2 7/2) true))))
+        (testing "7/8 back to 4/4 never moves backwards"
+          (is (nil? (sampled (at 70 4) false)))
+          (is (= 124/7 (reactive/oscillator-position sys :bar)))
+          (is (= 72 (sampled (at 72 4) true)))
+          (is (= 255/14 (reactive/oscillator-position sys :bar))))
+        (testing "a new epoch restarts at phase + beat / period"
+          (is (= 8 (sampled (assoc (at 8 4) :epoch 1) true)))
+          (is (= 2 (reactive/oscillator-position sys :bar))))
+        (is (empty? (reactive/faults sys)))
+        (close!))
+      (finally (reactive/close! sys)))))
+
+(deftest replacing-an-oscillator-definition-samples-again-in-the-same-bucket
+  (let [sys (reactive/create-system (transport-db 0) {:on-fault! (fn [_ _])})
+        calls (LinkedBlockingQueue.)
+        sampled (oscillator-sampler sys calls)]
+    (try
+      (reactive/reg-oscillator! sys :pulse {:period {:beats 4}})
+      (reactive/reg-cofx! sys ::reading {:mode :background :interval {:cycles 1} :oscillator :pulse
+                                        :sample (fn [{:keys [transport]}] (.offer calls (:beat transport)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (let [{:keys [close!]} (reactive/acquire! sys [::reading] identity)]
+        (is (= 0 (sampled (transport-db 0) true)))
+        (reactive/reg-oscillator! sys :pulse {:period {:beats 4}})
+        (is (nil? (sampled (transport-db 1) false)) "An identical definition keeps its bucket.")
+        (testing "a changed period samples although bucket 0 is unchanged"
+          (reactive/reg-oscillator! sys :pulse {:period {:beats 2}})
+          (is (= 3/2 (sampled (transport-db 3/2) true)))
+          (is (= 3/4 (reactive/oscillator-position sys :pulse))))
+        (testing "remove and register again also samples"
+          (reactive/remove-oscillator! sys :pulse)
+          (is (= 1 (count (:faults (reactive/publish! sys (transport-db 7/4))))))
+          (reactive/reg-oscillator! sys :pulse {:period {:beats 2}})
+          (is (= 7/4 (sampled (transport-db 7/4) true))))
+        (close!))
+      (finally (reactive/close! sys)))))
+
 (deftest invalid-db-does-not-stop-independent-sources-or-drop-diagnostics
   (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])}) src (reactive/ratom system ::x 1)]
     (set-validator! (reactive/db-signal system) #(pos-int? (:value %)))
