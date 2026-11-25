@@ -106,4 +106,4 @@
         next (live-event seek 775 32.5 120)
         observe (fn [state at] (get-in (clock/snapshot state at) [:clock :source-epoch]))]
     (is (= [0 0 1 1] (mapv observe [start steady seek next] [0 250 275 775])))
-    (is (= 32 (get-in (clock/snapshot seek 275) [:clock :beat])))))
+    (is (== 32 (get-in (clock/snapshot seek 275) [:clock :beat])))))
