@@ -1,5 +1,6 @@
 (ns afterglow.output.retirement
-  "Keep delivering configured physical off bytes after fixtures leave a patch.")
+  "Keep delivering configured physical off bytes after fixtures leave a patch."
+  (:require [afterglow.render.frame :as frame]))
 
 (defn- linear-address [[universe index]]
   (+ (* 512 (long universe)) (long index)))
@@ -26,7 +27,7 @@
   "Compile held output for a patch change. Reassigned channels and reserved
   fixture footprints immediately take ownership of their DMX slots."
   [prior previous-patch new-patch]
-  (let [held (unclaimed (merge (:held prior) (:fog-off-bytes previous-patch)) new-patch)
+  (let [held (unclaimed (merge (:held prior) (frame/physical-off-bytes previous-patch)) new-patch)
         current (set (:universes new-patch))
         known (into (into (set (:known prior)) (:universes previous-patch)) current)
         retired (into {} (for [u known :when (not (current u))] [u (byte-array 512)]))
