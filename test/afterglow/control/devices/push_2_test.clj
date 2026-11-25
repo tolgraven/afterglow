@@ -12,7 +12,9 @@
             [afterglow.render.frame-test :refer [assignment bytes-at]]))
 
 (def sine {:signal-id :sine :version 1})
+
 (def saw {:signal-id :saw :version 2})
+
 (def schemas
   {:enabled {:type :boolean :default false}
    :level {:type :number :default 0.5 :bounds [0 1]}
@@ -24,7 +26,9 @@
    :last {:type :number :default 0 :bounds [0 1]}
    :ninth {:type :number :default 0 :bounds [0 1]}
    :tenth {:type :number :default 0 :bounds [0 1]}})
+
 (def order [:enabled :level :count :wave :color :position :span :last :ninth :tenth])
+
 (defn harness
   ([] (harness schemas))
   ([parameter-schemas]
@@ -32,13 +36,19 @@
     (swap! (:show h) assoc-in [:registry :effects :wash :params] parameter-schemas)
     (swap! (:show h) assoc-in [:registry :effects :wash :param-order] order)
     (fixture/ready! h))))
+
 (defn local [h] (:local (session/snapshot (:session h))))
+
 (defn view [h] (push/display-view (local h) @(:show h)))
+
 (defn receive! [h bytes] ((last @(:callbacks h)) bytes))
+
 (defn launch! [h note]
   (receive! h [0x90 note 127])
   (:selected-instance (local h)))
+
 (defn values [h id] (get-in @(:show h) [:instances id :params]))
+
 (defn finish! [h]
   (is (= [] (:errors (session/snapshot (:session h)))))
   (session/close! (:session h)))

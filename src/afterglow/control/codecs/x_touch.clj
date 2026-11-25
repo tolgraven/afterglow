@@ -9,15 +9,21 @@
    :mode :mcu :verification :source-derived :hardware-verified? false})
 
 (def palette [:black :red :green :yellow :blue :magenta :cyan :white])
+
 (def palette-rgb [[0 0 0] [1 0 0] [0 1 0] [1 1 0] [0 0 1] [1 0 1] [0 1 1] [1 1 1]])
+
 (def buttons {:bank-left 46 :bank-right 47 :channel-left 48 :channel-right 49
               :flip 50 :stop 93 :play 94 :record 95})
 
 (defn- require! [condition message]
   (when-not condition (throw (ex-info message {:x-touch/error :invalid-message}))))
+
 (defn- integer-in? [x low high] (and (integer? x) (<= low x high)))
+
 (defn- normalized? [x] (and (number? x) (Double/isFinite (double x)) (<= 0 x 1)))
+
 (defn- strip! [strip maximum] (require! (integer-in? strip 0 maximum) "Invalid MCU strip index") strip)
+
 (defn device-id [extender?]
   (require! (boolean? extender?) "Extender selection must be boolean")
   (if extender? 0x15 0x14))

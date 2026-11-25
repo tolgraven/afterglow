@@ -9,6 +9,7 @@
             [clojure.set :as set]))
 
 (def default-bounds {:min [-5.0 0.0 -5.0] :max [5.0 5.0 5.0]})
+
 (def default-gravity [0.0 -9.81 0.0])
 
 (defn validate! [config]

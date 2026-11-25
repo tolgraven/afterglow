@@ -8,13 +8,19 @@
 
 (def patch (frame/compile-patch [{:id :head :address 1 :universe 0 :channels
                                   {:red 1 :green 2 :blue 3 :dimmer 4 :pan [5 6] :tilt [7 8] :focus 9}}]))
+
 (defn row [attr value] {:target-id :head :attribute attr :value value})
+
 (defn block [& rows] {:kind :assignments :assignments (vec rows)})
+
 (defn layer [member opacity transforms block]
   (assoc block :native-layer {:id :compound :member member :opacity opacity :transforms transforms}
                :source {:instance-id member}))
+
 (defn field [op attr] {:op op :attribute attr})
+
 (defn expr [op & args] {:op op :args (vec args)})
+
 (def transforms
   [{:attribute :beat-ratio :value (expr :divide 1 3)}
    {:attribute :color :value (expr :rotate-hue (field :previous :color) (field :field :beat-ratio))}

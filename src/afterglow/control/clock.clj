@@ -5,9 +5,13 @@
   (:require [afterglow.time :as time]))
 
 (defn- finite? [x] (time/finite-number? x))
+
 (defn- identifier? [x] (or (keyword? x) (and (string? x) (<= 1 (count x) 128))))
+
 (defn- fail! [message] (throw (ex-info message {:clock/error :invalid-input})))
+
 (defn- clamp [x low high] (max low (min high x)))
+
 (defn- median [values]
   (let [values (vec (sort values)) n (count values)]
     (if (odd? n) (nth values (quot n 2)) (/ (+ (nth values (dec (quot n 2))) (nth values (quot n 2))) 2.0))))

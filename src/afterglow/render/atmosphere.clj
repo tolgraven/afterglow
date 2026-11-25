@@ -4,8 +4,11 @@
   (:require [afterglow.render.fog-optics :as optics]))
 
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
+
 (defn- xyz? [v] (and (vector? v) (= 3 (count v)) (every? finite? v)))
+
 (defn- require! [ok message data] (when-not ok (throw (ex-info message data))))
+
 (defn- flow? [x] (and (finite? x) (< 0 x 1e9)))
 
 (defn- physical-bytes [channel physical]

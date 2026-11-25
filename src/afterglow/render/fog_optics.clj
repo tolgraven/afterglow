@@ -12,7 +12,9 @@
   (apply constructor (map (fn [parameter] {:op :param :key parameter}) parameters)))
 
 (def ^:private depth-expression (material-expression blocks/fog-optical-depth-expression))
+
 (def ^:private transmission-expression (material-expression blocks/fog-transmission-expression))
+
 (defn- finite ^double [^double value]
   (if (Double/isFinite value)
     value

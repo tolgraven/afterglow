@@ -7,6 +7,7 @@
             [clojure.test :refer [deftest is]]))
 
 (def patch (frame/compile-patch [{:id :spot :universe 0 :address 1 :channels {:focus [1 2]}}]))
+
 (def outputs {:focus {:op :position :axis :x}})
 
 (deftest cpu-renderer-packs-ordinary-and-deferred-fields

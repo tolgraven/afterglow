@@ -3,10 +3,15 @@
             [clojure.test :refer [deftest is testing]]))
 
 (def floor {:id :floor :point [0 0 0] :normal [0 1 0]})
+
 (def source {:position [0 5 0] :direction [0 -1 0] :beam-angle 30})
+
 (defn- near? [a b] (< (abs (- a b)) 1.0e-8))
+
 (defn- dot [a b] (reduce + (map * a b)))
+
 (defn- distance [a b] (let [v (mapv - a b)] (Math/sqrt (dot v v))))
+
 (defn- at-edge? [{:keys [center major-axis minor-axis major-radius-m minor-radius-m]} p]
   (let [delta (mapv - p center)
         u (/ (dot delta major-axis) major-radius-m)

@@ -9,17 +9,20 @@
             [afterglow.render.frame :as frame]))
 
 (def fixture {:id :lamp :universe 1 :address 1 :channels {:dimmer 1}})
+
 (defn apply! [show payload]
   (let [result (model/apply-command show
                  (merge {:command-id (str (:revision show)) :source :test :show-id (:show-id show)
                          :epoch (:epoch show) :time-ms (:time-ms show)} payload))]
     (when-not (= :accepted (get-in result [:ack :status])) (throw (ex-info "Rejected test command" (:ack result))))
     (:model result)))
+
 (defn launched [options]
   (let [definition {:id :light :version 1 :params {:level {:type :number :default 0.8 :bounds [0 1]}}
                     :outputs {:dimmer {:op :param :key :level}}}]
     (-> (model/new-show {:registry {:effects {:light definition} :cues {:light {:id :light :version 1 :effect-id :light}}}})
         (apply! {:op :cue/launch :cue-id :light :launch options}))))
+
 (defn compiler [_]
   (fn [context]
     (-> context
@@ -28,9 +31,12 @@
         (update :intents conj {:type :observed :state (:state context) :frame (select-keys (:frame context) [:time-ms :beat :number :delta-ms])})
         ;; Like the ordinary declarative compiler without an authored envelope.
         (assoc :done? (= :releasing (get-in context [:instance :phase]))))))
+
 (defn advance [show ms beat]
   (engine/advance (assoc-in show [:transport :beat] beat) {:time-ms ms :fixtures [fixture]} compiler))
+
 (defn opacity [result] (:opacity (first (:assignments result)) 1.0))
+
 (defn render-bytes [result]
   (let [rendered (frame/resolve-contributions [fixture] (:contributions result))]
     (mapv #(bit-and 255 %) (get-in rendered [:universes 1]))))

@@ -16,9 +16,12 @@
    :native-pwm :unverified :compact-and-mini :different-protocol-unverified})
 
 (defn- fail! [message] (throw (ex-info message {:x-touch/error :invalid-profile})))
+
 (defn- initial [bank] {:bank bank :touches {} :holds {} :hold-keys {} :sent {} :flip? false :selected nil})
+
 (defn- latest-instance [model cue-id]
   (last (sort-by :order (filter #(= cue-id (:cue-id %)) (vals (:instances model))))))
+
 (defn- control-binding [channel kind]
   (let [entry (get channel kind :level)] (if (keyword? entry) {:param entry} entry)))
 
@@ -41,6 +44,7 @@
     (hydrate model (merge {:instance-id (:id instance)} (control-binding channel kind)))))
 
 (defn- bounds [schema] (or (:bounds schema) [0 1]))
+
 (defn- normalized [target]
   (let [{:keys [schema value]} target [low high] (bounds schema)]
     (case (:type schema)
@@ -67,6 +71,7 @@
 
 (defn- channel-at [options state strip]
   (get (:channels options) (+ (:bank state) (:channel-offset options) strip)))
+
 (defn- control-kind [state physical]
   (if (:flip? state) ({:fader :encoder :encoder :fader} physical) physical))
 
@@ -142,6 +147,7 @@
 
 (defn- slot-text [value]
   (let [value (str (or value ""))] (str (subs value 0 (min 6 (count value))) (apply str (repeat (max 0 (- 7 (min 6 (count value)))) " ")))))
+
 (defn- display-value [target]
   (let [value (:value target)] (cond (nil? value) "" (number? value) (format "%.3f" (double value)) :else (str value))))
 

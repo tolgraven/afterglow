@@ -6,6 +6,7 @@
 
 (def rig (frame/compile-patch [{:id :nozzle :universe 1 :address 1 :channels {:fog 1}
                                 :fogger {:flow-m3-min 60 :mixing-seconds 3}}]))
+
 (def plan (fog/plan {:width 2 :height 2 :depth 5 :fog-half-life-s 180 :air-changes-per-hour 50
                      :measured-fog {:clearance-half-life-s 18 :extinction-per-m 2.1 :reference-path-m 3}} rig))
 

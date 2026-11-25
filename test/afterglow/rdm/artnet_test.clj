@@ -6,12 +6,19 @@
   (:import [java.net DatagramPacket DatagramSocket InetAddress SocketException SocketTimeoutException]))
 
 (def controller "7a70:01020304")
+
 (def device "1234:abcdef01")
+
 (def command {:universe 4661 :uid device :command :set :sub-device 4 :pid 0xf0 :data [1 2]})
+
 (def prefix [65 114 116 45 78 101 116 0 0])
+
 (def address [0x12 0 0x34])
+
 (defn- wire [values] (byte-array (map unchecked-byte values)))
+
 (defn- word [n] [(quot n 256) (mod n 256)])
+
 (defn- with-checksum [p]
   (into p (word (mod (reduce + 0xcc (drop 24 p)) 65536))))
 

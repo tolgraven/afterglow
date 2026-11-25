@@ -5,8 +5,11 @@
   it is not another production fixture interpreter.")
 
 (defn- dot [a b] (reduce + (map * a b)))
+
 (defn- transpose [matrix] (apply mapv vector matrix))
+
 (defn- matrix-product [a b] (mapv (fn [row] (mapv #(dot row %) (transpose b))) a))
+
 (defn- local-vector [rotation world]
   (let [[x y z] (map #(Math/toRadians (double %)) rotation)
         cx (Math/cos x) sx (Math/sin x) cy (Math/cos y) sy (Math/sin y) cz (Math/cos z) sz (Math/sin z)

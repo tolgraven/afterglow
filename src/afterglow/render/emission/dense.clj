@@ -5,6 +5,7 @@
             [afterglow.render.photometry :as photometry]))
 
 (deftype Lane [^long u ^long i ^long fu ^long fi ^double pivot ^boolean coarseRange spec ^double red ^double green ^double blue])
+
 (deftype Head [id ^long index ^long start dimmer ^objects emitters ^double red ^double green ^double blue])
 
 (defn- lane [indices spec tint]
@@ -121,6 +122,7 @@
   (double x))
 
 (def ^:private doubles-class (class (double-array 0)))
+
 (defn- column [values n]
   (when (instance? doubles-class values)
     (when-not (= n (alength ^doubles values))

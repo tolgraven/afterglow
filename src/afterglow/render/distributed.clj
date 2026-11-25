@@ -12,10 +12,15 @@
   #{:full :redundant})
 
 (def ^:private max-heads 262144)
+
 (def ^:private max-floats 1048576)
+
 (def ^:private max-peers 16)
+
 (def ^:private max-resident 4)
+
 (defn- token [] (str (UUID/randomUUID)))
+
 (defn- finite-float [x]
   (when-not (and (number? x) (Float/isFinite (unchecked-float x)))
     (throw (ex-info "Expected a finite float32 input" {})))

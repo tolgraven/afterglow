@@ -5,9 +5,13 @@
   (:import [java.nio ByteBuffer ByteOrder]))
 
 (def points (mapv #(vector (double %) 0.0 0.0) (range 7)))
+
 (def expression {:dimmer {:op :position :axis :x}})
+
 (defn group [] (distributed/prepare-group expression points (ir/compile-batch expression)))
+
 (defn deadline [] (+ (System/nanoTime) 1000000000))
+
 (defn result-bytes [xs]
   (let [data (byte-array (* 4 (count xs)))
         floats (.asFloatBuffer (.order (ByteBuffer/wrap data) ByteOrder/LITTLE_ENDIAN))]

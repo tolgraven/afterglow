@@ -4,12 +4,17 @@
             [clojure.test :refer [deftest is testing]]))
 
 (def bounds {:min [-2 0 -2] :max [2 4 2]})
+
 (def rig [{:id :a :position [0 2 0]} {:id :b :position [1 2 0]}])
+
 (def ball {:shape :ball :radius 0.2 :position [0 2 0] :velocity [10 0 0]
            :restitution 1.0 :hardness 0.4 :angular-velocity [0 2 0]})
+
 (defn scene [volumes] {:bounds bounds :gravity [0 0 0] :volumes volumes})
+
 (defn tick [prior settings t]
   (spatial/advance (:state prior) settings {:time-ms t :epoch 2} rig {}))
+
 (defn near [a b] (< (abs (- a b)) 1e-8))
 
 (deftest deterministic-throw-events-motion-and-release

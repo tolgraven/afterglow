@@ -7,11 +7,14 @@
 
 (def rgb {:id :rgb :position [1 2 3] :universe 1 :address 1
           :channels {:red 1 :green 2 :blue 3}})
+
 (defn assignment [id attribute value & [blend]]
   {:target-id id :attribute attribute :value value :blend (or blend :replace)})
+
 (defn bytes-at [result universe & offsets]
   (let [buffer (get-in result [:universes universe])]
     (mapv #(bit-and 255 (aget ^bytes buffer (dec %))) offsets)))
+
 (defn near? [a b] (< (Math/abs (double (- a b))) 1.0e-9))
 
 (deftest linear-rgb-and-master-dimming-without-hardware-dimmer
@@ -327,7 +330,9 @@
   (try (f) nil (catch Exception error error)))
 
 (def source-a {:instance-id "a" :effect-id :color :effect-version 1 :cue-id :left})
+
 (def source-b {:instance-id "b" :effect-id :movement :effect-version 2 :cue-id :right})
+
 (defn sourced [source & assignments]
   {:kind :assignments :source source :assignments (vec assignments)})
 

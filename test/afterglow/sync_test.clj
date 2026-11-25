@@ -8,11 +8,14 @@
            [java.util.concurrent CountDownLatch TimeUnit]))
 
 (defn near? [a b] (< (Math/abs (double (- a b))) 1.0e-7))
+
 (defn envelope [id] {:show-id :show :epoch 1 :time-ms 0.0 :command-id id})
+
 (defn callbacks [commands events]
   (let [id (atom 0)]
     {:events! #(swap! events conj %) :commands! #(swap! commands into %)
      :envelope! #(envelope (str "capture-" (swap! id inc)))}))
+
 (defn fake-midi [opens closes receiver sent]
   (fn [_ _]
     {:open! (fn [receive!] (swap! opens inc) (reset! receiver receive!) :owned)

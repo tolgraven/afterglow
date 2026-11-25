@@ -6,12 +6,16 @@
             [afterglow.output.scheduler :as scheduler]))
 
 (def fixtures [{:id :pixel :universe 0 :address 1 :channels {:red 1 :green 2 :blue 3}}])
+
 (def patch (delay (render/compile-patch fixtures)))
+
 (defn- bytes-copy [universes]
   (into {} (map (fn [[u data]] [u (mapv #(bit-and (int %) 255) data)])) universes))
+
 (defn- capture [physical sent]
   (scheduler/create {:now-ms #(deref physical)
                      :send! (fn [universes id] (swap! sent conj {:id id :bytes (bytes-copy universes)}))}))
+
 (defn- frame [r g b]
   {:universes {0 (byte-array (concat (map unchecked-byte [r g b]) (repeat 509 0)))}})
 

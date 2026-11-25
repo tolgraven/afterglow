@@ -11,12 +11,16 @@
        (time/finite-number? (nth v 0))
        (time/finite-number? (nth v 1))
        (time/finite-number? (nth v 2))))
+
 (defn nonnegative? [x] (and (time/finite-number? x) (not (neg? x))))
+
 (defn valid-id? [x] (or (keyword? x) (string? x)))
+
 (defn invalid! [message value] (throw (ex-info message {:value value})))
 
 (defn length3 [[x y z]]
   (Math/hypot (Math/hypot (double x) (double y)) (double z)))
+
 (defn- dist2 [[ax ay az] [bx by bz]]
   (let [x (- (double ax) (double bx)) y (- (double ay) (double by)) z (- (double az) (double bz))]
     (+ (* x x) (* y y) (* z z))))

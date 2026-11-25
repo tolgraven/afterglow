@@ -13,15 +13,19 @@
     {:beat beat :meter (musical-time/normalize-meter (:meter transport))}))
 
 (defn beat [context _] (long (Math/floor (:beat (clock context)))))
+
 (defn beat-in-bar [context query]
   (let [{:keys [beat meter]} (clock context)]
     (long (mod (Math/floor beat) (:beats-per-bar meter)))))
+
 (defn bar [context _]
   (let [{:keys [beat meter]} (clock context)]
     (long (Math/floor (/ beat (:beats-per-bar meter))))))
+
 (defn phrase [context _]
   (let [{:keys [beat meter]} (clock context)]
     (long (Math/floor (/ beat (* (:beats-per-bar meter) (:bars-per-phrase meter)))))))
+
 (defn phase [context _] (mod (:beat (clock context)) 1.0))
 
 (defn register!

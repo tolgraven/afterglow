@@ -104,6 +104,7 @@
       {:state state})))
 
 (def ^:private encoder-release-tail-ms 200)
+
 (def ^:private encoder-end-retry-ms 100)
 
 (defn- encoder-control-id [note]

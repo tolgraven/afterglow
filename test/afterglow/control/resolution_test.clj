@@ -6,7 +6,9 @@
             [clojure.test :refer [deftest is]]))
 
 (defn fixture [chans] {:id :light :address 1 :universe 1 :channels chans})
+
 (def knob {:op :param :key :width})
+
 (defn definition [attr] {:outputs {attr {:op :multiply :args [knob {:op :const :value 1.0}]}}})
 
 (deftest direct-and-indirect-output-width-follows-patch-and-targets

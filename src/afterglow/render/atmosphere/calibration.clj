@@ -4,6 +4,7 @@
   (:require [afterglow.render.atmosphere :as fog]))
 
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
+
 (defn- check [condition message]
   (when-not condition (throw (ex-info message {:component :fog-calibration}))))
 

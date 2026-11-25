@@ -9,23 +9,32 @@
     :channels {:red 1 :green 2 :blue 3 :white 4 :dimmer 5 :pan [6 7] :tilt 8 :focus 9 :strobe 10 :gobo 11}}
    {:id :fine :universe 1 :address 512
     :channels {:dimmer {:offset 1 :fine-offset 2 :inverted-from 0} :pan [4 3]}}])
+
 (def patch (frame/compile-patch fixtures))
+
 (def plan (presentation/compile-plan patch))
+
 (defn a [target attribute value] {:target-id target :attribute attribute :value value})
+
 (def assignments
   [(a :pixel :color [1 0.5 0.25]) (a :pixel :white 0.5)
    (a :head :color [1 0.5 0.25]) (a :head :white 0.5) (a :head :dimmer 0.8)
    (a :head :pan 0.5) (a :head :tilt 0.4) (a :head :focus 0.6) (a :head :strobe 0.3) (a :head :gobo 0.7)
    (a :fine :dimmer 0.5) (a :fine :pan 0.4)])
+
 (defn packet
   ([id time] (packet id time time assignments))
   ([id time completed assignments]
    (presentation/freeze-frame {:epoch 0 :frame-id id :time-ms time :completed-at-ms completed}
                               (frame/resolve-frame patch assignments))))
+
 (defn admitted [state packet] (:state (presentation/complete state packet)))
+
 (defn bytes-at [packet universe & offsets]
   (mapv #(get-in packet [:universes universe (dec %)]) offsets))
+
 (defn frame-at [state time] (:packet (presentation/present state time)))
+
 (defn assert-near [a b] (is (< (Math/abs (double (- a b))) 0.000001)))
 
 (deftest renderer-packet-ownership-is-explicit

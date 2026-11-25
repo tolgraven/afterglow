@@ -17,7 +17,9 @@
   (when-not condition (reject! code message details)))
 
 (defn- identifier? [x] (or (keyword? x) (and (string? x) (not (empty? x)))))
+
 (defn- duration? [x] (and (params/finite-number? x) (pos? x)))
+
 (defn- nonnegative? [x] (and (params/finite-number? x) (<= 0 x)))
 
 (defn- timing-option [sources field legacy-field]
