@@ -1,5 +1,27 @@
 # Push 2 control parity
 
+## Select and reorder active cues
+
+Set `:active-cue-grid? true` in the Push 2 connection options. Press **Select**
+to open the active edit grid or **Duplicate** to open the reorder grid. The
+active mode's button lights up. Press it again to return to the cue launch grid.
+Page Left and Right navigate banks of 64 running launches.
+
+The bottom-left pad is the first running launch in compositing order, followed
+by the remaining pads from left to right and bottom to top. Two running copies
+of the same cue occupy separate pads. In Select mode, tap a pad to edit that
+launch's parameters. In Duplicate mode, tap the launch to move, then tap the
+launch it should follow. Duplicate gets brighter when a source is selected.
+Tap the source a second time to clear it. The pads update to the committed order
+after the show accepts the move.
+
+Pad input waits for acknowledgement of the visible LED layout. A running
+launch that ends between feedback and a press cannot redirect the press to its
+replacement. The two modes use the shared
+[instance reorder operation](native-layers.md#reordering-active-instances).
+The virtual MIDI tests qualify the controller profile and reducer. Physical
+Push 2 verification remains open.
+
 The composable profile now edits all supported shared parameter types through
 the real command reducer. These are source-derived protocol behaviors with
 capture-sink tests; physical Push hardware has not been verified.

@@ -8,7 +8,8 @@
   Effects are pure functions of a supplied frame snapshot and their own state.
   They describe assignments and external work as data; the owner of the show
   performs that work only after accepting a complete frame. Callers supply time,
-  randomness and any parallel executor explicitly.")
+  randomness and any parallel executor explicitly."
+  (:require [afterglow.control.instance-order :as instance-order]))
 
 (defn- invalid!
   [message data]
@@ -68,6 +69,7 @@
                    (finite-number? (:priority instance))
                    (integer? (:order instance))
                    (not (neg? (:order instance)))
+                   (instance-order/valid-render-position? instance)
                    (contains? instance :state)
                    (ifn? (:step instance)))
       (invalid! "Expected an effect instance with :id, finite :priority, nonnegative integer :order, :state and callable :step"
@@ -153,7 +155,7 @@
   (let [instances (:effects context)
         results (index-results instances evaluated)
         ordered (sort-by (fn [[position instance]]
-                           [(:priority instance) (:order instance) position])
+                           (instance-order/sort-key instance position))
                          (map-indexed vector instances))
         contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
         blocks (into [] (mapcat :contributions) contributions)
@@ -179,6 +181,8 @@
   Context contains a :frame map (the immutable show/time/input snapshot) and an
   :effects vector. Each instance requires :id, numeric finite :priority,
   nonnegative integer :order (launch order), :state, and a pure :step function.
+  An optional :render-order positions an instance within its tier, and
+  :render-priority can override that tier for composition.
 
   A step takes a map with :frame, :effect-id, :instance, :state, :assignments [], :intents []
   and :done? false. It returns that map with updated :state, assignment/intent

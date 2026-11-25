@@ -33,6 +33,97 @@
        (apply! {:op :registry/publish :kind :effects :definition effect})
        (apply! {:op :cue/put :cue {:id :red :effect-id :wash :params {:level 0.6}}}))))
 
+(deftest reorder-uses-captured-launch-ids-and-preserves-chronology
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (configured)
+                 (apply! launch)
+                 (apply! (assoc launch :launch {:params {:level 0.7}}))
+                 (apply! launch)
+                 (apply! (assoc launch :launch {:priority 10})))
+        move {:op :instance/move-after :instance-id "0:1" :after-instance-id "0:3"
+              :expected-revision (:revision show)}
+        cmd (command show move)
+        result (model/apply-command show cmd)
+        moved (:model result)
+        ids ["0:2" "0:3" "0:1" "0:4"]]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (= ids (get-in result [:ack :instance-ids])))
+    (is (= [{:type :instances/reordered :instance-ids ids}] (:events result)))
+    (is (= ids (mapv :id (:instances (views/snapshot moved)))))
+    (is (= ["0:1" "0:2" "0:3" "0:4"] (:instances (views/cue-view moved :red))))
+    (is (= (:instances show) (update-vals (:instances moved) #(dissoc % :render-order))))
+    (is (identical? (get-in show [:instances "0:4"]) (get-in moved [:instances "0:4"])))
+    (is (= {:model moved :ack (:ack result) :events []} (model/apply-command moved cmd)))
+    (is (= ["0:2" "0:3" "0:1" "0:5" "0:4"]
+           (mapv :id (:instances (views/snapshot (apply! moved launch))))))
+    (is (= ids (mapv :id (:instances (views/snapshot (model/new-show moved))))))
+    (let [after-release (apply! moved {:op :instance/end :instance-id "0:3"})
+          relaunched (-> after-release (apply! {:op :instance/remove :instance-id "0:3"}) (apply! launch))]
+      (doseq [[m op expected] [[moved move :stale-revision]
+                               [after-release (dissoc move :expected-revision) :instance-not-running]
+                               [relaunched (dissoc move :expected-revision) :unknown-instance]]]
+        (let [rejected (model/apply-command m (command m op))]
+          (is (= expected (get-in rejected [:ack :code])))
+          (is (identical? m (:model rejected)))
+          (is (empty? (:events rejected))))))))
+
+(deftest standalone-cross-tier-reorder-preserves-authored-priority-and-accepts-an-existing-position
+  (let [launch (fn [show priority]
+                 (apply! show {:op :cue/launch :cue-id :red :launch {:priority priority}}))
+        show (reduce launch (configured) [0 0 10 10 20])
+        move (fn [model source target]
+               (model/apply-command model (command model {:op :instance/move-after
+                                                          :instance-id source :after-instance-id target})))
+        adjacent (move show "0:3" "0:2")
+        up (move show "0:1" "0:3")
+        moved (:model up)
+        down (move moved "0:1" "0:2")]
+    (is (= :accepted (get-in adjacent [:ack :status])))
+    (is (empty? (:events adjacent)))
+    (is (identical? (:instances show) (get-in adjacent [:model :instances])))
+    (is (= ["0:2" "0:3" "0:1" "0:4" "0:5"] (get-in up [:ack :instance-ids])))
+    (is (= (assoc (get-in show [:instances "0:1"]) :render-priority 10 :render-order 1)
+           (get-in moved [:instances "0:1"])))
+    (is (identical? (get-in show [:instances "0:5"]) (get-in moved [:instances "0:5"])))
+    (is (= ["0:2" "0:3" "0:1" "0:4" "0:6" "0:5"]
+           (mapv :id (:instances (views/snapshot (launch moved 10))))))
+    (is (= ["0:2" "0:1" "0:3" "0:4" "0:5"] (get-in down [:ack :instance-ids])))
+    (is (nil? (get-in down [:model :instances "0:1" :render-priority])))))
+
+(deftest seeded-shuffle-preserves-priorities-and-pins-releasing-and-layer-slots
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (reduce (fn [m priority] (apply! m (assoc launch :launch {:priority priority})))
+                         (configured) [0 0.0 0 0 0 0 0 3 3 3])
+                 (apply! {:op :instance/end :instance-id "0:3"})
+                 (assoc-in [:instances "0:5" :source] {:adapter :test :native-layer {:id :macro :member 0}}))
+        shuffled (fn [seed] (model/apply-command show (command show {:op :instances/shuffle :seed seed})))
+        result (shuffled 31)
+        ids (get-in result [:ack :instance-ids])]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (= result (shuffled 31)))
+    (is (not= ids (get-in (shuffled 37) [:ack :instance-ids])))
+    (is (= ["0:3" "0:5"] (mapv ids [2 4])))
+    (is (= #{"0:8" "0:9" "0:10"} (set (subvec ids 7))))
+    (is (= (:instances show) (update-vals (get-in result [:model :instances]) #(dissoc % :render-order))))
+    (is (= :invalid-seed (get-in (shuffled 9223372036854775808N) [:ack :code])))))
+
+(deftest reorder-rejects-ambiguous-compound-positions-atomically
+  (let [launch {:op :cue/launch :cue-id :red}
+        show (-> (configured)
+                 (apply! (assoc launch :source {:adapter :test :native-layer {:id :a :member 0}}))
+                 (apply! launch)
+                 (apply! (assoc launch :source {:adapter :test :native-layer {:id :a :member 1}}))
+                 (apply! launch))
+        mixed (assoc-in show [:instances "0:3" :priority] 1)]
+    (doseq [[m source target code] [[show "0:1" "0:3" :same-render-unit]
+                                    [show "0:4" "0:1" :interleaved-native-layer]
+                                    [mixed "0:4" "0:1" :priority-mismatch]]]
+      (let [result (model/apply-command m (command m {:op :instance/move-after
+                                                       :instance-id source :after-instance-id target}))]
+        (is (= code (get-in result [:ack :code])))
+        (is (identical? m (:model result)))
+        (is (empty? (:events result)))))))
+
 (deftest construction-is-inert-and-validates-basic-shape
     (is (= {:bpm 120 :playing? true :beat 0.0 :meter {:beats-per-bar 4 :bars-per-phrase 4}}
            (:transport (model/new-show))))

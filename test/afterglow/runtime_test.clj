@@ -128,6 +128,9 @@
   (doseq [effect [(assoc (instance :a identity) :priority Double/NaN)
                   (assoc (instance :a identity) :priority Double/POSITIVE_INFINITY)
                   (assoc (instance :a identity) :order -1)
+                  (assoc (instance :a identity) :render-order -1)
+                  (assoc (instance :a identity) :render-priority 1)
+                  (assoc (instance :a identity) :render-priority Double/NaN :render-order 0)
                   (dissoc (instance :a identity) :state)
                   (assoc (instance :a identity) :id nil)]]
     (is (thrown? clojure.lang.ExceptionInfo (runtime/render-frame (frame effect)))))
