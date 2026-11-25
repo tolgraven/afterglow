@@ -131,10 +131,13 @@
                (params/finite-number? value))
       {:instance instance :schema schema :value value})))
 
+(defn- bounded-value [schema value]
+  (let [value (bindings/clamp value (:bounds schema))]
+    (if (= :integer (:type schema)) (long (Math/round (double value))) value)))
+
 (defn- parameter-command [model instance-id parameter transform]
   (when-let [{:keys [schema value]} (numeric-parameter model instance-id parameter)]
-    (let [next-value (bindings/clamp (transform value (:bounds schema) schema) (:bounds schema))
-          next-value (if (= :integer (:type schema)) (long (Math/round (double next-value))) next-value)]
+    (let [next-value (bounded-value schema (transform value (:bounds schema) schema))]
       (when (not= value next-value)
         {:op :param/set :instance-id instance-id :param parameter :value next-value}))))
 
@@ -170,19 +173,20 @@
                                  envelope (boolean temporary?))
           {:state state})))))
 
-(defn- turn-parameter [state model instance-id param step delta fine?]
-  (if-not fine?
-    (let [command (parameter-command model instance-id param
-                    (fn [value [low high] schema]
-                      (+ value (* delta (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0)))))))]
-      {:state state :commands (if command [command] [])})
-    (if-let [{:keys [instance schema value]} (numeric-parameter model instance-id param)]
-      (let [[cache bits] (edit/patch-step (:shift-patch state) model instance param)
-            schema (cond-> schema step (assoc :step step))
-            next-value (edit/edit schema value delta {:fine? true :dmx-bits bits})]
-        {:state (assoc state :shift-patch cache)
-         :commands (if (= value next-value) [] [{:op :param/set :instance-id instance-id :param param :value next-value}])})
-      {:state state})))
+(defn- turn-parameter [{:keys [parameter-editor]} state model instance-id param step delta fine?]
+  (if-let [{:keys [instance schema value]} (numeric-parameter model instance-id param)]
+    (let [[cache bits] (when fine? (edit/patch-step (:shift-patch state) model instance param))
+          edit-options {:mode :relative :component 0 :fine? fine? :dmx-bits bits}
+          custom (when parameter-editor (parameter-editor model instance param delta edit-options))
+          [low high] (:bounds schema)
+          next-value (cond
+                       custom (bounded-value schema (:value custom))
+                       fine? (edit/edit (cond-> schema step (assoc :step step)) value delta edit-options)
+                       :else (let [increment (or step (if (= :integer (:type schema)) 1 (/ (- high low) 100.0)))]
+                               (bounded-value schema (+ value (* delta increment)))))]
+      {:state (cond-> state fine? (assoc :shift-patch cache))
+       :commands (if (= value next-value) [] [{:op :param/set :instance-id instance-id :param param :value next-value}])})
+    {:state state}))
 
 (defn- encoder [options state {:keys [control-id delta]} model envelope]
   (let [{:keys [target param step]} (get-in options [:encoder-bindings control-id])
@@ -195,12 +199,12 @@
       (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
         {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
       active (encoder-gesture/edit state active
-               #(turn-parameter state model (:instance-id active) (:param active) step delta fine?))
+               #(turn-parameter options state model (:instance-id active) (:param active) step delta fine?))
       (or (= :temporary mode)
           (and (nil? mode) (:dedicated-modifier-down? state))
           (contains? (:temporary-release-tails state) control-id)
           (encoder-gesture/after-release? state control-id (:time-ms envelope))) {:state state}
-      :else (turn-parameter state model (:selected-instance state) param step delta fine?))))
+      :else (turn-parameter options state model (:selected-instance state) param step delta fine?))))
 
 (defn- expression [options state event model]
   (let [poly? (= :poly-pressure (:type event))
@@ -633,10 +637,14 @@
   override it. Legacy :shift settings select Accent. Shift defaults to fine
   adjustment when its factory address is available and no Shift is mapped.
   Bind a touch note and turn CC to the same logical encoder ID for temporary edits.
+  Optional :parameter-editor takes model, instance, parameter, input and edit
+  options. Return {:value value} to edit that parameter or nil for the normal step.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
   (doseq [key [:cue-gestures? :operator-gestures?] :when (contains? options key)]
     (valid! (boolean? (get options key)) "Gesture opt-in must be boolean" {:option key}))
+  (when (some? (:parameter-editor options))
+    (valid! (ifn? (:parameter-editor options)) "Parameter editor must be callable" {}))
   (let [grid (launch/grid options)
         mpe? (= :mpe (:expression-mode options))
         options (cond-> (assoc options ::grid grid)

@@ -496,6 +496,41 @@
                    {:command-id "existing-wash" :time-ms 0 :source :fixture
                     :op :cue/launch :cue-id :held :launch {:mode :persistent}}))))
 
+(deftest shared-parameter-editor-keeps-exact-values-through-momentary-turns
+  (doseq [[mode pad] [[:poly-aftertouch [0x93 12 100]] [:mpe [0x91 40 100]]]]
+    (testing (name mode)
+      (let [calls (atom [])
+            editor (fn [_ instance param delta {:keys [mode component fine?]}]
+                     (swap! calls conj [param (get-in instance [:params param]) delta mode component fine?])
+                     {:value (if fine? 7/11 2/3)})
+            settings (cond-> {:expression-mode mode :parameter-editor editor
+                              :operator-gestures? true :authority {:operator-id :push-3-test}}
+                       (= :mpe mode) (assoc :zone {:manager-channel 0 :member-channels [1]}
+                                            :mpe-note-cells {40 [0 0]}
+                                            :mapping-policy {:enabled? false}))
+            {:keys [show receive device]} (harness settings)
+            level #(get-in @show [:instances "0:1" :params :level])]
+        (try
+          (swap! show assoc-in [:registry :effects :wash :params :level :default] 5/11)
+          (session/open! device)
+          (@receive pad)
+          (is (= 5/11 (level)))
+          (@receive [0xb2 19 1])
+          (is (= 2/3 (level)))
+          (@receive [0xb0 49 127])
+          (@receive [0xb0 57 127])
+          (@receive [0x92 9 127])
+          (@receive [0xb2 19 1])
+          (is (= 7/11 (level)))
+          (@receive [0xb0 57 0])
+          (@receive [0x82 9 0])
+          (@receive [0xb0 49 0])
+          (is (= 2/3 (level)))
+          (is (= [[:level 5/11 1 :relative 0 false] [:level 2/3 1 :relative 0 true]] @calls))
+          (is (empty? (get-in @show [:control :edit-history :open])))
+          (is (empty? (:errors (session/snapshot device))))
+          (finally (session/close! device)))))))
+
 (deftest dedicated-temporary-button-does-not-select-an-active-cue
   (doseq [[mode pad] [[:poly-aftertouch [0x93 12]] [:mpe [0x91 40]]]]
     (testing (name mode)

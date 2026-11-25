@@ -26,6 +26,9 @@
   [value]
   (and (finite-number? value) (not (neg? value))))
 
+(defn- unit-opacity? [value]
+  (and (finite-number? value) (<= 0 value 1)))
+
 (defn- validate-instance!
   [id instance]
   (system/validate-state instance)
@@ -93,11 +96,21 @@
     (when-not (map? factors)
       (fail! ::invalid-opacity-factors "Expected an instance ID to opacity factor map" {}))
     (doseq [[id factor] factors]
-      (when-not (and (contains? (:instances model) id) (finite-number? factor) (<= 0 factor 1))
-        (fail! ::invalid-opacity-factors "Opacity factors must be in [0,1] for active instances"
+      (when-not (and (contains? (:instances model) id)
+                     (if (map? factor)
+                       (every? (fn [[version value]]
+                                 (and (integer? version) (pos? version) (unit-opacity? value))) factor)
+                       (unit-opacity? factor)))
+        (fail! ::invalid-opacity-factors "Active instance opacity factors must be in [0,1], optionally by definition version"
                {:instance-id id :factor factor}))))
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
+
+(defn opacity-factor
+  "Read the frame opacity factor for an instance and its evaluated definition version."
+  [factors id version]
+  (let [factor (get factors id 1)]
+    (if (map? factor) (get factor version 1) factor)))
 
 (defn- reload-instance
   [registry clock instance]
@@ -337,7 +350,7 @@
    :state (get-in prepared [:instance :state]) :assignments [] :contributions []
    :intents (:intents prepared) :done? false})
 
-(defn- attempt [snapshot compiled opacity-factor prepared]
+(defn- attempt [snapshot compiled factors prepared]
   (let [instance (:instance prepared) {:keys [step error]} (get compiled (:program prepared))]
     (cond
       (and (not (:expired? prepared))
@@ -349,7 +362,8 @@
 
       :else
       (try
-        (let [value (runtime/evaluate-instance snapshot (descriptor step opacity-factor prepared))
+        (let [factor (opacity-factor factors (:id instance) (:effect-version instance))
+              value (runtime/evaluate-instance snapshot (descriptor step factor prepared))
               source (assoc (select-keys instance [:effect-id :effect-version :cue-id]) :instance-id (:id instance))]
           (-> value
               (assoc :instance instance)
@@ -364,8 +378,7 @@
                                          :result :evaluate) error)})))))
 
 (defn- evaluate-isolated [snapshot compiled factors prepared]
-  (let [opacity-factor (get factors (get-in prepared [:instance :id]) 1)
-        result (attempt snapshot compiled opacity-factor prepared)
+  (let [result (attempt snapshot compiled factors prepared)
         candidate? (:candidate? prepared)
         before (:before prepared)
         fault (:failure result)
@@ -375,7 +388,7 @@
                              (assoc :before before :candidate? false)
                              (assoc-in [:instance :reload-fault] fault)
                              (update :intents conj (faults/event :effect/reload-failed fault)))]
-            [(attempt snapshot compiled opacity-factor fallback) fallback])
+            [(attempt snapshot compiled factors fallback) fallback])
           [result prepared])
         succeeded? (and (nil? (:failure result)) (not (:skipped? result)))
         result (if-let [failure (:failure result)]
@@ -457,8 +470,10 @@
   time, beat and meter captured before any private offsets. No typed result
   buffers enter the model.
   System opacity weights the blend result, never authored parameter values.
-  The optional ::opacity-factors frame input is a sparse map from active
-  instance IDs to unit factors. It multiplies the evaluated instance's system
+  The optional ::opacity-factors frame input maps active instance IDs to a unit
+  factor or a sparse map from definition version to unit factor. Unspecified
+  factors default to unity. Reloads and their fallbacks each use the factor for
+  the definition being evaluated. The factor multiplies the instance's system
   opacity and AR level at the contribution boundary, including native member
   opacity. Factors stay outside the effect context and committed instance.
   A removed registry definition leaves captured running instances valid.
