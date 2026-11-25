@@ -63,18 +63,19 @@ usual action. Shift continues to control step size.
 Hold the modifier as you touch an authored parameter encoder. Turns, strip
 changes and the touched parameter's checkbox or picker apply live. Numeric,
 integer, boolean, enum, color, vector and range parameters are supported. The
-encoder remembers its mode until lift,
-even if you let go of the modifier first. On lift or disconnect, the show owner
+encoder remembers its mode until lift, even if you let go of the modifier first. On lift or disconnect, the show owner
 restores the pre-touch value if the gesture still owns it. A newer edit to the
 same parameter takes precedence. Temporary gestures leave no undo entry, and
 an unadmitted temporary gesture ignores turns for that touch. This includes
 empty slots and targets that have stopped running. Each encoder tracks its own
 touch. Ordinary scalar touches still record an undo entry.
 
-Push 3 User Mode can decode explicitly mapped encoder-touch notes. The Push 3
-profile currently uses those notes for touch feedback and still sends ordinary
-parameter writes for detents. Temporary edits there require wiring captured
-touch and detent IDs to the same trusted gesture path.
+Push 3 supports temporary numeric edits through its captured User Mode touch,
+turn and modifier mappings. The same gesture works with Poly/Mono Aftertouch
+and MPE. See the [Push 3 setup](expressive-devices.md#push-3-user-mode).
+
+If a live effect reload makes the starting value invalid, release closes the
+gesture and keeps the current value accepted by the new definition.
 
 ## Physical strip, master and tempo
 
