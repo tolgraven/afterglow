@@ -93,6 +93,20 @@ position alone. The receipt includes `:render-priority` and the new
 priorities, effect state and timing stay intact. To choose the initial priority
 on a new launch, supply `:launch {:priority 4.5}`.
 
+A show owner can also vary priority frame by frame, for example from a
+modulated layer-priority source, without issuing commands. Pass
+`:afterglow.runtime.engine/priority-overrides {instance-id priority}` in the
+frame given to `afterglow.runtime.engine/advance`. The engine resolves positions
+once from that frozen frame input, before evaluation, and uses them for both
+worker result ordering and contribution merging. The model is unchanged.
+A value equal to the instance's effective priority keeps its current position.
+A different value moves the instance, or every member of its compound layer, to
+that tier without an explicit rank, so equal priorities tie by launch order
+after explicitly reordered peers. Members of one compound layer must receive the
+same value. `afterglow.control.instance-order/ordered-with-priorities` projects
+the same frame order for views. Hysteresis and other modulation policy belong to
+the owner that samples the value.
+
 Submit `{:op :instance/move-after :instance-id source-id :after-instance-id
 target-id :expected-revision captured-revision}` through the show owner. Use the
 instance IDs and revision captured from the committed view. The owner rejects

@@ -3,6 +3,7 @@
             [afterglow.runtime.reuse :as reuse]
             [afterglow.runtime.executor :as executor]
             [afterglow.control.model :as control]
+            [afterglow.control.instance-order :as instance-order]
             [clojure.test :refer [deftest is testing]]))
 
 (def definition
@@ -352,6 +353,51 @@
             parallel (engine/advance show {:time-ms 20} compiler (executor/mapper pool))]
         (is (= serial parallel))
         (is (= ["early" "later" "high"] (mapv :source (:assignments parallel))))))))
+
+(deftest frame-priority-overrides-reorder-one-frame-without-changing-the-model
+  (let [show (model (instance "a" :priority 0 :order 0)
+                    (instance "b" :priority 0 :order 1)
+                    (instance "c" :priority 5 :order 2)
+                    (instance "d" :priority 5 :order 3 :render-order 0))
+        sources #(mapv :source (:assignments %))
+        frame (fn [overrides] {:time-ms 20 ::engine/priority-overrides overrides})
+        plain (engine/advance show {:time-ms 20} compiler)]
+    (testing "an absent or empty override map keeps the committed order"
+      (is (= ["a" "b" "d" "c"] (sources plain)))
+      (is (= plain (engine/advance show (frame {}) compiler))))
+    (testing "a raised layer joins its tier after explicit ranks, then by launch order"
+      (let [result (engine/advance show (frame {"a" 5}) compiler)]
+        (is (= ["b" "d" "a" "c"] (sources result)
+               (mapv :id (instance-order/ordered-with-priorities show {"a" 5}))))
+        (is (= (:instances (:model plain)) (:instances (:model result))))
+        (is (not (contains? (:frame (::engine/evaluation result)) ::engine/priority-overrides)))))
+    (testing "an override equal to the effective priority keeps the explicit position"
+      (is (= ["a" "b" "d" "c"] (sources (engine/advance show (frame {"d" 5}) compiler)))))
+    (testing "lowering a layer below every tier and ignoring ended instances"
+      (is (= ["c" "a" "b" "d"] (sources (engine/advance show (frame {"c" -1 "gone" 9}) compiler))))
+      (is (= ["a" "b" "d" "c"] (sources (engine/advance show (frame {"gone" ##NaN}) compiler)))))
+    (testing "threaded evaluation merges by the overridden order"
+      (with-open [^java.io.Closeable pool (executor/create {:workers 2 :queue-size 2 :timeout-ms 1000})]
+        (is (= (engine/advance show (frame {"a" 5}) compiler)
+               (engine/advance show (frame {"a" 5}) compiler (executor/mapper pool))))))
+    (testing "invalid and split native-layer overrides fail before evaluation"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"priority overrides"
+            (engine/advance show (frame {"a" ##NaN}) compiler)))
+      (let [layered (model (instance "m1" :order 0 :source {:native-layer {:id :L}})
+                           (instance "m2" :order 1 :source {:native-layer {:id :L}})
+                           (instance "x" :order 2))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"priority overrides"
+              (engine/advance layered (frame {"m1" 1 "m2" 2}) compiler)))
+        (testing "exact ratios and equal values across numeric types are accepted within a layer"
+          (is (= ["x" "m1" "m2"] (mapv (comp :id :instance)
+                                       (get-in (engine/advance layered (frame {"m1" 1/3 "m2" 1/3}) compiler)
+                                               [::engine/evaluation :results]))))
+          (is (engine/advance layered (frame {"m1" 1/2 "m2" 0.5}) compiler)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"priority overrides"
+              (engine/advance layered (frame {"m1" 1/3 "m2" 0.3333}) compiler)))
+        (is (= ["x" "m1" "m2"] (mapv (comp :id :instance)
+                                     (get-in (engine/advance layered (frame {"m1" 1}) compiler)
+                                             [::engine/evaluation :results]))))))))
 
 (defn- command
   [show id op & fields]

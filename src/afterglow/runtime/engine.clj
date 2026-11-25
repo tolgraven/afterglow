@@ -103,6 +103,10 @@
                        (unit-opacity? factor)))
         (fail! ::invalid-opacity-factors "Active instance opacity factors must be in [0,1], optionally by definition version"
                {:instance-id id :factor factor}))))
+  (when-let [errors (seq (instance-order/priority-override-errors
+                           (:instances model) (get frame ::priority-overrides {})))]
+    (fail! ::invalid-priority-overrides "Frame priority overrides must be finite and agree within native layers"
+           {:errors (vec errors)}))
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
 
@@ -591,6 +595,12 @@
   their source instance, definition identity and launch adapter when present.
   No hardware output or external work happens here.
 
+  Optional ::priority-overrides maps instance IDs to finite priorities for this
+  frame only, such as a modulated layer priority sampled by the show owner. It
+  reorders evaluation and contribution merging without changing the model. An
+  overriding value places the instance (or its whole native layer) in that tier,
+  tied with equal priorities by launch order. Unknown IDs are ignored.
+
   Command :revision is preserved; :frame-number advances. Asynchronous shells
   must compare [epoch revision frame-number] before committing a frame, or use a
   single owner that drains commands and evaluates frames sequentially."
@@ -604,7 +614,10 @@
          _ (when-not (nonnegative-number? delta-ms)
              (fail! ::invalid-delta "Computed frame delta must be nonnegative" {}))
          factors (::opacity-factors frame)
-         snapshot (merge {:fixtures []} (dissoc frame ::opacity-factors)
+         ;; Resolve modulated layer priority once from this frozen frame input.
+         positions (instance-order/with-priority-overrides (:instances model) (::priority-overrides frame))
+         position-of (fn [instance] (get positions (:id instance) instance))
+         snapshot (merge {:fixtures []} (dissoc frame ::opacity-factors ::priority-overrides)
                          {:show-id (:show-id model) :epoch (:epoch model)
                           :revision (:revision model) :number frame-number
                           :time-ms time-ms :delta-ms delta-ms
@@ -615,8 +628,8 @@
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
-         prepared (mapv (partial prepare-isolated model clock snapshot)
-                        (instance-order/ordered model))
+         prepared (mapv (fn [positioned] (prepare-isolated model clock snapshot (get-in model [:instances (:id positioned)])))
+                        (sort instance-order/render-instance-comparator (vals positions)))
          definitions (distinct (map :program
                                     (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
                                                                   (get-in % [:instance :fault :effect-version])))
@@ -625,12 +638,15 @@
                     (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
                     keyframes/with-rig-positions)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
-         descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :render-priority :render-order :state])
-                                   :step identity) prepared)
+         render-keys [:priority :order :render-priority :render-order]
+         descriptors (mapv #(let [instance (:instance %)]
+                              (assoc (merge (select-keys instance [:id :state])
+                                            (select-keys (position-of instance) render-keys))
+                                     :step identity)) prepared)
          evaluations (vec (map-work (partial evaluate-isolated snapshot compiled factors) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
-         evaluations (vec (sort-by :instance instance-order/render-instance-comparator evaluations))]
+         evaluations (vec (sort-by (comp position-of :instance) instance-order/render-instance-comparator evaluations))]
      (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
                             :last-frame-beat (:beat clock) :frame-number frame-number)
                snapshot descriptors evaluations))))
