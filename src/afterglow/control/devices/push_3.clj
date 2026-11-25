@@ -78,7 +78,8 @@
 (defn- reset-interactions [state]
   (assoc (dissoc (targets/clear-selection state) :encoder-gestures :encoder-releases :encoder-touch-modes
                  :temporary-release-tails :temporary-release-time-ms :pad-overlay :pad-overlay-pads
-                 :pad-overlay-generation :pad-overlay-frame :pad-overlay-projection :pad-overlay-presented)
+                 :pad-overlay-generation :pad-overlay-frame :pad-overlay-projection :pad-overlay-presented
+                 :pad-overlay-encoder)
          :pads {} :holds {} :buttons #{} :dedicated-modifier-down? false :touches #{}
          :selected-instance nil :selected-cue nil :selection-token nil :shift-patch nil :last-display nil))
 
@@ -325,7 +326,26 @@
 (defn- browse-overlay [state selection generation]
   (-> state
       (assoc :pad-overlay selection :pad-overlay-generation generation)
-      (dissoc :pad-overlay-frame :pad-overlay-presented)))
+      (dissoc :pad-overlay-frame :pad-overlay-presented :pad-overlay-encoder)))
+
+(defn- overlay-encoder [{:keys [pad-overlay layout encoder-bindings]} underlying
+                        state {:keys [control-id pressed?] :as event} model envelope]
+  (let [result (underlying state event model envelope)
+        generation (:command-id envelope)]
+    (cond
+      (and (not pressed?) (= control-id (:pad-overlay-encoder state)))
+      (update result :state browse-overlay nil generation)
+
+      (and pressed? (nil? (:pad-overlay-generation state)) (not (:target-picker state))
+           (not (:dedicated-modifier-down? state)) (not (contains? (:touches state) control-id)))
+      (let [param (get-in encoder-bindings [control-id :param])
+            instance-id (:selected-instance state)]
+        (if-let [selection (when (and param instance-id)
+                             ((:open-encoder pad-overlay) model instance-id param (keys (:pads layout))))]
+          (update result :state #(assoc (browse-overlay % selection generation) :pad-overlay-encoder control-id))
+          result))
+
+      :else result)))
 
 (defn- overlay-transition [{:keys [pad-overlay button-bindings]}
                            state event model envelope]
@@ -334,10 +354,15 @@
                 {:presented (:pad-overlay-presented state)
                  :selected-instance (:selected-instance state)
                  :record? (some #(= :variation/record (button-bindings %)) (:buttons state))})
-        next-selection (:state change selection)]
-    {:state (if (= selection next-selection) state
-                (browse-overlay state next-selection (:command-id envelope)))
-     :commands (mapv #(merge % (select-keys envelope [:show-id :epoch])) (:commands change))}))
+        next-selection (:state change selection)
+        result {:state (if (= selection next-selection) state
+                           (browse-overlay state next-selection (:command-id envelope)))
+                :commands (mapv #(merge % (select-keys envelope [:show-id :epoch])) (:commands change))}
+        owner (when (:encoder-sample? change)
+                (encoder-gesture/active state (:pad-overlay-encoder state)))]
+    (if owner
+      (encoder-gesture/edit (:state result) owner (constantly result))
+      result)))
 
 (defn- overlay-mono-input [underlying state event model envelope]
   (let [channel (:channel event)
@@ -353,13 +378,16 @@
                                event model envelope)
                    :state state))))
 
-(defn- overlay-input [{:keys [button-bindings] :as options} underlying
+(defn- overlay-input [{:keys [button-bindings pad-overlay] :as options} underlying
                       state {:keys [type control-id gesture-key pressed?] :as event}
                       model envelope]
   (let [active? (some? (:pad-overlay-generation state))
         captured (:pad-overlay-pads state)
         action (get button-bindings control-id)]
     (cond
+      (and (= :encoder-touch type) (:open-encoder pad-overlay))
+      (overlay-encoder options underlying state event model envelope)
+
       ;; A pad's owner is fixed at note-on, even after leaving the overlay.
       (and (= :pad type) (contains? captured gesture-key))
       {:state (cond-> state (not pressed?) (update :pad-overlay-pads disj gesture-key))}
@@ -382,6 +410,7 @@
       (let [edge? (and pressed? (not (contains? (:buttons state) control-id)))
             state (set-held-button options state control-id pressed?)]
         (if (and edge? (not (:target-picker state))
+                 (nil? (:pad-overlay-encoder state))
                  (or (= :variation/cycle action) (:pad-overlay-presented state))
                  ;; A second cycle during closing must wait for the live view.
                  (or (not active?) (:pad-overlay state)))
@@ -783,6 +812,11 @@
   :variation/next-page and held :variation/record. The projection returns
   :view for admission and :display for feedback. Input gets the overlay state,
   a button action or pad position, the live model and presented choice context.
+  Optional :open-encoder takes the live model, selected instance ID, bound
+  parameter and captured pad positions. A returned selection owns the grid
+  until that encoder lifts, while regular encoder gestures continue to run.
+  An input result with :encoder-sample? true routes its single command's
+  :value through the owning encoder gesture when one is active.
   The overlay requires Poly or Mono Aftertouch, captured pads, a cycle button
   and a display which receipts presentation via control.display/presented!.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
@@ -809,6 +843,7 @@
                             (filter (comp variation-actions val) button-bindings))]
               (valid! (and (not mpe?) (true? (:presentation-receipts? display)) (seq (:pads layout))
                            (every? ifn? ((juxt :input :project) pad-overlay))
+                           (or (nil? (:open-encoder pad-overlay)) (ifn? (:open-encoder pad-overlay)))
                            (some #(= :variation/cycle (val %)) buttons)
                            (not (some #(= (val %) (get-in options [::gesture :gesture-modifier])) buttons))
                            (every? (fn [[id _]]
