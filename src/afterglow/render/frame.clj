@@ -83,6 +83,24 @@
                                       (long (if fine (second fine) -1)) (double (or inverted-from -1.0))
                                       (boolean (function-range? attribute channel))))))
 
+(defn- emission-off-bytes [fixtures]
+  (into {}
+        (for [fixture fixtures
+              [attribute {:keys [coarse fine inverted-from] :as channel}] (:compiled-channels fixture)
+              ;; Positive inversion pivots still encode zero drive as raw zero.
+              :when (and (zero? (or inverted-from -1))
+                         (or (= :dimmer attribute) (contains? emitter-attributes attribute)))
+              :let [word (long (emission/packed-word channel 0.0 false))]
+              entry (if fine
+                      [[coarse (unsigned-bit-shift-right word 8)] [fine (bit-and word 255)]]
+                      [[coarse word]])]
+          entry)))
+
+(defn physical-off-bytes
+  "Sparse physical slot values to overlay on zero-filled idle DMX universes."
+  [{:keys [::idle-off-bytes fixtures fog-off-bytes]}]
+  (or idle-off-bytes (into (or fog-off-bytes {}) (emission-off-bytes fixtures))))
+
 (defn- validate-footprints! [fixtures slots]
   (when (some #(contains? % :footprint) fixtures)
     (doseq [fixture fixtures :when (contains? fixture :footprint)]
@@ -208,10 +226,12 @@
                                         ::fog-idle-level (atmosphere/physical-level
                                                            (get-in fixture [:compiled-channels :fog])
                                                            (first (get-in fixture [:fogger :dmx-range] [0 255]))))))
-                         compiled)]
+                         compiled)
+          fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)]
       {:type ::patch ::hdr-layout (delay (hdr/layout compiled attribute-slots))
        ::emission-layout (emission/compile-layout compiled universes ::emission-channels)
-       :fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)
+       :fog-off-bytes fog-off-bytes
+       ::idle-off-bytes (into fog-off-bytes (emission-off-bytes compiled))
        :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
        ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
        :target-order (mapv :id compiled) ::attribute-slots attribute-slots
@@ -442,11 +462,11 @@
                nil) nil off-bytes))
 
 (defn idle-universes
-  "New, exclusively owned shutdown buffers. Fog uses its physical off endpoint.
-  Every other byte starts at zero."
+  "New, exclusively owned shutdown buffers with physical emission and fog off
+  bytes. Other slots start at zero."
   [patch]
   (let [buffers (:universes (create-buffers patch))]
-    (write-off-bytes! buffers (:fog-off-bytes patch))
+    (write-off-bytes! buffers (physical-off-bytes patch))
     buffers))
 
 (defn- pack-scatter! [^objects buffers ^ChannelScatter channel ^double level]
