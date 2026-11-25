@@ -699,11 +699,13 @@
         index (push-view/cue-index model)
         instance (or (get-in model [:instances (:selected-instance controls)])
                      (when-not (get-in controls [:cue-gesture :selection]) (last (:active index))))
-        touch (some (fn [id]
-                      (when-let [k (get-in options [:encoder-bindings id :param])]
-                        (when (get-in instance [:definition :params k])
-                          {:instance-id (:id instance) :param k :component 0})))
-                    (sort-by str (:touches controls)))
+        touches (push-view/touched-parameters
+                  (keep (fn [id]
+                          (when-let [k (get-in options [:encoder-bindings id :param])]
+                            (when (get-in instance [:definition :params k])
+                              {:instance-id (:id instance) :param k :component 0})))
+                        (sort-by str (:touches controls))))
+        touch (first touches)
         selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
         projection (when-let [selection (:pad-overlay selected)]
                      (let [result ((:project pad-overlay) selection model (:pad-overlay-projection selected))]
@@ -717,7 +719,8 @@
         frame (when-let [generation (:pad-overlay-generation selected)]
                 {:generation generation :identity (select-keys model [:show-id :epoch])
                  :projection (:view projection) :display overlay-display})
-        view (cond-> (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
+        view (cond-> (assoc (push-view/view selected model index {:status :ready :touched-parameter touch
+                                                                 :touched-parameters touches})
                              :fine? (boolean (shift-held? options controls)))
                overlay-display (assoc :display-mode :parameters :pad-overlay overlay-display)
                frame (vary-meta assoc ::overlay-frame frame))
