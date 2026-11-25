@@ -375,17 +375,22 @@
 (def ^:private gesture-operations
   #{:gesture/begin :gesture/sample :gesture/end :gesture/cancel})
 
+(def edit-history-limit
+  "Maximum number of retained operator edit nodes, including the root."
+  128)
+
 (defn- edit-history-operation? [op]
   (or (gesture-operations op) (#{:history/undo :history/redo :history/select} op)))
 
 (defn- parameter-target [{:keys [instance-id param]}]
   [:instance-param instance-id param])
 
-(defn- history-cell [model history [_ id param :as target]]
+(defn- history-cell [model history [kind id param :as target]]
   (let [instance (get-in model [:instances id])
         schema (get-in instance [:definition :params param])
         value (get-in instance [:params param])]
-    (when (and (= :running (:phase instance))
+    (when (and (= :instance-param kind)
+               (= :running (:phase instance))
                (#{:number :integer} (:type schema))
                (params/valid-value? schema value))
       {:value value :generation (get-in history [:generations target] 0)})))
@@ -401,10 +406,26 @@
 
     history))
 
+(defn edit-history-snapshot
+  "Return the saved edit tree, with open gestures considered ended in target
+  order. Conflict and no-op handling match live end actions. Sampled values
+  are already canonical, so saving needs no writes, commands or receipts."
+  [model]
+  (when-let [history (get-in model [:control :edit-history])]
+    (dissoc
+      (reduce (fn [history [target gesture]]
+                (let [result (edit-history/apply-action
+                               history {target (history-cell model history target)}
+                               (assoc gesture :op :gesture/end :target target))]
+                  (retain-history-generations (:history result) :gesture/end target)))
+              history
+              (sort-by (comp pr-str key) (:open history)))
+      :open)))
+
 (defn- apply-history-operation [model {:keys [op instance-id param control-id gesture-id] :as command} operator-id]
   (let [gesture? (gesture-operations op)
         target (when gesture? (parameter-target command))
-        history (or (get-in model [:control :edit-history]) (edit-history/new-history 128))
+        history (or (get-in model [:control :edit-history]) (edit-history/new-history edit-history-limit))
         _ (when gesture?
             (require! (and (identifier? instance-id) (keyword? param)
                            (identifier? control-id) (identifier? gesture-id))
