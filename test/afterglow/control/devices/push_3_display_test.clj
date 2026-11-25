@@ -68,6 +68,34 @@
     (@callback)
     (is (= [:open 16 327680 16 327680 16 327680 :cancel :close] @calls))))
 
+(deftest receipts-are-only-for-frames-completing-both-writes
+  (let [refresh (atom nil) receipts (atom []) fail? (atom false)
+        writes (atom 0)
+        sink (display/sink {:backend {:open! (constantly :injected)
+                                      :close! (fn [_])
+                                      :write! (fn [_ ^bytes bytes]
+                                                (swap! writes inc)
+                                                (when (and @fail? (= screen/payload-length (alength bytes)))
+                                                  (throw (ex-info "Injected short transfer" {}))))}
+                            :schedule! #(do (reset! refresh %) (fn []))})
+        handle ((:open! sink))
+        image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)
+        render! (fn [frame] ((:render-with-receipt! sink) handle image
+                             #(swap! receipts conj [frame @writes])))]
+    (try
+      (render! :first)
+      (render! :dropped)
+      (render! :latest)
+      (is (= [[:first 2]] @receipts))
+      (@refresh)
+      (@refresh)
+      (is (= [[:first 2] [:latest 4]] @receipts))
+      (render! :failed)
+      (reset! fail? true)
+      (is (thrown? Exception (@refresh)))
+      (is (= [[:first 2] [:latest 4]] @receipts))
+      (finally ((:close! sink) handle)))))
+
 (deftest linux-libusb-ffi-replay
   (when (= "Linux" (System/getProperty "os.name"))
     (let [file (.toFile (Files/createTempFile "push3-recording-" ".so"
