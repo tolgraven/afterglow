@@ -1389,6 +1389,44 @@
         (is (= 0.5 (:level (values h first-id)))))
       (finally (finish! h)))))
 
+(deftest simultaneous-touches-project-every-parameter-in-encoder-order
+  (let [h (harness)
+        entry (fn [id param encoder] {:instance-id id :param param :encoder encoder :component 0})]
+    (try
+      (let [first-id (launch! h 37) second-id (launch! h 36)]
+        (is (= [] (:touched-parameters (view h))))
+        (receive! h [0x90 4 127])
+        (receive! h [0x90 1 127])
+        (testing "the legacy key keeps the most recent touch while the list is in encoder order"
+          (is (= (entry second-id :level 1) (:touched-parameter (view h))))
+          (is (= [(entry second-id :level 1) (entry second-id :color 4)] (:touched-parameters (view h)))))
+        (receive! h [0x90 2 127])
+        (is (= (entry second-id :count 2) (:touched-parameter (view h))))
+        (is (= [1 2 4] (mapv :encoder (:touched-parameters (view h)))))
+        (testing "a system encoder touch does not displace held parameter touches"
+          (receive! h [0x90 8 127])
+          (is (nil? (:touched-parameter (view h))))
+          (is (= [1 2 4] (mapv :encoder (:touched-parameters (view h)))))
+          (receive! h [0x80 8 0]))
+        (testing "releases remove only their own entries in any order"
+          (receive! h [0x80 2 0])
+          (is (= (entry second-id :level 1) (:touched-parameter (view h))))
+          (is (= [:level :color] (mapv :param (:touched-parameters (view h)))))
+          (receive! h [0x80 1 0])
+          (is (= (entry second-id :color 4) (:touched-parameter (view h))))
+          (is (= [(entry second-id :color 4)] (:touched-parameters (view h)))))
+        (receive! h [0x90 1 127])
+        (testing "an instance going away clears its entries"
+          (let [show @(:show h)]
+            (reset! (:show h) (:model (model/apply-command show {:command-id "external-remove-many"
+                                                                :show-id (:show-id show) :epoch (:epoch show)
+                                                                :time-ms 0 :source {:adapter :web}
+                                                                :op :instance/remove :instance-id second-id}))))
+          (is (= first-id (:instance-id (view h))))
+          (is (nil? (:touched-parameter (view h))))
+          (is (= [] (:touched-parameters (view h))))))
+      (finally (finish! h)))))
+
 (def pressure-schemas
   (-> schemas
       (update :level assoc :velocity true :velocity-min 0.2 :velocity-max 0.7)

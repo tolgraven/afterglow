@@ -829,3 +829,81 @@
       (with-redefs [transports/midi-transport (fn [_] (throw (ex-info "Unexpected port enumeration" {})))]
         (devices/close! (devices/open-push-3! config)))
       (is (= [:open :close] @opened)))))
+
+(defn- touch-display-harness [config model]
+  (let [show (atom model) receive (atom nil) views (atom [])
+        surface {:device :push-3 :input :view :open! (constantly :usb)
+                 :render! (fn [_ view] (swap! views conj view)) :close! (fn [_])}
+        device (push/connect!
+                 (merge options config
+                        {:display surface :session-id "push3-touches" :now-ms! (constantly 0)
+                         :model! #(deref show)
+                         :dispatch! (fn [command]
+                                      (let [ack (model/apply-command @show command)]
+                                        (reset! show (:model ack)) ack))
+                         :transport {:open! #(do (reset! receive %) :midi)
+                                     :send! (fn [_ _] (throw (ex-info "Unexpected MIDI output" {})))
+                                     :close! (fn [_])}}))]
+    {:show show :receive receive :views views :device device}))
+
+(deftest simultaneous-touches-project-every-bound-parameter-in-stable-order
+  (let [config {:layout (-> layout
+                            (assoc-in [:encoders :count] {:channel 2 :controller 21})
+                            (assoc-in [:encoder-touches :count] {:channel 2 :note 10}))
+                :encoder-bindings (assoc (:encoder-bindings options) :count {:param :count})}
+        {:keys [show receive views device]} (touch-display-harness config (initial-model))
+        view #(last @views)]
+    (try
+      (@receive [0x93 12 100])
+      (let [id (:instance-id (view))
+            entry (fn [param] {:instance-id id :param param :component 0})]
+        (is (= [] (:touched-parameters (view))))
+        (@receive [0x92 9 127])
+        (@receive [0x92 10 127])
+        (testing "both touches are reported and the legacy key keeps the first in sorted order"
+          (is (= [(entry :count) (entry :level)] (:touched-parameters (view))))
+          (is (= (entry :count) (:touched-parameter (view))))
+          (is (not-any? :encoder (:touched-parameters (view))) "Push 3 bindings name parameters, not bank slots"))
+        (testing "touch order does not change the projected order"
+          (@receive [0x82 9 0])
+          (@receive [0x82 10 0])
+          (@receive [0x92 10 127])
+          (@receive [0x92 9 127])
+          (is (= [(entry :count) (entry :level)] (:touched-parameters (view)))))
+        (testing "releases remove their own entries"
+          (@receive [0x82 10 0])
+          (is (= [(entry :level)] (:touched-parameters (view))))
+          (is (= (entry :level) (:touched-parameter (view)))))
+        (testing "an instance going away clears its entries"
+          (@receive [0x92 10 127])
+          (@receive [0x83 12 0])
+          (swap! show #(:model (model/apply-command % {:command-id "remove-touched" :show-id (:show-id %)
+                                                       :epoch (:epoch %) :time-ms 0 :source {:adapter :web}
+                                                       :op :instance/remove :instance-id id})))
+          (session/refresh! device)
+          (is (empty? (:instances @show)))
+          (is (nil? (:touched-parameter (view))))
+          (is (= [] (:touched-parameters (view))))))
+      (finally (session/close! device)))))
+
+(deftest simultaneous-touches-are-capped-at-eight
+  (let [params (mapv #(keyword (str "p" %)) (range 10))
+        model (-> (initial-model)
+                  (assoc-in [:registry :effects :wash :params]
+                            (into {} (map (fn [k] [k {:type :number :default 0.5 :bounds [0 1]}])) params)))
+        config {:layout (reduce (fn [l [i k]]
+                                  (-> l (assoc-in [:encoders k] {:channel 2 :controller (+ 30 i)})
+                                      (assoc-in [:encoder-touches k] {:channel 2 :note (+ 30 i)})))
+                                (assoc layout :encoders {} :encoder-touches {})
+                                (map-indexed vector params))
+                :encoder-bindings (into {} (map (fn [k] [k {:param k}])) params)
+                :pressure-param :p0 :touch-strip-param :p1}
+        {:keys [receive views device]} (touch-display-harness config model)]
+    (try
+      (@receive [0x93 12 100])
+      (doseq [i (reverse (range 10))] (@receive [0x92 (+ 30 i) 127]))
+      (is (= (subvec params 0 8) (mapv :param (:touched-parameters (last @views)))))
+      (is (= :p0 (get-in (last @views) [:touched-parameter :param])))
+      (@receive [0x82 30 0])
+      (is (= (subvec params 1 9) (mapv :param (:touched-parameters (last @views)))))
+      (finally (session/close! device)))))

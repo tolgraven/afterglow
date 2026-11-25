@@ -32,9 +32,22 @@
       :component-label (nth (parameter-edit/components schema) component)
       :preview-samples (:preview-samples schema)}))
 
+(def touched-parameter-limit
+  "Most simultaneous encoder touches a Push view reports."
+  8)
+
+(defn touched-parameters
+  "Cap simultaneously touched parameter entries in the caller's stable order.
+  Each entry keeps `:instance-id`, `:param`, `:component` and, where the profile
+  maps the touch to a bank slot, `:encoder`. Repeated entries are reported once."
+  [entries]
+  (into [] (comp (remove nil?) (distinct) (take touched-parameter-limit)) entries))
+
 (defn view
-  "Build the common Push screen from selected control state and the shared cue index."
-  [state model {:keys [active by-cue]} {:keys [status touched-parameter touched-control]}]
+  "Build the common Push screen from selected control state and the shared cue index.
+  `:touched-parameter` keeps the single legacy touch; `:touched-parameters` reports
+  every simultaneous parameter touch, capped and in the profile's stable order."
+  [state model {:keys [active by-cue]} {:keys [status touched-parameter touched-control] :as options}]
   (let [instance (get-in model [:instances (:selected-instance state)])
         bank (parameter-bank state instance)
         active-index (or (first (keep-indexed #(when (= (:id instance) (:id %2)) %1) active)) 0)
@@ -57,6 +70,9 @@
       :instance-id (:id instance) :definition-version (:effect-version instance)
       :parameter-bank (dissoc bank :ids)
       :touched-parameter touched-parameter
+      :touched-parameters (touched-parameters (if (contains? options :touched-parameters)
+                                                (:touched-parameters options)
+                                                [touched-parameter]))
       :touched-control touched-control
       :fine? (boolean (:shift? state))
       :preset {:saved? (contains? cue :saved-params)

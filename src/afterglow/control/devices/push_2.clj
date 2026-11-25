@@ -70,10 +70,21 @@
       {:instance-id (:id instance) :param id :encoder encoder-index
        :component (get-in state [:components [(:id instance) id]] 0)})))
 
+(defn- live-parameter-touch? [state model touch]
+  (and touch (= (:selected-instance state) (:instance-id touch))
+       (get-in model [:instances (:instance-id touch) :definition :params (:param touch)])))
+
 (defn- touched [state model]
   (let [touch (get (:touches state) (peek (:touch-order state)))]
-    (when (and touch (= (:selected-instance state) (:instance-id touch))
-               (get-in model [:instances (:instance-id touch) :definition :params (:param touch)])) touch)))
+    (when (live-parameter-touch? state model touch) touch)))
+
+(defn- all-touched
+  "Every held parameter touch on the selected live instance, by encoder slot."
+  [state model]
+  (->> (vals (:touches state))
+       (filter #(live-parameter-touch? state model %))
+       (sort-by :encoder)
+       push-view/touched-parameters))
 
 (defn- system-touch [state]
   (:target (get (:touches state) (peek (:touch-order state)))))
@@ -405,6 +416,7 @@
     (push-view/view state model index
                     {:status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
                      :touched-parameter (touched state model)
+                     :touched-parameters (all-touched state model)
                      :touched-control (when target
                                         {:target target :editable? (or (= :master target) (manual-clock? model))})})))
 
