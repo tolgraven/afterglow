@@ -68,9 +68,10 @@
       (get-in history [:open target]) (rejected history :gesture-active target)
       (>= (count (:open history)) open-limit) (rejected history :too-many-gestures target)
       :else (accepted (assoc-in history [:open target]
-                                {:actor actor :control-id control-id :gesture-id gesture-id
-                                 :before (:value cell) :after (:value cell)
-                                 :generation (:generation cell) :last-sequence 0}) {}))))
+                                (cond-> {:actor actor :control-id control-id :gesture-id gesture-id
+                                         :before (:value cell) :after (:value cell)
+                                         :generation (:generation cell) :last-sequence 0}
+                                  (true? (:temporary? action)) (assoc :temporary? true))) {}))))
 
 (defn- gesture-action
   [history targets {:keys [op target value sequence last-sequence target-display] :as action}]
@@ -89,6 +90,9 @@
         (not (finite-number? value)) (rejected history :invalid-value target)
         :else (accepted (update-in history [:open target] assoc :after value :last-sequence sequence)
                         (if (= after value) {} {target value})))
+
+      (and (= :gesture/end op) (:temporary? gesture))
+      (rejected history :temporary-gesture target)
 
       (and (= :gesture/end op) (not= last-sequence (:last-sequence gesture)))
       (rejected history :stale-gesture-end target)

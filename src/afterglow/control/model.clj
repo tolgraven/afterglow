@@ -536,18 +536,18 @@
     history))
 
 (defn edit-history-snapshot
-  "Return the saved edit tree, with open gestures considered ended in target
-  order. Conflict and no-op handling match live end actions. Sampled values
-  are already canonical, so saving needs no writes, commands or receipts."
+  "Return the saved edit tree. Close ordinary gestures as edits and omit
+  temporary gestures. Conflict and no-op handling match live operations."
   [model]
   (when-let [history (get-in model [:control :edit-history])]
     (dissoc
       (reduce (fn [history [target gesture]]
-                (let [result (edit-history/apply-action
+                (let [op (if (:temporary? gesture) :gesture/cancel :gesture/end)
+                      result (edit-history/apply-action
                                history {target (history-cell model history target)}
-                               (assoc gesture :op :gesture/end :target target
+                               (assoc gesture :op op :target target
                                       :target-display (edit-target-display model target)))]
-                  (retain-history-generations (:history result) :gesture/end target)))
+                  (retain-history-generations (:history result) op target)))
               history
               (sort-by (comp pr-str key) (:open history)))
       :open)))
@@ -579,6 +579,20 @@
         (assoc :result (assoc (select-keys proposal [:discarded])
                              :history-cursor (:cursor next-history)
                              :history-position (edit-history/position next-history))))))
+
+(defn settle-temporary-gestures-for-save
+  "Project a save with temporary edits canceled under their captured owners.
+  Return the settled gestures so hosts can release corresponding runtime holds.
+  The live model, receipts and revision remain untouched."
+  [model]
+  (reduce-kv (fn [{:keys [model] :as projection} [_ id param :as target] {:keys [actor temporary?] :as gesture}]
+               (if temporary?
+                 (let [cancel (assoc gesture :op :gesture/cancel :instance-id id :param param)
+                       result (apply-history-operation model cancel actor)]
+                   (-> projection (assoc :model (:model result)) (assoc-in [:settled target] gesture)))
+                 projection))
+             {:model model :settled {}}
+             (get-in model [:control :edit-history :open] {})))
 
 (defn- track-external-write [model {:keys [op instance-id param] :as command} result]
   (if (and (= :param/set op) (get-in model [:control :edit-history :generations]))

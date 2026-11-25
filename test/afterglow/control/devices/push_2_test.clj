@@ -223,8 +223,8 @@
         (is (identical? replacement @show)))
       (finally (finish! h)))))
 
-(defn- pending-sample-harness []
-  (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+(defn- pending-sample-harness [& [profile-options]]
+  (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile (assoc profile-options :operator-gestures? true))}
                                                      push-operator)
         apply! (:dispatch! options)
         after-model-read (atom nil)
@@ -291,16 +291,20 @@
 (deftest encoder-commands-cannot-cross-an-epoch-between-input-and-dispatch
   (doseq [[op event] [[:gesture/begin [0x90 0 127]]
                       [:gesture/sample [0xb0 71 1]]
-                      [:gesture/end [0x80 0 0]]]]
+                      [:gesture/end [0x80 0 0]]
+                      [:gesture/cancel [0x80 0 0]]]]
     (testing (str op)
-      (let [{:keys [session show after-model-read complete-sample] :as h} (pending-sample-harness)]
+      (let [{:keys [session show after-model-read complete-sample] :as h}
+            (pending-sample-harness (when (= :gesture/cancel op) {:temporary-encoder-modifier :shift}))]
         (try
           (let [id (launch! h 37)
                 ;; A trusted host may initialize a new epoch with captured instances.
                 replacement (model/new-show (update @show :epoch inc))]
+            (when (= :gesture/cancel op)
+              (receive! h [0xb0 49 127]))
             (when (not= :gesture/begin op)
               (receive! h [0x90 0 127]))
-            (when (= :gesture/end op)
+            (when (#{:gesture/end :gesture/cancel} op)
               (receive! h [0xb0 71 1])
               (@complete-sample)
               (session/refresh! session))
@@ -671,6 +675,97 @@
                  (select-keys (get-in history [:nodes (:cursor history)]) [:target :before :after])))
           (is (empty? (:open history)))))
       (finally (finish! h)))))
+
+(deftest mapped-modifier-captures-mode-per-encoder-and-preserves-shift-precision
+  (let [{:keys [show] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true
+                                                                       :temporary-encoder-modifier 41})}
+                                              push-operator)]
+    (swap! show assoc-in [:registry :effects :wash :params :speed] {:type :number :default 0.25 :bounds [0 1]})
+    (fixture/ready! h)
+    (try
+      (let [id (launch! h 37)
+            history #(get-in @show [:control :edit-history])]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 41 127])
+        (receive! h [0x90 1 127])
+        (receive! h [0xb0 72 1])
+        (is (= 0.26 (:speed (values h id))))
+        (receive! h [0xb0 41 0])
+        (receive! h [0xb0 72 1])
+        (is (= 0.27 (:speed (values h id))))
+        (receive! h [0xb0 49 127])
+        (receive! h [0xb0 71 10])
+        (is (= 0.51 (:level (values h id))))
+        (receive! h [0x80 1 0])
+        (is (= {:level 0.51 :speed 0.25} (values h id)))
+        (is (= #{[:instance-param id :level]} (set (keys (:open (history))))))
+        (is (= [0 0] ((juxt :cursor :position) (history))))
+        (receive! h [0x80 0 0])
+        (is (= [1 1] ((juxt :cursor :position) (history))))
+        (is (= {:level 0.51 :speed 0.25} (values h id)))
+        (is (empty? (:open (history))))
+        (let [commands (rest (admitted-commands h))
+              [ordinary temporary & _] commands]
+          (is (nil? (:temporary? ordinary)))
+          (is (true? (:temporary? temporary)))
+          (is (= [:gesture/cancel :gesture/end] (mapv :op (take-last 2 commands))))
+          (is (= [(:gesture-id temporary) (:gesture-id ordinary)]
+                 (mapv :gesture-id (take-last 2 commands))))))
+      (finally (finish! h)))))
+
+(deftest an-unadmitted-temporary-touch-blocks-detents-and-release-tail
+  (let [h (fixture/ready! (fixture/harness {:profile (push/profile {:operator-gestures? true
+                                                                    :temporary-encoder-modifier :shift})}))]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0xb0 49 127])
+        (receive! h [0x90 0 127])
+        (is (= :operator-required (get-in (session/snapshot (:session h)) [:last-ack :code])))
+        (receive! h [0xb0 71 10])
+        (receive! h [0xb0 49 0])
+        (receive! h [0xb0 71 10])
+        (receive! h [0x80 0 0])
+        (receive! h [0xb0 71 10])
+        (is (= 0.5 (:level (values h id))))
+        (is (= [:cue/launch :gesture/begin] (mapv :op (admitted-commands h))))
+        (reset! (:now h) 250)
+        (receive! h [0xb0 71 1])
+        (is (= 0.51 (:level (values h id))))
+        (is (= :param/set (:op (peek (admitted-commands h))))))
+      (finally (finish! h)))))
+
+(deftest temporary-touch-on-an-unsupported-or-empty-slot-cannot-become-an-edit
+  (doseq [slot [:unsupported :empty]]
+    (testing (name slot)
+      (let [{:keys [show now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true
+                                                                             :temporary-encoder-modifier :shift})}
+                                                    push-operator)]
+        (swap! show update-in [:registry :effects :wash] assoc :params schemas :param-order order)
+        (fixture/ready! h)
+        (try
+          (when (= :unsupported slot) (launch! h 37))
+          (receive! h [0xb0 49 127])
+          (receive! h [0x90 0 127])
+          (receive! h [0xb0 49 0])
+          (let [id (if (= :empty slot) (launch! h 37) (:selected-instance (local h)))]
+            (receive! h [0xb0 71 5])
+            (receive! h [0xe0 127 127])
+            (is (false? (:enabled (values h id))))
+            (receive! h [0xb0 49 127])
+            (receive! h [0xb0 63 127])
+            (receive! h [0xb0 49 0])
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 5])
+            (receive! h [0xe0 127 127])
+            (receive! h [0x80 0 0])
+            (receive! h [0xb0 71 5])
+            (is (= 0 (:ninth (values h id))))
+            (is (= [:cue/launch] (mapv :op (admitted-commands h))))
+            (reset! now 250)
+            (receive! h [0xb0 71 5])
+            (is (= 0.05 (:ninth (values h id))))
+            (is (= :param/set (:op (peek (admitted-commands h))))))
+          (finally (finish! h)))))))
 
 (deftest touch-strip-keeps-ordinary-editing-for-a-different-target
   (let [h (gesture-harness push-operator nil)]
