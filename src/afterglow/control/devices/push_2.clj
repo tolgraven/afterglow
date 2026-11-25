@@ -92,7 +92,7 @@
                    [(if tempo? {:op :transport/set :transport {:bpm next-value}}
                         {:op :master/set :value next-value})])}))
 
-(defn- edit-parameter [state model selection value mode]
+(defn- edit-parameter [parameter-editor state model selection value mode]
   (let [{:keys [instance-id param component]} selection
         instance (get-in model [:instances instance-id])
         schema (get-in instance [:definition :params param])
@@ -100,8 +100,9 @@
     (if (and schema (or (= mode :absolute) (not (zero? value))))
       (let [[cache bits] (when (and (:shift? state) (= mode :relative))
                            (parameter-edit/patch-step (:shift-patch state) model instance param))
-            next-value (parameter-edit/edit schema current value
-                                            {:mode mode :component component :fine? (:shift? state) :dmx-bits bits})]
+            options {:mode mode :component component :fine? (:shift? state) :dmx-bits bits}
+            edit (when parameter-editor (parameter-editor model instance param value options))
+            next-value (if edit (:value edit) (parameter-edit/edit schema current value options))]
         {:state (cond-> state cache (assoc :shift-patch cache)) :commands (if (= current next-value) []
                                     [{:op :param/set :instance-id instance-id :param param :value next-value}])})
       {:state state})))
@@ -274,24 +275,24 @@
                  (mapv (fn [[param value]] {:op :param/set :instance-id id :param param :value value})
                        (parameter-edit/velocity-values (:definition instance) (:value event))) [])}))
 
-(defn- edit-encoder-gesture [state model {:keys [instance-id param component temporary?] :as gesture} value mode]
+(defn- edit-encoder-gesture [parameter-editor state model {:keys [instance-id param component temporary?] :as gesture} value mode]
   (let [selection (cond-> gesture
                     temporary? (assoc :component (get-in state [:components [instance-id param]] component)))]
-    (encoder-gesture/edit state gesture #(edit-parameter state model selection value mode))))
+    (encoder-gesture/edit state gesture #(edit-parameter parameter-editor state model selection value mode))))
 
-(defn- encoder [state event model envelope]
+(defn- encoder [parameter-editor state event model envelope]
   (let [note (- (:controller event) 71)
         control-id (encoder-control-id note)
         gesture (encoder-gesture/active state control-id)
         delta (codec/signed-encoder (:raw-value event))]
     (cond
-      gesture (edit-encoder-gesture state model gesture delta :relative)
+      gesture (edit-encoder-gesture parameter-editor state model gesture delta :relative)
       (= :temporary (get-in state [:encoder-touch-modes note])) {:state state}
       (contains? (:temporary-release-tails state) note) {:state state}
       (encoder-gesture/after-release? state control-id (:time-ms envelope)) {:state state}
-      :else (edit-parameter state model (parameter-at state model note) delta :relative))))
+      :else (edit-parameter parameter-editor state model (parameter-at state model note) delta :relative))))
 
-(defn- edit-touch-strip [state model value]
+(defn- edit-touch-strip [parameter-editor state model value]
   (if-let [target (system-touch state)]
     (edit-system state model target value :absolute)
     (let [{:keys [encoder] :as selection} (touched state model)
@@ -299,9 +300,9 @@
       (cond
         (and gesture (= (select-keys selection [:instance-id :param])
                         (select-keys gesture [:instance-id :param])))
-        (edit-encoder-gesture state model gesture value :absolute)
+        (edit-encoder-gesture parameter-editor state model gesture value :absolute)
         (= :temporary (get-in state [:encoder-touch-modes encoder])) {:state state}
-        :else (edit-parameter state model selection value :absolute)))))
+        :else (edit-parameter parameter-editor state model selection value :absolute)))))
 
 (defn- display-action [state model cc]
   (let [shift? (:shift? state)
@@ -332,7 +333,7 @@
         {:state (-> state (update :display-buttons (fnil conj #{}) controller)
                     (display/apply-action model action))}))))
 
-(defn- input [device-id grid operator-gestures? modifier-key state event model envelope]
+(defn- input [device-id grid operator-gestures? modifier-key parameter-editor state event model envelope]
   (let [state (selected-state state model)
         display-input (display-button state model event)]
    (cond
@@ -363,7 +364,7 @@
     (and (= :note-off (:type event)) (<= 0 (:note event) 9))
     (release-encoder state (:note event) envelope)
     (= :pitch-bend (:type event))
-    (edit-touch-strip state model (:value event))
+    (edit-touch-strip parameter-editor state model (:value event))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (#{62 63} (:controller event)))
     (page-control state model (if (= 62 (:controller event)) -1 1))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (<= 20 (:controller event) 27))
@@ -374,7 +375,7 @@
     (= :note-off (:type event)) (release-pad state (:note event) envelope)
     (= :poly-pressure (:type event)) (pressure-pad state event model)
     (and (= :control-change (:type event)) (<= 71 (:controller event) 78))
-    (encoder state event model envelope)
+    (encoder parameter-editor state event model envelope)
     (and (= :control-change (:type event)) (= 79 (:controller event)))
     (edit-system state model :master (codec/signed-encoder (:raw-value event)) :relative)
     (and (= :control-change (:type event)) (= 15 (:controller event)))
@@ -492,7 +493,37 @@
                                         (dissoc :grid-selection)))
                  :commands commands}))))))))
 
-(defn- feedback [device-id timeout-ms batch-size state model envelope]
+(defn- pad-overlay-input [overlay state event model]
+  (when (and overlay (:ready? state))
+    (let [{:keys [type note controller]} event
+          xy (when note (codec/pad-coordinates note))
+          owned? (contains? (:pad-overlay-pressed state) note)
+          other-owned? (or (contains? (:pressed-pads state) note) (contains? (:picker-pads state) note)
+                           (contains? (get-in state [:active-grid :pressed]) note))
+          other-mode? (or (:target-picker state) (get-in state [:active-grid :mode])
+                          (get-in state [:active-grid :clearing?]))
+          overlay-state (:pad-overlay state)
+          clearing? (:pad-overlay-clearing? state)]
+      (cond
+        owned? {:state (cond-> state (= :note-off type) (update :pad-overlay-pressed disj note))}
+        (or other-owned? other-mode?) nil
+        (and (or overlay-state clearing?) (= :control-change type)
+             (or (active-grid-buttons controller) (= 111 controller))) {:state state}
+        :else
+        (let [press? (and xy (= :note-on type) (or overlay-state clearing?))
+              change (when-not (and press? (nil? (:pad-overlay-presented state)))
+                       ((:input overlay) overlay-state event model
+                        {:position xy :presented (:pad-overlay-presented state)
+                         :selected-instance (:selected-instance state) :record? (:record? state)}))]
+          (when (or press? change)
+            (let [next-overlay (:state change overlay-state)]
+              {:state (cond-> (assoc state :pad-overlay next-overlay)
+                        press? (update :pad-overlay-pressed (fnil conj #{}) note)
+                        (not= overlay-state next-overlay) (dissoc :pad-overlay-presented)
+                        (and overlay-state (nil? next-overlay)) (assoc :pad-overlay-clearing? true))
+               :commands (:commands change)})))))))
+
+(defn- feedback [device-id timeout-ms batch-size pad-overlay state model envelope]
   (let [time (:time-ms envelope)
         state (encoder-gesture/observe-temporary-tails (selected-state state model) time)
         alive (set (keys (:instances model)))
@@ -511,20 +542,31 @@
                 :else state)
         index (push-view/cue-index model)
         grid (active-grid/project (:active-grid state) model)
+        overlay (when-let [overlay-state (:pad-overlay state)]
+                  ((:project pad-overlay) overlay-state model (:pad-overlay-projection state)))
+        state (cond-> state
+                overlay (assoc :pad-overlay-projection overlay)
+                (and (:pad-overlay state) (nil? overlay))
+                (-> (dissoc :pad-overlay :pad-overlay-projection :pad-overlay-presented)
+                    (assoc :pad-overlay-clearing? true)))
         display (cond-> (indexed-display state model index)
-                  grid (assoc :active-cue-grid (:view grid)))
+                  grid (assoc :active-cue-grid (:view grid))
+                  overlay (assoc :pad-overlay (:display overlay (:view overlay)))
+                  (get-in overlay [:display :title]) (assoc :title (get-in overlay [:display :title])))
         display-changed? (not= display (:last-display state))
         state (assoc state :last-display display)
         strip (strip-feedback state model)
         strip-messages (when (and (:ready? state) (nil? (:fault state)))
                          (codec/touch-strip-messages device-id (:last-touch-strip state) strip))
         state (if (some? strip-messages) (assoc state :last-touch-strip strip) state)
-        desired (if grid
-                  (into {} (for [y (range 8) x (range 8)]
+        desired (cond
+                  overlay (into {} (for [y (range 8) x (range 8)]
+                                     [[x y] (get (:colors overlay) [x y] [0 0 0])]))
+                  grid (into {} (for [y (range 8) x (range 8)]
                              [[x y] (if-let [cell (get-in grid [:view :cells (+ x (* 8 y))])]
                                       (rgb (assoc cell :active? true))
                                       [0 0 0])]))
-                  (into {} (for [y (range 8) x (range 8)]
+                  :else (into {} (for [y (range 8) x (range 8)]
                              (let [cue (cue-at state model (codec/pad-note x y))]
                                [[x y] (if-let [{:keys [offset rows]} (:target-picker state)]
                                         (if (zero? y)
@@ -540,6 +582,10 @@
         settled? (and (:ready? state) (nil? (:fault state)) (not (:awaiting-led-ack? state))
                       (= desired (:last-leds state)))
         state (cond-> state
+                (and overlay settled?) (assoc :pad-overlay-presented (:view overlay))
+                (and overlay (not settled?)) (dissoc :pad-overlay-presented)
+                (and (nil? overlay) settled?)
+                (dissoc :pad-overlay-clearing? :pad-overlay-projection :pad-overlay-presented)
                 (and grid settled?) (update :active-grid #(-> (active-grid/capture % grid) (dissoc :clearing?)))
                 (and (nil? grid) settled? (get-in state [:active-grid :clearing?]))
                 (update :active-grid dissoc :clearing?))
@@ -568,7 +614,9 @@
 (defn- stop [device-id state _model envelope disconnected?]
   {:state (cond-> (assoc (dissoc (targets/clear-selection state) :grid-selection :grid-presses
                                 :encoder-gestures :encoder-releases :encoder-touch-modes
-                                :temporary-release-tails :temporary-release-time-ms)
+                                :temporary-release-tails :temporary-release-time-ms
+                                :pad-overlay :pad-overlay-pressed :pad-overlay-clearing?
+                                :pad-overlay-projection :pad-overlay-presented)
                  :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                  :last-touch-strip nil :display-buttons #{}
                  :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
@@ -617,11 +665,22 @@
   The host must settle pending ends and cancels after prior samples. Detents
   without touch use ordinary control after a short release tail.
   :active-cue-grid? enables Select and Duplicate to open separate active
-  instance modes, with Page Left/Right for pagination."
+  instance modes, with Page Left/Right for pagination.
+  Optional :pad-overlay is a host projection and input pair. :project takes
+  local overlay state, the model and its prior projection; return :colors by
+  pad coordinate and a :view, or nil to dismiss. :input takes local overlay
+  state, decoded event, committed model and context with :selected-instance,
+  :record?, :position and the LED-acknowledged :presented view. Return a new
+  overlay :state and optional :commands, or nil to leave the event to Push.
+  Optional :parameter-editor takes model, instance, parameter, input and edit
+  options. Return {:value v} to use a host-specific exact representation through
+  the normal parameter and gesture dispatch, or nil to use Afterglow typed editing."
   [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt
-           operator-gestures? temporary-encoder-modifier active-cue-grid?]
+           operator-gestures? temporary-encoder-modifier active-cue-grid? pad-overlay parameter-editor]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
+  (when (and pad-overlay (not (every? ifn? ((juxt :input :project) pad-overlay))))
+    (throw (ex-info "Pad overlay requires input and projection functions" {})))
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
@@ -659,10 +718,13 @@
                     control (when (and (:ready? state) (= :control-change (:type event))) (:controller event))
                     down? (and control (pos? (:raw-value event)))
                     cc (when down? control)
+                    modifier-input? (and control (= modifier control))
+                    overlay-input (when (and pad-overlay (not modifier-input?))
+                                    (pad-overlay-input pad-overlay (selected-state state model) event model))
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
                 (cond
-                  (and control (= modifier control))
-                  {:state (assoc state modifier-key down?)}
+                  modifier-input? {:state (assoc state modifier-key down?)}
+                  overlay-input overlay-input
                   (and target-search (= 111 cc))
                   {:state (targets/toggle (cond-> state (:active-grid state) (set-active-grid-mode nil))
                                           target-search model)}
@@ -674,13 +736,15 @@
                             (if (and (:target-picker state) x)
                               {:state (targets/pad state (:note event) [x y])}
                               (targets/launch state (input device-id grid (true? operator-gestures?)
-                                                           modifier-key state event model envelope)))))))
-     :feedback (partial feedback device-id timeout-ms led-batch-size)
+                                                           modifier-key parameter-editor state event model envelope)))))))
+     :feedback (partial feedback device-id timeout-ms led-batch-size pad-overlay)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
      :reset-model (fn [state]
                     (reset-active-grid
-                      (cond-> (assoc (dissoc (encoder-gesture/reset-ownership (targets/clear-selection state)) :grid-selection :grid-presses)
+                      (cond-> (assoc (dissoc (encoder-gesture/reset-ownership (targets/clear-selection state))
+                                             :grid-selection :grid-presses :pad-overlay :pad-overlay-pressed
+                                             :pad-overlay-clearing? :pad-overlay-projection :pad-overlay-presented)
                                      :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                                      :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                                      :temporary-encoder-modifier-down? false :pressed-pads #{} :pad-instances {})
