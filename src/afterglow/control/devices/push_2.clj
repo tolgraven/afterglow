@@ -112,7 +112,7 @@
   (assoc (select-keys gesture [:control-id :gesture-id :instance-id :param]) :op op))
 
 (defn- end-encoder-gesture [{:keys [status last-sequence] :as gesture}]
-  (when (= :accepted status)
+  (when (#{:pending :accepted} status)
     (assoc (gesture-command gesture :gesture/end) :last-sequence last-sequence)))
 
 (defn- touch-encoder [state model note envelope operator-gestures?]
@@ -258,7 +258,7 @@
         released-at (get-in state [:encoder-releases control-id])
         delta (codec/signed-encoder (:raw-value event))]
     (cond
-      (= :accepted (:status gesture))
+      (and (= :accepted (:status gesture)) (nil? (:pending gesture)))
       (let [result (edit-parameter state model gesture delta :relative)]
         (if-let [write (first (:commands result))]
           (assoc result :commands [(assoc (gesture-command gesture :gesture/sample)
@@ -472,14 +472,32 @@
                    (map (fn [[index rgbw]] (codec/palette-write device-id index rgbw)))
                    (sort-by key (:palettes state))))})
 
-(defn- acknowledge-encoder [state {:keys [op control-id gesture-id sequence]} {:keys [status code]}]
+(defn- acknowledge-encoder [state {:keys [op control-id gesture-id sequence] :as command}
+                            {:keys [status code completion]}]
   (let [path [:encoder-gestures control-id]]
     (if (= gesture-id (get-in state (conj path :gesture-id)))
-      (case op
-        :gesture/begin (assoc-in state (conj path :status) (if (= :operator-required code) :pass-through status))
-        :gesture/sample (if (= :accepted status) (assoc-in state (conj path :last-sequence) sequence) state)
-        state)
+      (update-in state path
+                 (fn [gesture]
+                   (cond-> gesture
+                     (= :pending status) (assoc :pending [command completion])
+                     (not= :pending status) (dissoc :pending)
+                     (= :gesture/begin op) (assoc :status (if (= :operator-required code) :pass-through status))
+                     (and (= :gesture/sample op) (= :accepted status)) (assoc :last-sequence sequence))))
       state)))
+
+(defn- with-encoder-gestures [profile]
+  (let [reconcile (:reconcile profile)]
+    (assoc profile
+           :operator-gestures? true
+           :reconcile (fn [state model]
+                        (let [resolved (reduce (fn [state {:keys [pending]}]
+                                                 (let [[command completion] pending]
+                                                   (if (and completion (realized? completion))
+                                                     (acknowledge-encoder state command @completion)
+                                                     state)))
+                                               state (vals (:encoder-gestures state)))]
+                          (or (when reconcile (reconcile resolved model))
+                              (when-not (identical? resolved state) {:state resolved})))))))
 
 (defn profile
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
@@ -487,7 +505,9 @@
   Missing responses are reported on refresh!, never guessed. :launch-grid
   optionally routes pad launches to a musical grid owned by the host. Set
   :operator-gestures? true with a trusted host dispatcher to group touched scalar
-  encoders. Detents without touch use ordinary control after a short release tail."
+  encoders. The host must close pending gestures in ingress order using the
+  accepted sample sequence. Detents without touch use ordinary control after a
+  short release tail."
   [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt operator-gestures?]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
@@ -504,7 +524,8 @@
                          :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
                          :pressed-pads #{} :pad-instances {}}
                   display-capabilities (assoc :display-capabilities display-capabilities))]
-    (launch/with-grid
+    (cond->
+     (launch/with-grid
      {:id :push-2 :capabilities capabilities :initial-state initial
      :decode (partial decode device-id)
      :start (fn [state _model envelope]
@@ -546,7 +567,8 @@
                                (or (not gridded?) (= token (get-in state [:grid-presses note]))))
                           (assoc-in [:pad-instances note] (:instance-id ack)))
                  :commands (:commands hold)})))}
-     grid launch-receipt)))
+      grid launch-receipt)
+      (true? operator-gestures?) with-encoder-gestures)))
 
 (defn connect!
   "REPL facade: options are session options plus :device-id/:page-id. Supply MIDI

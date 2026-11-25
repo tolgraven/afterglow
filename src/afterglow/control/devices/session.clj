@@ -8,8 +8,9 @@
 (defn create
   "Create an inert session. Required options: :session-id, :profile, :model!
   (snapshot fn), :dispatch! (command -> result/ack synchronously), :now-ms!.
-  A grid cue launch/release may return a queue receipt. Profiles can reconcile
-  those receipts against the committed model before input and feedback.
+  Grid cue launch/release and opted-in operator gestures may return queue
+  receipts. A pending gesture carries its final :completion promise. Profiles
+  reconcile receipts before input and feedback.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
@@ -76,11 +77,15 @@
               command (cond-> (merge template envelope)
                         (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
               response (if stale? {:status :rejected :reason :stale-epoch} (dispatch! command))
-              ack (or (:ack response) response)]
+              ack (or (:ack response) response)
+              pending-gesture? (and (:operator-gestures? profile) (= :pending (:status ack))
+                                    (#{:gesture/begin :gesture/sample :gesture/end} (:op command))
+                                    (instance? clojure.lang.IPending (:completion ack)))]
           (when-not (or (#{:accepted :rejected} (:status ack))
-                        (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack))))
+                        (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack)))
+                        pending-gesture?)
             (throw (ex-info "dispatch! must return a synchronous command acknowledgement" {})))
-          (update-state! session assoc :last-ack ack)
+          (update-state! session assoc :last-ack (cond-> ack pending-gesture? (dissoc :completion)))
           (let [result (when-let [acknowledge (:ack profile)]
                          (acknowledge (:local @(:state session)) command ack))]
             (when result (update-state! session assoc :local (:state result)))
