@@ -32,8 +32,30 @@
       :component-label (nth (parameter-edit/components schema) component)
       :preview-samples (:preview-samples schema)}))
 
+(defn- mixer-slot [model {:keys [id cue-id effect-id definition phase system] :as instance}]
+  (let [cue (get-in model [:registry :cues cue-id])
+        cue-view (views/pad-view model cue-id {cue-id [instance]})]
+    {:id id :cue-id cue-id :effect-id effect-id
+     :name (or (:name cue) (:name definition) (:name cue-view) (some-> (or cue-id effect-id) name) id)
+     :color (:color cue-view) :phase phase
+     :opacity (:opacity system 1.0) :paused? (boolean (:paused? system))}))
+
+(defn- mixer [state model active touched-parameter]
+  (let [{:keys [page pages instance-ids]} (display/mixer-window state active)
+        visible (mapv #(get-in model [:instances %]) instance-ids)
+        expanded (get-in model [:instances (last (filter (set instance-ids) (:mixer-touches state)))])
+        bank (when expanded (parameter-bank state expanded))]
+    {:page page :pages pages :count (count active) :selected-instance-id (:selected-instance state)
+     :slots (mapv (partial mixer-slot (dissoc model ::views/pad-colors)) visible)
+     :expanded (when expanded
+                 {:instance-id (:id expanded) :definition-version (:effect-version expanded)
+                  :parameter-bank (dissoc bank :ids)
+                  :touched-parameter (when (= (:id expanded) (:instance-id touched-parameter)) touched-parameter)
+                  :parameters (mapv #(parameter-row state expanded (:definition expanded) %) (:ids bank))})}))
+
 (defn view
-  "Build the common Push screen from selected control state and the shared cue index."
+  "Build the common Push screen from selected control state and the shared cue index.
+  Mixer touch ownership supplies :mixer-touches as instance IDs in press order."
   [state model {:keys [active by-cue]} {:keys [status touched-parameter touched-control]}]
   (let [instance (get-in model [:instances (:selected-instance state)])
         bank (parameter-bank state instance)
@@ -44,9 +66,11 @@
         defaults (merge (into {} (map (fn [[k schema]] [k (:default schema)]) (:params effect)))
                         (:params cue) (:saved-params cue))
         visible (mapv #(cue-at-x state model %) (range 8))
-        cue-view (when cue (views/cue-view model (:id cue) by-cue))]
+        cue-view (when cue (views/cue-view model (:id cue) by-cue))
+        display (display/view-options state model)]
     (merge
-     (display/view-options state model)
+     display
+     (when (= :mixer (:display-mode display)) {:mixer (mixer state model active touched-parameter)})
      {:title "Tolglow" :page (:page-id state) :origin (:origin state)
       :status status
       :master (:master model) :blackout? (:blackout? model)

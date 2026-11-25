@@ -1,5 +1,7 @@
 (ns afterglow.control.views-test
   (:require [clojure.test :refer [deftest is]]
+            [afterglow.control.devices.push-view :as push-view]
+            [afterglow.control.display :as display]
             [afterglow.control.views :as views]))
 
 (def show
@@ -40,3 +42,39 @@
 (deftest diffs-distinguish-missing-nil-and-removal
   (is (= {:set {:a nil :c 3} :remove [:b]}
          (views/diff-view {:b 2} {:a nil :c 3}))))
+
+(deftest push-mixer-uses-exact-live-instances-and-bounds-each-page
+  (let [instance (fn [n] (let [id (str "effect-" n)]
+                          [id {:id id :cue-id :blue :effect-id :wash :priority 2 :order n :phase :running}]))
+        model (-> show
+                  (assoc-in [:registry :cues :red :name] "Red wash")
+                  (assoc-in [:instances "a" :definition :params :level] {:type :number :bounds [0 1]})
+                  (assoc-in [:instances "a" :params :level] 0.3)
+                  (assoc-in [:instances "a" :system] {:opacity 0.25 :paused? true})
+                  (assoc-in [:instances "b" :system :opacity] 0.6)
+                  (assoc ::views/pad-colors {:red [0 1 0]})
+                  (update :instances into (map instance (range 9))))
+        state {:display-mode :mixer :page-id :main :origin [0 0] :selected-instance "b"
+               :selected-cue :red :mixer-touches ["b" "a"]}
+        project (fn [s] (:mixer (push-view/view s model (push-view/cue-index model) {})))
+        page (project state)
+        next-state (display/apply-action state model :display/mixer-next-page)]
+    (is (= ["b" "a" "effect-0" "effect-1" "effect-2" "effect-3" "effect-4" "effect-5"]
+           (mapv :id (:slots page))))
+    (is (= {:name "Red wash" :phase :running :opacity 0.25 :paused? true :color [0.5 0 0]}
+           (select-keys (second (:slots page)) [:name :phase :opacity :paused? :color])))
+    (is (= {:phase :releasing :opacity 0.6 :color [1 0 0]}
+           (select-keys (first (:slots page)) [:phase :opacity :color])))
+    (is (= "b" (:selected-instance-id page)))
+    (is (= "a" (get-in page [:expanded :instance-id])))
+    (is (= [[:level 0.3]] (mapv (juxt :id :value) (get-in page [:expanded :parameters]))))
+    (is (= "b" (get-in (project (assoc state :mixer-touches ["b"])) [:expanded :instance-id])))
+    (is (nil? (:expanded (project (dissoc state :mixer-touches)))))
+    (is (nil? (:expanded (project next-state))))
+    (is (= ["effect-6" "effect-7" "effect-8"] (mapv :id (:slots (project next-state)))))
+    (is (= {:page 1 :pages 2 :count 11} (select-keys (project next-state) [:page :pages :count])))
+    (is (= next-state (display/apply-action next-state model :display/mixer-next-page)))
+    (is (= 0 (:page (project (display/apply-action next-state model :display/mixer-previous-page)))))
+    (is (= 1 (:page (project (assoc state :selected-instance "effect-7")))))
+    (is (not (display/action-supported? {:display-capabilities display/parameter-only-capabilities} :display/mixer-next-page)))
+    (is (= :mixer (display/mode {} (assoc-in model [:settings :controllers :push-display :mode] :mixer))))))

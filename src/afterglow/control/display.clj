@@ -1,9 +1,10 @@
 (ns afterglow.control.display
   "Presentation choices owned by a control session. A display gesture never
   changes the show or launches a cue."
-  (:require [afterglow.control.pages :as pages]))
+  (:require [afterglow.control.pages :as pages]
+            [afterglow.control.views :as views]))
 
-(def modes #{:parameters :pages :simulator :rig :audio :block-trace})
+(def modes #{:parameters :pages :simulator :rig :audio :block-trace :mixer})
 (def page-palettes [:both :cue :type])
 (def parameter-views [:auto :history :spatial :controls])
 (def history-spans [0.5 1 2 4 8 16])
@@ -30,6 +31,10 @@
         start (* 8 bank)]
     {:bank bank :banks banks :pages (subvec ids start (min (+ start 8) (count ids)))}))
 
+(defn mixer-window [state active]
+  (let [{:keys [bank banks pages]} (page-window (mapv :id active) (:selected-instance state) (:mixer-page state))]
+    {:page bank :pages banks :instance-ids pages}))
+
 (defn- step-choice [choices current step wrap?]
   (let [i (+ step (max 0 (.indexOf ^java.util.List choices current)))]
     (nth choices (if wrap? (mod i (count choices)) (min (dec (count choices)) (max 0 i))))))
@@ -38,20 +43,26 @@
   (assoc state k (step-choice choices (option state model k default) step wrap?)))
 
 (defn- toggle [state model target]
-  (let [current (mode state model)]
-    (cond (= target :parameters) (assoc state :display-mode :parameters :display-return :parameters)
-          (= target current) (assoc state :display-mode (get state :display-return :parameters) :display-return :parameters)
-          :else (cond-> (assoc state :display-mode target :display-return current)
-                  (= target :pages) (dissoc :page-bank)))))
+  (let [current (mode state model)
+        next-state (cond (= target :parameters) (assoc state :display-mode :parameters :display-return :parameters)
+                         (= target current) (assoc state :display-mode (get state :display-return :parameters) :display-return :parameters)
+                         :else (cond-> (assoc state :display-mode target :display-return current)
+                                 (= target :pages) (dissoc :page-bank)))]
+    (cond-> next-state
+      (or (= :mixer current) (= :mixer (:display-mode next-state))) (dissoc :mixer-touches))))
 
 (def ^:private mode-actions
   {:display/pages :pages :display/simulator :simulator :display/rig :rig
-   :display/parameters :parameters :display/audio :audio :display/block-trace :block-trace})
+   :display/parameters :parameters :display/audio :audio :display/block-trace :block-trace
+   :display/mixer :mixer})
 
 (defn action-supported? [state action]
   (let [{:keys [modes actions]} (:display-capabilities state)
         action (if (vector? action) (first action) action)
-        next-mode (if (= :display/parameter-view action) :parameters (mode-actions action))]
+         next-mode (case action
+                     :display/parameter-view :parameters
+                     (:display/mixer-previous-page :display/mixer-next-page) :mixer
+                     (mode-actions action))]
     (and action
          (or (nil? actions) (contains? actions action))
          (or (nil? modes) (nil? next-mode) (contains? modes next-mode)))))
@@ -59,6 +70,7 @@
 (defn action? [action]
   (or (contains? mode-actions action)
       (contains? #{:display/page-colors :display/previous-bank :display/next-bank
+                   :display/mixer-previous-page :display/mixer-next-page
                    :display/parameter-view :display/zoom-in :display/zoom-out :display/camera :display/previous-fixture :display/next-fixture} action)
       (and (vector? action) (= 2 (count action)) (= :display/select-page (first action))
            (nat-int? (second action)) (< (second action) 8))))
@@ -73,12 +85,21 @@
           (assoc state :page-id page :origin [0 0] :page-bank bank :last-leds {})
           state)))))
 
+(defn- navigate-mixer [state model step]
+  (if-not (= :mixer (mode state model)) state
+    (let [{:keys [page pages]} (mixer-window state (views/active-instances model))
+          next-page (max 0 (min (dec pages) (+ page step)))]
+      (if (= page next-page) state
+        (-> state (assoc :mixer-page next-page) (dissoc :mixer-touches))))))
+
 (defn apply-action [state model action]
   (if-let [target (mode-actions action)] (toggle state model target)
     (case action
       :display/page-colors (next-option state model :page-colors page-palettes :both 1 true)
       :display/previous-fixture (update state :fixture-offset (fnil dec 0))
       :display/next-fixture (update state :fixture-offset (fnil inc 0))
+      :display/mixer-previous-page (navigate-mixer state model -1)
+      :display/mixer-next-page (navigate-mixer state model 1)
       :display/camera (next-option state model :camera camera-lenses :fit 1 true)
       :display/parameter-view (-> state (assoc :display-mode :parameters)
                                   (next-option model :parameter-view parameter-views :auto 1 true))
