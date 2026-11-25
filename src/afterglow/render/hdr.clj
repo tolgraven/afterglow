@@ -34,11 +34,6 @@
        (zero? (double (first (first points)))) (== 1.0 (double (first (peek points))))
        (apply < (map #(double (first %)) points))))
 
-(defn falloff?
-  "A named preset or an authored control-point curve."
-  [falloff]
-  (or (contains? falloff-presets falloff) (falloff-curve? falloff)))
-
 (def ^:private preset-weights
   {:linear (fn ^double [^double u] (- 1.0 u))
    :quadratic (fn ^double [^double u] (let [t (- 1.0 u)] (* t t)))
@@ -61,26 +56,44 @@
                     (+ w0 (* (- u x0) (/ (- (aget ws k) w0) (- (aget xs k) x0)))))))))))
 
 ;; Compiled curves are pure functions of their immutable control points, so
-;; workers can share them. Validation fills the cache and the frame reads it.
-;; Persistent vectors cache their hash, so a hit allocates nothing.
+;; workers can share them. Only validated curves enter, so a hit is already
+;; valid. Persistent vectors cache their hash and equality checks identity
+;; first, so a hit allocates nothing.
 (def ^:private ^ConcurrentHashMap compiled-curves (ConcurrentHashMap.))
+
+(def max-compiled-curves
+  "Distinct authored curves retained. A miss beyond this evicts one entry."
+  256)
+
+(defn falloff?
+  "A named preset or an authored control-point curve. A compiled curve skips
+  the structural check because it was validated before it was cached."
+  [falloff]
+  (or (contains? falloff-presets falloff)
+      (and (vector? falloff) (.containsKey compiled-curves falloff))
+      (falloff-curve? falloff)))
 
 (defn falloff-weight
   "Compile a validated falloff once into a primitive distance-fraction to
   weight function. Presets return shared constants. Authored curves are cached
-  by value."
+  by value. A miss at capacity evicts a single other curve. Concurrent misses can
+  briefly exceed the bound by the number of compiling workers."
   ^IFn$DD [falloff]
   (or (get preset-weights falloff)
       (when (vector? falloff) (.get compiled-curves falloff))
       (do (when-not (falloff-curve? falloff)
             (throw (ex-info "Invalid HDR spill falloff" {:falloff falloff})))
-          (when (>= (.size compiled-curves) 256) (.clear compiled-curves))
+          (when (>= (.size compiled-curves) (long max-compiled-curves))
+            (when-let [evicted (first (.keySet compiled-curves))]
+              (.remove compiled-curves evicted)))
           (let [f (compile-curve falloff)]
             (or (.putIfAbsent compiled-curves falloff f) f)))))
 
-(defn validate!
-  "Validate resolved, portable frame controls. Distances are metres."
-  [settings]
+(defn compile!
+  "Validate resolved, portable frame controls and return the compiled spill
+  falloff. The frame carries it into scatter, so receivers never look it up or
+  recompile it. Distances are metres."
+  ^IFn$DD [settings]
   (let [{:keys [gain source-gains cue-gains instance-gains fixture-ids max-excess
                 white-mix spill spill-white-mix radius falloff]
          :or {gain 1 max-excess 1 white-mix 1 spill 0 spill-white-mix 1 radius 1 falloff :linear}} settings]
@@ -94,7 +107,12 @@
                    (every? #(or (nil? %) (and (map? %) (every? nonnegative? (vals %))))
                            [source-gains cue-gains instance-gains]))
       (throw (ex-info "Invalid HDR gain, scope, spill or highlight settings" {:settings settings})))
-    (falloff-weight falloff))
+    (falloff-weight falloff)))
+
+(defn validate!
+  "Validate resolved, portable frame controls. Distances are metres."
+  [settings]
+  (compile! settings)
   settings)
 
 (defn- rgb-attrs? [channels] (every? channels [:red :green :blue]))
@@ -160,7 +178,7 @@
         center (double (nth pos axis))
         ^doubles coords coords
         spill (double (:spill settings 0))
-        ^IFn$DD falloff (falloff-weight (:falloff settings :linear))]
+        ^IFn$DD falloff (or (::falloff-weight settings) (falloff-weight (:falloff settings :linear)))]
     (when (pos? radius)
       (loop [k (long (lower-bound coords (- center radius)))]
         (when (and (< k (alength coords)) (< (aget coords k) (+ center radius)))
@@ -257,7 +275,8 @@
   [layout settings read-at! write-at! high-at? fixture-count packed observe?]
   (let [allowed (some-> (:fixture-ids settings) set)
         scoped? #(or (nil? allowed) (contains? allowed (:id %)))
-        default-white (if (seq settings) 1.0 0.0)
+        ;; The frame's carried falloff is not an authored control.
+        default-white (if (> (count settings) (if (contains? settings ::falloff-weight) 1 0)) 1.0 0.0)
         source-white-mix (double (:white-mix settings default-white))
         spill-white-mix (double (:spill-white-mix settings default-white))
         gain (:gain settings 1.0)

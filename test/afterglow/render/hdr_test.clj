@@ -204,12 +204,22 @@
     (let [f (hdr/falloff-weight [[0 1] [0.4 1] [0.6 0.25] [1 0]])]
       (doseq [[u w] [[0.0 1.0] [0.2 1.0] [0.4 1.0] [0.5 0.625] [0.6 0.25] [0.9 0.0625] [1.0 0.0]]]
         (is (< (abs (- w (.invokePrim f u))) 1e-12) (str u)))
-      (is (identical? f (hdr/falloff-weight [[0 1] [0.4 1] [0.6 0.25] [1 0]])) "compiled once and shared")))
+      (is (instance? clojure.lang.IFn$DD f))))
+  (testing "64 points and exact Ratio points are accepted"
+    (let [stairs (vec (for [i (range 64)] [(/ i 63) (- 1 (/ i 63))]))
+          f (hdr/falloff-weight stairs)]
+      (is (= 64 (count stairs)))
+      (is (= {:falloff stairs} (hdr/validate! {:falloff stairs})))
+      (doseq [u [0.0 0.25 0.5 0.75 0.99]]
+        (is (< (abs (- (- 1.0 u) (.invokePrim f u))) 1e-12))))
+    (let [f (hdr/falloff-weight [[0 1] [1/3 1/2] [1 0]])]
+      (is (< (abs (- 0.75 (.invokePrim f (/ 1.0 6)))) 1e-12))
+      (is (< (abs (- 0.25 (.invokePrim f (/ 2.0 3)))) 1e-12))))
   (testing "rejected before any frame renders"
     (doseq [bad [[[0 1]] [[0.1 1] [1 0]] [[0 1] [0.9 0]] [[0 1] [0.5 2] [1 0]]
                  [[0 1] [0.5 0.5] [0.5 0.4] [1 0]] [[0 1] [0.6 0.5] [0.4 0.4] [1 0]]
                  [[0 ##NaN] [1 0]] [[0 1] [1 -0.1]] [[0 1 2] [1 0]] '([0 1] [1 0]) [[0 1] [1 :x]]
-                 (vec (for [i (range 65)] [(/ i 64.0) 1]))]]
+                 (vec (for [i (range 65)] [(/ i 64.0) 1])) [[0 1] [1/2 3/2] [1 0]]]]
       (is (thrown? Exception (hdr/validate! {:falloff bad})) (pr-str bad))
       (is (thrown? Exception (frame/resolve-frame rig [(row :source :red 1.0)] {:hdr {:falloff bad}}))))))
 
@@ -252,3 +262,35 @@
     (testing "scope limits receivers to the selected segment"
       (is (= [0 0 0 38 255 38 0 0 0]
              (render {:hdr (assoc hdr :fixture-ids [:px-3 :px-4 :px-5])}))))))
+
+(defn- unique-curve [i] [[0 1] [(/ (inc i) 2000.0) 0.5] [1 0]])
+
+(deftest curve-cache-is-bounded-and-a-hit-skips-revalidation
+  (let [cache @#'hdr/compiled-curves
+        fresh (unique-curve 999)]
+    (testing "a miss at capacity evicts one curve rather than emptying the cache"
+      (doseq [i (range (+ 40 hdr/max-compiled-curves))] (hdr/falloff-weight (unique-curve i)))
+      (is (<= (.size cache) hdr/max-compiled-curves))
+      (hdr/falloff-weight fresh)
+      (is (= hdr/max-compiled-curves (.size cache)))
+      (is (.containsKey cache fresh)))
+    (testing "a compiled curve is valid without walking its points again"
+      (with-redefs [hdr/falloff-curve? (fn [_] (throw (ex-info "structural check repeated" {})))]
+        (is (= {:falloff fresh} (hdr/validate! {:falloff fresh})))
+        (is (identical? (.get cache fresh) (hdr/compile! {:falloff fresh})))))))
+
+(deftest a-frame-compiles-its-falloff-once-and-carries-it-to-every-receiver
+  (let [curve [[0 1] [0.4 1] [0.6 0.25] [1 0]]
+        calls (atom 0)
+        weight hdr/falloff-weight
+        blocks [(block (row :source :color [1.21 0 0]) (row :near :color [1.3 0 0]) (row :far :color [1.1 0 0]))]
+        opts {:hdr {:spill 1 :radius 1 :falloff curve :white-mix 0 :spill-white-mix 0}}
+        expected (bytes-of (frame/resolve-contributions rig blocks opts))]
+    (with-redefs [hdr/falloff-weight (fn [f] (swap! calls inc) (weight f))]
+      (doseq [o [opts (assoc opts :include-values? false :compact-values? true)]]
+        (reset! calls 0)
+        (is (= expected (bytes-of (frame/resolve-contributions rig blocks o))))
+        (is (= 1 @calls) "three spilling sources share the falloff compiled at validation"))
+      (reset! calls 0)
+      (is (= expected (bytes-of ((:pack (frame/prepare-movement-frame rig blocks (assoc opts :compact-values? true))) {}))))
+      (is (= 1 @calls)))))
