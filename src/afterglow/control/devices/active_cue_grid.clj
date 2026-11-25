@@ -25,7 +25,9 @@
 
 (defn step-page [state model delta]
   (if (:mode state)
-    (let [page (max 0 (min (+ (:page state) delta) (dec (page-count (running model)))))]
+    (let [last-page (dec (page-count (running model)))
+          from (min (:page state) last-page)
+          page (max 0 (min (+ from delta) last-page))]
       (if (= page (:page state)) state
           (-> state (assoc :page page) (update :layout inc) (dissoc :capture))))
     state))

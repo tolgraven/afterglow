@@ -70,6 +70,129 @@
 (defn- admitted-commands [h]
   (mapv second (filter #(= :command (first %)) @(:log h))))
 
+(deftest acknowledged-active-pads-select-and-reorder-exact-launches
+  (let [{:keys [show session options log] :as h}
+        (fixture/harness {:profile (push/profile {:active-cue-grid? true :operator-gestures? true
+                                                  :led-batch-size 1})} push-operator)
+        apply! (:dispatch! options)
+        owner! (fn [operation]
+                 (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                {:source {:adapter :test}} operation)))
+        active #(get-in (view h) [:active-cue-grid])
+        ids #(mapv :instance-id (:cells (active)))
+        settle! #(dotimes [_ 66] (fixture/led-ack! h))
+        button! (fn [cc] (receive! h [0xb0 cc 127]) (receive! h [0xb0 cc 0]))
+        pad! (fn [n] (receive! h [0x90 n 127]) (receive! h [0x80 n 0]))
+        launch! (fn [command-id cue]
+                  (get-in (owner! {:op :cue/launch :command-id command-id :cue-id cue
+                                   :launch {:mode :persistent}}) [:ack :instance-id]))]
+    (try
+      (fixture/ready! h)
+      (settle!)
+      (let [a (launch! "wash-a" :latched)
+            b (launch! "wash-b" :latched)
+            c (launch! "other-color" :held)
+            commands (count (admitted-commands h))]
+        (button! 48)
+        (is (= [a b c] (ids)))
+        (is (= [[0 0 1] [0 0 1] [1 0 0]] (mapv :color (:cells (active)))))
+        (is (nil? (get-in (local h) [:active-grid :capture])))
+        (pad! 36)
+        (is (= c (:selected-instance (local h))) "A partial LED batch cannot admit the new pad mapping")
+        (settle!)
+        (is (some #(= [:midi/send (codec/palette-write 0 38 [255 0 0 31])] %) @log))
+        (pad! 37)
+        (is (= b (:selected-instance (local h))))
+        (is (= commands (count (admitted-commands h))))
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (button! 88)
+        (settle!)
+        (pad! 36)
+        (is (= :reorder (:mode (active))))
+        (is (= a (:source-instance-id (active))))
+        (is (some #{[:midi/send [0xb0 88 64]]} @log))
+        (is (some #{[:midi/send [0xb0 88 127]]} @log))
+        (pad! 38)
+        (is (= [b c a] (ids)))
+        (let [{:keys [op instance-id after-instance-id expected-revision]} (peek (admitted-commands h))]
+          (is (= [:instance/move-after a c] [op instance-id after-instance-id]))
+          (is (integer? expected-revision)))
+        (receive! h [0x80 0 0])
+        (is (= [:instance-param b :level] (get-in @show [:control :edit-history :nodes 1 :target])))
+        (settle!)
+        (pad! 36)
+        (owner! {:op :instance/end :command-id "end-c" :instance-id c})
+        (let [commands (count (admitted-commands h))]
+          (pad! 37)
+          (is (= commands (count (admitted-commands h))) "An old target pad cannot move the new occupant")
+          (settle!)
+          (is (= [b a] (ids)))
+          (is (nil? (:source-instance-id (active)))))
+        (button! 88)
+        (is (nil? (active)))
+        (is (true? (get-in (local h) [:active-grid :clearing?])))
+        (let [commands (count (admitted-commands h))]
+          (receive! h [0x90 36 127])
+          (settle!)
+          (receive! h [0x90 36 127])
+          (receive! h [0x80 36 0])
+          (is (= commands (count (admitted-commands h))))
+          (pad! 36)
+          (is (= [:cue/launch :instance/end] (mapv :op (drop commands (admitted-commands h)))))))
+      (finally (finish! h)))))
+
+(deftest active-pad-move-cannot-adopt-a-new-epoch-at-dispatch
+  (let [{:keys [show options] :as base}
+        (fixture/harness {:profile (push/profile {:active-cue-grid? true})})
+        model-reads (atom nil)
+        model! (fn []
+                 (when-let [n @model-reads]
+                   (if (= 1 n)
+                     (do (reset! model-reads nil) (swap! show update :epoch inc))
+                     (swap! model-reads dec)))
+                 @show)
+        device (session/create (assoc options :model! model!))
+        h (assoc base :session device)
+        owner! (:dispatch! options)
+        launch! (fn [id cue]
+                  (owner! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                 {:source {:adapter :test} :command-id id
+                                  :op :cue/launch :cue-id cue :launch {:mode :persistent}})))
+        pad! (fn [n] (receive! h [0x90 n 127]) (receive! h [0x80 n 0]))]
+    (try
+      (fixture/ready! h)
+      (launch! "first" :held)
+      (launch! "second" :latched)
+      (receive! h [0xb0 88 127])
+      (dotimes [_ 18] (fixture/led-ack! h))
+      (pad! 36)
+      (is (some? (get-in (local h) [:active-grid :source])))
+      (let [commands (admitted-commands h)]
+        ;; receive! sees the old visible order, then dispatch takes its envelope
+        ;; after the epoch boundary. Reusing IDs and revision cannot admit it.
+        (reset! model-reads 2)
+        (receive! h [0x90 37 127])
+        (is (= :stale-epoch (get-in (session/snapshot device) [:last-ack :reason])))
+        (is (= commands (admitted-commands h)))
+        (is (true? (get-in (local h) [:active-grid :clearing?])))
+        (receive! h [0x90 36 127])
+        (is (= commands (admitted-commands h)) "The old overlay must clear before normal launches resume"))
+      (finally (finish! h)))))
+
+(deftest active-pad-mode-preserves-a-previously-held-launch
+  (let [h (fixture/ready! (fixture/harness {:profile (push/profile {:active-cue-grid? true})}))]
+    (try
+      (receive! h [0x90 36 127])
+      (let [held-id (:selected-instance (local h))]
+        (receive! h [0xb0 48 127])
+        (receive! h [0x90 36 127])
+        (receive! h [0x80 36 0])
+        (is (= [:cue/launch :instance/end] (mapv :op (admitted-commands h))))
+        (is (= held-id (:instance-id (peek (admitted-commands h)))))
+        (is (= :releasing (get-in @(:show h) [:instances held-id :phase]))))
+      (finally (finish! h)))))
+
 (defn- pending-sample-harness []
   (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
                                                      push-operator)
