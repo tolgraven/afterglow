@@ -361,7 +361,7 @@
         owner (when (:encoder-sample? change)
                 (encoder-gesture/active state (:pad-overlay-encoder state)))]
     (if owner
-      (encoder-gesture/edit (:state result) owner (constantly result))
+      (encoder-gesture/edit (:state result) owner (constantly result) (:sample-context change))
       result)))
 
 (defn- overlay-mono-input [underlying state event model envelope]
@@ -816,7 +816,8 @@
   parameter and captured pad positions. A returned selection owns the grid
   until that encoder lifts, while regular encoder gestures continue to run.
   An input result with :encoder-sample? true routes its single command's
-  :value through the owning encoder gesture when one is active.
+  :value through the owning encoder gesture when one is active. An optional
+  :sample-context is carried on that sample for admission by the trusted host.
   The overlay requires Poly or Mono Aftertouch, captured pads, a cycle button
   and a display which receipts presentation via control.display/presented!.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
