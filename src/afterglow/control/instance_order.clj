@@ -78,3 +78,60 @@
 
 (defn ordered [model]
   (vec (sort render-instance-comparator (vals (:instances model)))))
+
+(defn- layer-id [instance]
+  (get-in instance [:source :native-layer :id]))
+
+(defn priority-override-errors
+  "Return path/message errors for a frame-local instance ID to finite priority
+  map. Unknown IDs are ignored because an instance can end between sampling and
+  evaluation. Members of one native layer must not receive different values."
+  [instances overrides]
+  (if-not (map? overrides)
+    [{:path [] :message "Priority overrides must be an instance ID to priority map"}]
+    (let [invalid (into [] (keep (fn [[id priority]]
+                                   (when-not (and (number? priority) (Double/isFinite (double priority)))
+                                     {:path [id] :message "Priority override must be finite"})))
+                        overrides)
+          by-layer (reduce (fn [layers [id priority]]
+                             (if-let [layer (some-> (get instances id) layer-id)]
+                               (update layers layer (fnil conj #{}) (bigdec priority))
+                               layers))
+                           {} (when (empty? invalid) overrides))]
+      (into invalid (keep (fn [[layer values]]
+                            (when (> (count values) 1)
+                              {:path [layer] :message "Native layer members need one priority override"})))
+            by-layer))))
+
+(defn with-priority-overrides
+  "Return frame-local render positions for instances with modulated priority.
+  An override that differs from the effective priority places the instance, and
+  every other member of its native layer, in the overriding tier with no explicit
+  render position, so equal priorities tie by launch order. An override equal to
+  the current effective priority keeps the existing position. The result is for
+  ordering one frozen frame only; it is never written back to the model."
+  [instances overrides]
+  (if (empty? overrides)
+    instances
+    (let [layer-values (into {} (keep (fn [[id priority]]
+                                        (when-let [layer (some-> (get instances id) layer-id)]
+                                          [layer priority])))
+                             overrides)
+          override-for (fn [instance]
+                         (if-let [layer (layer-id instance)]
+                           (get layer-values layer)
+                           (get overrides (:id instance))))]
+      (persistent!
+       (reduce-kv (fn [result id instance]
+                    (let [priority (override-for instance)]
+                      (if (and (some? priority)
+                               (not (zero? (compare-priority priority (effective-priority instance)))))
+                        (assoc! result id (-> instance (assoc :priority priority)
+                                              (dissoc :render-priority :render-order)))
+                        result)))
+                  (transient instances) instances)))))
+
+(defn ordered-with-priorities
+  "Order model instances as one frame with frame-local priority overrides."
+  [model overrides]
+  (vec (sort render-instance-comparator (vals (with-priority-overrides (:instances model) overrides)))))
