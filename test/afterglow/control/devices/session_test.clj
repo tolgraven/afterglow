@@ -16,7 +16,8 @@
 
 (defn harness
   ([] (harness {}))
-  ([overrides]
+  ([overrides] (harness overrides nil))
+  ([overrides authority]
    (let [show (atom (initial-model)) now (atom 0) log (atom []) callbacks (atom [])
          display-count (atom 0)
          midi {:open! (fn [f] (swap! callbacks conj f) (swap! log conj [:midi/open]) (Object.))
@@ -29,7 +30,7 @@
                          :dispatch! (fn [command]
                                       (locking show
                                         (swap! log conj [:command command])
-                                        (let [result (model/apply-command @show command)]
+                                        (let [result (model/apply-command @show command authority)]
                                           (reset! show (:model result)) result)))
                          :midi midi :display display :profile (push/profile {})} overrides)]
      {:show show :now now :log log :callbacks callbacks :display-count display-count
@@ -61,24 +62,26 @@
                                                   :mpe-note-cells {40 [0 0]}
                                                   :button-bindings {:blackout :blackout}} %))}})
 
-(defn- grid-capture [kind]
-  (let [receipts (atom {}) calls (atom [])
-        capture (get grid-captures kind)
-        profile ((:profile capture) {:launch-grid {:beats 1/2}
-                                     :launch-receipt (fn [_ id] (get @receipts id))})
-        h (harness {:profile profile})
-        apply! (get-in h [:options :dispatch!])
-        dispatch! (fn [{:keys [op command-id launch-command-id] :as command}]
-                    (swap! calls conj command)
-                    (cond
-                      (contains? command :grid) (get (swap! receipts assoc command-id {:status :pending}) command-id)
-                      (= :cue/cancel-launch op)
-                      (if-let [instance-id (get-in @receipts [launch-command-id :instance-id])]
-                        (apply! (assoc command :op :instance/end :instance-id instance-id))
-                        (get (swap! receipts assoc launch-command-id {:status :cancelled}) launch-command-id))
-                      :else (apply! command)))
-        device (session/create (assoc (:options h) :dispatch! dispatch!))]
-    (assoc h :session device :capture capture :calls calls :receipts receipts :apply! apply!)))
+(defn- grid-capture
+  ([kind] (grid-capture kind {} nil))
+  ([kind options authority]
+   (let [receipts (atom {}) calls (atom [])
+         capture (get grid-captures kind)
+         profile ((:profile capture) (assoc options :launch-grid {:beats 1/2}
+                                                    :launch-receipt (fn [_ id] (get @receipts id))))
+         h (harness {:profile profile} authority)
+         apply! (get-in h [:options :dispatch!])
+         dispatch! (fn [{:keys [op command-id launch-command-id] :as command}]
+                     (swap! calls conj command)
+                     (cond
+                       (contains? command :grid) (get (swap! receipts assoc command-id {:status :pending}) command-id)
+                       (= :cue/cancel-launch op)
+                       (if-let [instance-id (get-in @receipts [launch-command-id :instance-id])]
+                         (apply! (assoc command :op :instance/end :instance-id instance-id))
+                         (get (swap! receipts assoc launch-command-id {:status :cancelled}) launch-command-id))
+                       :else (apply! command)))
+         device (session/create (assoc (:options h) :dispatch! dispatch!))]
+     (assoc h :session device :capture capture :calls calls :receipts receipts :apply! apply!))))
 
 (deftest captured-grid-holds-use-one-owner-through-queue-fire-and-teardown
   (doseq [kind [:push-2 :push-3 :push-3-mpe]]
@@ -123,6 +126,83 @@
               (release-for launch (last @calls))
               (is (empty? (:errors (session/snapshot session))))))
           (finally (session/close! session true)))))))
+
+(defn- fire-captured-launch! [{:keys [session receipts apply!]} launch]
+  (let [{:keys [status instance-id]} (:ack (apply! (dissoc launch :grid :raw)))]
+    (is (= :accepted status))
+    (swap! receipts assoc (:command-id launch) {:status :fired :instance-id instance-id})
+    (session/refresh! session)
+    instance-id))
+
+(deftest push-2-keeps-grid-pad-receipts-and-encoder-edits-independent
+  (let [{:keys [session callbacks show calls receipts] :as h}
+        (grid-capture :push-2 {:operator-gestures? true} {:operator-id :push-operator})]
+    (try
+      (ready! h)
+      (let [receive (last @callbacks)]
+        (receive [0x90 36 127])
+        (let [held (last @calls)
+              held-id (fire-captured-launch! h held)]
+          (receive [0x90 37 127])
+          (let [latched (last @calls)]
+            (receive [0x90 0 127])
+            (receive [0xb0 71 1])
+            (is (= [:cue/launch :cue/launch :gesture/begin :gesture/sample] (mapv :op @calls)))
+            (is (every? #(not (contains? % :grid)) (take-last 2 @calls)))
+            (is (= :pending (get-in @receipts [(:command-id latched) :status])))
+            (let [latched-id (fire-captured-launch! h latched)]
+              (is (= latched-id (get-in (session/snapshot session) [:local :selected-instance])))
+              (receive [0xb0 71 1])
+              (receive [0xb0 59 127])
+              (let [[end release] (take-last 2 @calls)
+                    history (get-in @show [:control :edit-history])]
+                (is (= :suspended (:status (session/snapshot session))))
+                (is (= {:op :gesture/end :last-sequence 2 :instance-id held-id}
+                       (select-keys end [:op :last-sequence :instance-id])))
+                (is (= :cue/cancel-launch (:op release)))
+                (is (= (:command-id held) (:launch-command-id release)))
+                (is (= :releasing (get-in @show [:instances held-id :phase])))
+                (is (= :running (get-in @show [:instances latched-id :phase])))
+                (is (= 0.5 (get-in @show [:instances latched-id :params :level])))
+                (is (= {:target [:instance-param held-id :level] :actor :push-operator :before 0.5 :after 0.52}
+                       (select-keys (get-in history [:nodes 1]) [:target :actor :before :after])))
+                (is (empty? (:open history)))
+                (is (empty? (:errors (session/snapshot session)))))))))
+      (finally (session/close! session true)))))
+
+(deftest push-2-suspends-with-all-pad-holds-and-encoder-edits
+  (let [{:keys [session callbacks show calls] :as h}
+        (grid-capture :push-2 {:operator-gestures? true} {:operator-id :push-operator})
+        parameters (mapv #(keyword (str "value-" %)) (range 8))
+        schema {:type :number :default 0.5 :bounds [0 1]}]
+    (try
+      (swap! show (fn [show]
+                    (-> show
+                        (assoc-in [:registry :effects :wash :param-order] parameters)
+                        (assoc-in [:registry :effects :wash :params] (zipmap parameters (repeat schema)))
+                        (assoc-in [:pages :main :cells]
+                                  (into {} (for [x (range 8) y (range 8)] [[x y] :held]))))))
+      (ready! h)
+      (let [receive (last @callbacks)]
+        (receive [0x90 36 127])
+        (fire-captured-launch! h (last @calls))
+        (doseq [note (range 37 100)] (receive [0x90 note 127]))
+        (doseq [index (range 8)]
+          (receive [0x90 index 127])
+          (receive [0xb0 (+ 71 index) 1]))
+        (let [launch-ids (into #{} (keep (fn [command]
+                                          (when (= :cue/launch (:op command)) (:command-id command)))) @calls)
+              prior-count (count @calls)]
+          (receive [0xb0 59 127])
+          (let [teardown (drop prior-count @calls)]
+            (is (= 64 (count launch-ids)))
+            (is (= {:gesture/end 8 :cue/cancel-launch 64} (frequencies (map :op teardown))))
+            (is (= launch-ids (set (keep :launch-command-id teardown))))
+            (is (= 8 (get-in @show [:control :edit-history :cursor])))
+            (is (empty? (get-in @show [:control :edit-history :open])))
+            (is (= :suspended (:status (session/snapshot session))))
+            (is (empty? (:errors (session/snapshot session)))))))
+      (finally (session/close! session true)))))
 
 (deftest grid-release-does-not-wait-for-a-launch-receipt
   (doseq [[kind {:keys [profile held]}] grid-captures]
