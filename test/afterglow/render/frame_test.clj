@@ -120,7 +120,8 @@
         (is (= [255] (bytes-at full 2 512)))
         (is (= [255] (bytes-at full 3 1)))
         (is (= [0 0 0] (bytes-at full 9 1 2 3)))
-        (is (every? #(every? zero? %) (vals idle)))))))
+        (is (= [0 255] (bytes-at {:universes idle} 3 1 2)))
+        (is (every? zero? (concat (idle 2) (drop 2 (idle 3)) (idle 9))))))))
 
 (deftest invalid-patches-and-assignments-are-rejected
   (doseq [fixtures [[rgb rgb]

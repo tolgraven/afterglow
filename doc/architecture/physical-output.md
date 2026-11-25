@@ -14,6 +14,13 @@ Both DMX sinks accept a map of universe ID to channel bytes via `(:send! sink)`,
 
 The scheduler hands completed, detached channel buffers to a physical publication clock. Its fallback and interpolation policies come from `afterglow.render.presentation`. A host supplies epoch changes, blackout intent and fixture/channel semantics via `begin-frame!` before painting. It hands the result to `complete!`, starts the clock with `start!` or drives it explicitly with `publish!`, then releases the publisher via `close!`.
 
+Waiting, scheduler blackout and host shutdown packets use the patch's physical
+off bytes for fully inverted dimmer and emitter channels and configured fog
+endpoints. Coarse/fine off bytes can span universes. Partially inverted
+emission and other idle channels start at zero. Retirement preserves the
+off bytes at withdrawn addresses until a new channel or reserved fixture
+footprint claims the slot.
+
 ## Sample time and physical publication
 
 At 40 Hz the wire has a nominal slot every 25 ms. Pass a render callback to
