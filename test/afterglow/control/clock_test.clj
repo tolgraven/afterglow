@@ -95,3 +95,15 @@
                 {:type :beat-link/beat :source-id :bad :time-ms 0 :bpm 0}
                 {:type :midi/song-position :source-id :bad :time-ms 0 :sixteenths -1}]]
     (is (thrown? clojure.lang.ExceptionInfo (clock/apply-event (clock/new-state) event)))))
+
+(deftest marked-forward-seek-advances-source-epoch-but-tempo-change-does-not
+  (let [initial (clock/new-state {:selected-source :midi})
+        live-event (fn [state at beat bpm & options]
+                     (apply event state :clock at :beat beat :bpm bpm :playing? true :confidence 1 options))
+        start (live-event initial 0 0.25 120)
+        steady (live-event start 250 0.75 60)
+        seek (live-event steady 275 32 60 :discontinuity? true)
+        next (live-event seek 775 32.5 120)
+        observe (fn [state at] (get-in (clock/snapshot state at) [:clock :source-epoch]))]
+    (is (= [0 0 1 1] (mapv observe [start steady seek next] [0 250 275 775])))
+    (is (== 32 (get-in (clock/snapshot seek 275) [:clock :beat])))))

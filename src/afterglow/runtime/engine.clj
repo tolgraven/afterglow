@@ -434,7 +434,9 @@
   System pause freezes private time/beat/frame number and effect state, then
   regenerates output from the last input state without repeating intents. Manual
   parameters and other frame inputs remain live. Resume advances private clocks
-  without consuming the paused interval. No typed result buffers enter the model.
+  without consuming the paused interval. :frame :transport-clock is the shared
+  time, beat and meter captured before any private offsets. No typed result
+  buffers enter the model.
   System opacity weights the blend result, never authored parameter values.
   A removed registry definition leaves captured running instances valid.
 
@@ -476,6 +478,7 @@
                           :variables (get frame :resolved-variables (:variables model)) :master (:master model)
                           :blackout? (:blackout? model) :transport (:transport model)})
          clock (musical-time/frame-clock snapshot)
+         snapshot (assoc snapshot :transport-clock clock)
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))

@@ -6,7 +6,7 @@
     afterglow.runtime.reuse-test afterglow.runtime.cadence-test afterglow.runtime.engine-test afterglow.runtime.keyframes-test afterglow.runtime.faults-test afterglow.runtime.executor-test afterglow.runtime.replay-test
     afterglow.control.model-test afterglow.control.clock-test afterglow.control.bindings-test afterglow.control.views-test
     afterglow.control.categories-test afterglow.control.system-test afterglow.control.sensors-test
-    afterglow.control.parameter-edit-test afterglow.control.resolution-test afterglow.control.devices.push-2-test
+    afterglow.control.parameter-edit-test afterglow.control.quantization-test afterglow.control.resolution-test afterglow.control.devices.push-2-test
     afterglow.control.codecs.midi-test afterglow.control.codecs.osc-test afterglow.control.codecs.push-2-test
     afterglow.control.codecs.push-3-test afterglow.control.codecs.mpe-test
     afterglow.control.devices.push-3-test afterglow.control.devices.push-3-display-test afterglow.control.devices.mpe-test

@@ -40,6 +40,63 @@
     (is (= 0.125 (get-in next [:assignments 0 :value])))
     (is (= 0.5 (get-in half [:keyframes "0:1" :progress])))))
 
+(deftest shared-transport-clock-survives-pause-resume-and-keyframe-forecast
+  (let [calls (atom [])
+        read-clocks (fn [{:keys [frame] :as context}]
+                      (let [shared (:transport-clock frame)
+                            meter (get-in shared [:meter :beats-per-bar] 4)]
+                        (swap! calls conj [(:beat frame) (get-in frame [:transport :beat]) (:beat shared)
+                                           (:time-ms frame) (:time-ms shared) meter])
+                        (assoc context :assignments [{:target-id :lamp :attribute :dimmer
+                                                      :value (double (/ (:beat shared) (* 8 meter)))}])))
+        compile (constantly (vary-meta (kf/predictable read-clocks) assoc ::kf/transport-clock? true))
+        change (fn [model op]
+                 (let [{:keys [ack model]} (control/apply-command model {:op op :instance-id "0:1" :source :test
+                                                                        :command-id (name op) :show-id (:show-id model)
+                                                                        :epoch (:epoch model) :time-ms (:time-ms model)})]
+                   (is (= :accepted (:status ack)))
+                   model))
+        before (advance (show {:interval {:beats 1/2}}) nil compile 1/2)
+        paused (advance (change (:model before) :instance/pause) before compile 2)
+        resumed (advance (change (:model paused) :instance/resume) paused compile 5/2)
+        meter-change (assoc-in (:model resumed) [:transport :meter] {:beats-per-bar 3 :bars-per-phrase 4})
+        edited (advance meter-change resumed compile 11/4)]
+    (is (every? true? (map #(every? true? (map == %1 %2)) @calls
+                          [[1/2 1/2 1/2 250 250 4]
+                           [1 1 1 500 500 4]
+                           [1/2 1/2 2 250 1000 4]
+                           [1 1 5/2 500 1250 4]
+                           [3/2 3/2 3 750 1500 4]
+                           [5/4 5/4 11/4 625 1375 3]
+                           [7/4 7/4 13/4 875 1625 3]])))
+    (is (= 7 (count @calls)))
+    (is (= 0.0625 (get-in paused [:assignments 0 :value])))
+    (is (= (double (/ 11/4 24)) (get-in edited [:assignments 0 :value])))))
+
+(deftest shared-time-forecast-refreshes-after-an-instance-pause-at-a-stationary-beat
+  (let [calls (atom [])
+        sample (fn [{:keys [frame] :as context}]
+                 (let [shared-ms (get-in frame [:transport-clock :time-ms])]
+                   (swap! calls conj [(:time-ms frame) shared-ms])
+                   (assoc context :assignments [{:target-id :lamp :attribute :dimmer
+                                                 :value (/ shared-ms 2000.0)}])))
+        compile (constantly (vary-meta (kf/predictable sample) assoc ::kf/transport-clock? true))
+        change (fn [model op at]
+                 (let [{:keys [ack model]} (control/apply-command model {:op op :instance-id "0:1" :source :test
+                                                                        :command-id (name op) :show-id (:show-id model)
+                                                                        :epoch (:epoch model) :time-ms at})]
+                   (is (= :accepted (:status ack)))
+                   model))
+        initial (advance (show {:interval {:beats 1}}) nil compile 0)
+        resumed (-> (:model initial) (change :instance/pause 0) (change :instance/resume 400))
+        after (engine/advance resumed {:time-ms 400 :keyframes (:keyframes initial)} compile)
+        window (get-in after [:keyframes "0:1"])]
+    (is (= {:clock-offset-beats 0 :clock-offset-ms 400}
+           (select-keys (get-in resumed [:instances "0:1" :system]) [:clock-offset-beats :clock-offset-ms])))
+    (is (= [[0.0 0.0] [500.0 500.0] [0.0 400.0] [500.0 900.0]] (mapv #(mapv double %) @calls)))
+    (is (= {:origin [0.2] :target [0.45] :result [0.2]}
+           (select-keys (kf/inspect window :lamp :dimmer) [:origin :target :result])))))
+
 (deftest progress-may-reverse-and-remain-short-of-a-boundary
   (let [opts {:interval {:beats 1} :progress {:mode :replace :variable [:audio :bass]}}
         calls (atom []) compile (compile-recorder calls)

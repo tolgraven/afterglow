@@ -5,6 +5,7 @@
             [afterglow.control.codecs.push-3 :as codec]
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
+            [afterglow.control.devices.push-launch :as launch]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.display :as display]
@@ -56,7 +57,7 @@
               metadata {:control/pad-key key :control/selection-token token}]
           (cond
             (= mode :held)
-            (let [hold (bindings/begin-hold (:holds state) (:id cue) envelope)]
+            (let [hold (bindings/begin-hold (:holds state) (:id cue) envelope (::grid options))]
               {:state (-> state (assoc :holds (:state hold))
                           (assoc-in [:pads key :gesture-id] (:gesture-id hold)))
                :commands (mapv #(-> (merge % metadata)
@@ -230,10 +231,9 @@
      :input (partial input options)
      :ack acknowledge
      :reset-model reset-interactions
-     :stop (fn [state _model _envelope _disconnected?]
+     :stop (fn [state _model envelope _disconnected?]
              {:state (reset-interactions state)
-              :commands (mapv (fn [id] {:op :instance/end :instance-id id})
-                              (distinct (keep :instance-id (vals (get-in state [:holds :gestures])))))})}))
+              :commands (bindings/release-holds (:holds state) envelope)})}))
 
 (defn- mpe-profile [options]
   (valid! (seq (:mpe-note-cells options))
@@ -241,6 +241,7 @@
   (let [zone (mpe-codec/compile-zone (:zone options))
         controls (user-profile (assoc options :expression-mode :poly-aftertouch))
         notes (mpe/profile (assoc options :note-cells (:mpe-note-cells options)
+                                 ::mpe/launch-grid (::grid options)
                                  :axes #{:strike :pressure :glide :slide}))
         initial {:controls (:initial-state controls) :mpe (:initial-state notes)}
         combine (fn [a b] {:state {:controls (:state a) :mpe (:state b)}
@@ -311,10 +312,14 @@
 (defn profile
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
-  MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates."
+  MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates.
+  :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
-  (cond-> (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options))
-    (:display options) (assoc :feedback (partial display-feedback options))))
+  (let [grid (launch/grid options)
+        options (assoc options ::grid grid)
+        profile (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options))]
+    (cond-> (launch/with-grid profile grid (:launch-receipt options))
+      (:display options) (assoc :feedback (partial display-feedback options)))))
 
 (defn connect!
   "Explicitly open an injected MIDI transport. Manual session/suspend! and

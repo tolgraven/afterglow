@@ -3,6 +3,7 @@
             [afterglow.control.model :as model]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.push-2 :as push]
+            [afterglow.control.devices.push-3 :as push-3]
             [afterglow.control.devices.generic :as generic]
             [afterglow.control.codecs.push-2 :as codec]))
 
@@ -43,6 +44,135 @@
   h)
 
 (defn led-ack! [h] ((last @(:callbacks h)) [0xf0 0 0x21 0x1d 0 1 9 100 0xf7]))
+
+(def ^:private grid-captures
+  {:push-2 {:held [0x90 36] :latched [0x90 37] :blackout [0xb0 85 127]
+            :profile push/profile}
+   :push-3 {:held [0x93 12] :latched [0x93 13] :blackout [0xb4 22 127]
+            :profile #(push-3/profile (merge {:layout {:pads {[0 0] {:channel 3 :note 12}
+                                                             [1 0] {:channel 3 :note 13}}
+                                                       :buttons {:blackout {:channel 4 :controller 22}}}
+                                              :user-mode? true :expression-mode :poly-aftertouch
+                                              :button-bindings {:blackout :blackout}} %))}
+   :push-3-mpe {:held [0x91 40] :blackout [0xb4 22 127]
+                :profile #(push-3/profile (merge {:layout {:buttons {:blackout {:channel 4 :controller 22}}}
+                                                  :user-mode? true :expression-mode :mpe
+                                                  :zone {:manager-channel 0 :member-channels [1 2]}
+                                                  :mpe-note-cells {40 [0 0]}
+                                                  :button-bindings {:blackout :blackout}} %))}})
+
+(defn- grid-capture [kind]
+  (let [receipts (atom {}) calls (atom [])
+        capture (get grid-captures kind)
+        profile ((:profile capture) {:launch-grid {:beats 1/2}
+                                     :launch-receipt (fn [_ id] (get @receipts id))})
+        h (harness {:profile profile})
+        apply! (get-in h [:options :dispatch!])
+        dispatch! (fn [{:keys [op command-id launch-command-id] :as command}]
+                    (swap! calls conj command)
+                    (cond
+                      (contains? command :grid) (get (swap! receipts assoc command-id {:status :pending}) command-id)
+                      (= :cue/cancel-launch op)
+                      (if-let [instance-id (get-in @receipts [launch-command-id :instance-id])]
+                        (apply! (assoc command :op :instance/end :instance-id instance-id))
+                        (get (swap! receipts assoc launch-command-id {:status :cancelled}) launch-command-id))
+                      :else (apply! command)))
+        device (session/create (assoc (:options h) :dispatch! dispatch!))]
+    (assoc h :session device :capture capture :calls calls :receipts receipts :apply! apply!)))
+
+(deftest captured-grid-holds-use-one-owner-through-queue-fire-and-teardown
+  (doseq [kind [:push-2 :push-3 :push-3-mpe]]
+    (testing (name kind)
+      (let [{:keys [session capture calls receipts callbacks show now apply!] :as h} (grid-capture kind)]
+        (try
+          (if (= kind :push-2) (ready! h) (session/open! session))
+          (let [receive (last @callbacks)
+                down (conj (:held capture) 127) up (conj (:held capture) 0)
+                release-for (fn [launch release]
+                              (is (= {:op :cue/cancel-launch :reason :held-release
+                                      :launch-command-id (:command-id launch) :source (:source launch)}
+                                     (select-keys release [:op :reason :launch-command-id :source]))))]
+            (reset! now 25)
+            (receive down)
+            (let [launch (last @calls)]
+              (is (= {:beats 1/2} (:grid launch)))
+              (is (= {:time-ms 25} (:raw launch)))
+              (is (= (:command-id launch) (:gesture-id launch)))
+              (is (empty? (:instances @show)))
+              (receive up)
+              (release-for launch (last @calls))
+              (is (= :cancelled (get-in @receipts [(:command-id launch) :status]))))
+            (receive down)
+            (let [launch (last @calls)
+                  _ (receive (:blackout capture))
+                  result (apply! (dissoc launch :grid :raw))
+                  id (get-in result [:ack :instance-id])]
+              (is (= :blackout/set (:op (last @calls))))
+              (is (nil? (:grid (last @calls))))
+              (is (true? (:blackout? @show)))
+              (swap! receipts assoc (:command-id launch) {:status :fired :instance-id id})
+              (session/refresh! session)
+              (let [local (:local (session/snapshot session))]
+                (is (= id (if (= kind :push-3-mpe) (get-in local [:mpe :selected-instance]) (:selected-instance local)))))
+              (receive up)
+              (release-for launch (last @calls))
+              (is (= :releasing (get-in @show [:instances id :phase]))))
+            (receive down)
+            (let [launch (last @calls)]
+              (session/close! session true)
+              (release-for launch (last @calls))
+              (is (empty? (:errors (session/snapshot session))))))
+          (finally (session/close! session true)))))))
+
+(deftest grid-release-does-not-wait-for-a-launch-receipt
+  (doseq [[kind {:keys [profile held]}] grid-captures]
+    (testing (name kind)
+      (let [profile (profile {:launch-grid {:bars 1}})
+            state (assoc (:initial-state profile) :ready? true)
+            show (initial-model)
+            input (fn [state raw id]
+                    ((:input profile) state ((:decode profile) raw) show
+                     {:command-id id :show-id :show :epoch 1 :source {:adapter (:id profile) :session-id "grid"}}))
+            pressed (input state (conj held 127) "press")
+            released (input (:state pressed) (conj held 0) "release")
+            repressed (input (:state released) (conj held 127) "next-press")
+            launch (first (:commands pressed))
+            late ((:ack profile) (:state repressed) launch {:status :fired :instance-id "old-instance"})]
+        (is (= (:command-id launch) (:launch-command-id (first (:commands released)))))
+        (is (= (:source launch) (:source (first (:commands released)))))
+        (is (= :cue/cancel-launch (:op (first (:commands released)))))
+        (is (nil? (:selected-instance (:state late))))
+        (is (nil? (get-in (:state late) [:mpe :selected-instance])))
+        (is (empty? (:commands late)))))))
+
+(deftest captured-grid-leaves-latched-stop-immediate-and-discards-a-previous-epoch
+  (doseq [kind [:push-2 :push-3]]
+    (testing (name kind)
+      (let [{:keys [session capture calls callbacks show apply!] :as h} (grid-capture kind)]
+        (try
+          (if (= kind :push-2) (ready! h) (session/open! session))
+          (let [receive (last @callbacks)
+                instance (apply! {:command-id "latched" :source {:adapter :test} :time-ms 0
+                                  :epoch (:epoch @show) :show-id (:show-id @show)
+                                  :op :cue/launch :cue-id :latched})
+                id (get-in instance [:ack :instance-id])]
+            (receive (conj (:latched capture) 127))
+            (is (= {:op :instance/end :instance-id id}
+                   (select-keys (last @calls) [:op :instance-id :grid])))
+            (is (= :releasing (get-in @show [:instances id :phase])))
+            (receive (conj (:held capture) 127))
+            (let [before @calls]
+              (swap! show #(-> % (update :epoch inc) (assoc :instances {})))
+              (receive (conj (:held capture) 0))
+              (is (= before @calls))
+              (receive (conj (:held capture) 127))
+              (is (not= (:command-id (last before)) (:command-id (last @calls))))
+              (is (= (:epoch @show) (:epoch (last @calls))))))
+          (finally (session/close! session true)))))))
+
+(deftest invalid-push-grid-is-rejected-before-transport-acquisition
+  (doseq [[_ {:keys [profile]}] grid-captures, grid [nil {} {:ms 500} {:beats 0} {:bars 1 :beats 1}]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Push launch grid" (profile {:launch-grid grid})))))
 
 (deftest opens-explicitly-queries-palettes-in-order-and-diffs-output
   (let [h (harness) device (:session h)]

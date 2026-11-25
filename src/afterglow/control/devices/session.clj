@@ -8,6 +8,8 @@
 (defn create
   "Create an inert session. Required options: :session-id, :profile, :model!
   (snapshot fn), :dispatch! (command -> result/ack synchronously), :now-ms!.
+  A grid cue launch/release may return a queue receipt. Profiles can reconcile
+  those receipts against the committed model before input and feedback.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
@@ -20,6 +22,7 @@
                  (map? profile) (every? ifn? [model! dispatch! now-ms!]))
     (throw (ex-info "Session needs ID, profile, model!, dispatch! and now-ms!" {})))
   {:options options :lock (Object.) :resources (atom {})
+   :command-prefix (if (:grid-launches? profile) (str (java.util.UUID/randomUUID)) session-id)
    :state (atom {:status :closed :generation 0 :counter 0
                  :local (:initial-state profile {}) :errors []})})
 
@@ -32,17 +35,18 @@
 (defn- record-error! [session error]
   (update-state! session update :errors #(vec (take-last 32 (conj % (.getMessage ^Throwable error))))))
 
-(defn- envelope! [session]
-  (let [{:keys [session-id profile model! now-ms!]} (:options session)
-        model (model!)
-        state (update-state! session update :counter inc)
-        now (now-ms!)]
-    (when-not (and (number? now) (Double/isFinite (double now)) (<= 0 now))
-      (throw (ex-info "Device logical clock must return finite nonnegative milliseconds" {})))
-    {:command-id (str session-id ":" (:generation state) ":" (:counter state))
-     :show-id (:show-id model) :epoch (:epoch model)
-     :source {:adapter (:id profile) :session-id session-id}
-     :time-ms (max (:time-ms model 0) now)}))
+(defn- envelope!
+  ([session] (envelope! session ((get-in session [:options :model!]))))
+  ([session model]
+   (let [{:keys [session-id profile now-ms!]} (:options session)
+         state (update-state! session update :counter inc)
+         now (now-ms!)]
+     (when-not (and (number? now) (Double/isFinite (double now)) (<= 0 now))
+       (throw (ex-info "Device logical clock must return finite nonnegative milliseconds" {})))
+     {:command-id (str (:command-prefix session) ":" (:generation state) ":" (:counter state))
+      :show-id (:show-id model) :epoch (:epoch model)
+      :source {:adapter (:id profile) :session-id session-id}
+      :time-ms (max (:time-ms model 0) now)})))
 
 (defn- adopt-epoch! [session model]
   (let [epoch (:epoch model) state @(:state session)]
@@ -52,6 +56,9 @@
                               (reset-model (:local state))
                               (:initial-state (:profile (:options session)) {}))))))
 
+(defn- grid-launch? [template]
+  (and (= :cue/launch (:op template)) (contains? template :grid)))
+
 (defn- dispatch-commands! [session commands]
   (let [{:keys [dispatch! profile]} (:options session)]
     (loop [remaining (seq commands) count 0]
@@ -59,10 +66,18 @@
         (when (>= count 64)
           (throw (ex-info "Device transition emitted too many commands" {})))
         ;; Admission time/identity are assigned here, including delayed releases.
-        (let [command (merge template (envelope! session))
-              response (dispatch! command)
+        (let [envelope (envelope! session)
+              scheduled-launch? (grid-launch? template)
+              timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
+              stale? (and timed-cue? (some #(and (contains? template %)
+                                                (not= (get template %) (get envelope %)))
+                                          [:show-id :epoch]))
+              command (cond-> (merge template envelope)
+                        (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
+              response (if stale? {:status :rejected :reason :stale-epoch} (dispatch! command))
               ack (or (:ack response) response)]
-          (when-not (#{:accepted :rejected} (:status ack))
+          (when-not (or (#{:accepted :rejected} (:status ack))
+                        (and timed-cue? (#{:pending :fired :cancelled :missed} (:status ack))))
             (throw (ex-info "dispatch! must return a synchronous command acknowledgement" {})))
           (update-state! session assoc :last-ack ack)
           (let [result (when-let [acknowledge (:ack profile)]
@@ -97,6 +112,17 @@
                       (close! session true)
                       (update-state! session assoc :status :failed))
       nil)))
+
+(defn- reconcile! [session model]
+  (if-let [reconcile (get-in session [:options :profile :reconcile])]
+    (let [result (reconcile (:local @(:state session)) model)]
+      (enact! session result)
+      (if (seq (:commands result))
+        (let [model ((get-in session [:options :model!]))]
+          (adopt-epoch! session model)
+          model)
+        model))
+    model))
 
 (defn- close-resource! [session kind]
   (when-let [handle (get @(:resources session) kind)]
@@ -165,7 +191,8 @@
                    (resume! session))
                  (let [model (model!)]
                    (adopt-epoch! session model)
-                   (enact! session ((:input profile) (:local @(:state session)) event model (envelope! session)))
+                   (let [model (reconcile! session model)]
+                     (enact! session ((:input profile) (:local @(:state session)) event model (envelope! session model))))
                    (refresh! session)))))
            (catch Exception error
              (record-error! session error)
@@ -200,9 +227,10 @@
         (let [{:keys [profile model!]} (:options session)
               model (model!)]
           (adopt-epoch! session model)
-          (when-let [feedback (:feedback profile)]
-            (let [local (:local @(:state session))]
-              (enact! session (feedback local (feedback-model session local model) (envelope! session))))))
+          (let [model (reconcile! session model)]
+            (when-let [feedback (:feedback profile)]
+              (let [local (:local @(:state session))]
+                (enact! session (feedback local (feedback-model session local model) (envelope! session)))))))
         (catch Exception error
           (record-error! session error)
           (when (:device/transport-failed (ex-data error))

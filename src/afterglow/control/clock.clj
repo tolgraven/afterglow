@@ -130,7 +130,8 @@
   "Apply timestamped {:source-id :type :time-ms ...} data and return
   {:state :accepted? :reason?}. MIDI events use decode-midi types. External
   :clock events carry absolute :beat/:bpm/:playing?/:confidence and optional
-  :meter/:kind. Beat Link :beat-link/beat gives BPM and optional 1-based bar beat;
+  :meter/:kind and a boolean :discontinuity? for a known transport jump.
+  Beat Link :beat-link/beat gives BPM and optional 1-based bar beat;
   :beat-link/status updates tempo/playing without pretending an integer status
   beat number is a fractional playhead. :source/lost freezes the last projection.
   Out-of-order source events and duplicate clock ticks are ignored."
@@ -161,11 +162,13 @@
               (= type :clock)
               (do
                 (when-not (and (every? finite? ((juxt :beat :bpm :confidence) event)) (<= 0 (:beat event))
-                               (< 0 (:bpm event) 1000) (<= 0 (:confidence event) 1) (boolean? (:playing? event)))
+                               (< 0 (:bpm event) 1000) (<= 0 (:confidence event) 1) (boolean? (:playing? event))
+                               (boolean? (:discontinuity? event false)))
                   (fail! "External clock requires finite beat, bpm, confidence and playing state"))
-                (merge source (select-keys event [:beat :bpm :playing? :confidence :kind])
-                       {:time-ms time-ms :awaiting-first-tick? false :phase-kind :absolute
-                        :meter (time/normalize-meter (or (:meter event) (:meter source)))}))
+                (cond-> (merge source (select-keys event [:beat :bpm :playing? :confidence :kind])
+                               {:time-ms time-ms :awaiting-first-tick? false :phase-kind :absolute
+                                :meter (time/normalize-meter (or (:meter event) (:meter source)))})
+                  (:discontinuity? event) (update :source-epoch inc)))
               (= type :beat-link/status)
               (do
                 (when-not (and (boolean? (:playing? event))
