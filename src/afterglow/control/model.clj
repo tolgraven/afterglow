@@ -21,6 +21,12 @@
 
 (defn- identifier? [x] (or (keyword? x) (and (string? x) (not (empty? x)))))
 
+(def reload-policies
+  "Hot-reload policies a launch, cue or running instance may declare. :migrate
+  adopts a newer definition and transforms private state through the state
+  migration its compiled step carries (afterglow.runtime.engine/with-state-migration)."
+  #{:pinned :restart :preserve-state :migrate})
+
 (defn- duration? [x] (and (params/finite-number? x) (pos? x)))
 
 (defn- nonnegative? [x] (and (params/finite-number? x) (<= 0 x)))
@@ -124,6 +130,10 @@
       (require! effect :unknown-effect "Cue refers to an unknown effect or version")
       (require! (params/finite-number? (get definition :priority 0))
                 :invalid-definition "Priority must be finite")
+      ;; An explicit nil policy predates validation and means the default, :pinned.
+      (when (some? (:reload-policy definition))
+        (require! (reload-policies (:reload-policy definition)) :invalid-definition
+                  "Unknown reload policy" {:path [:reload-policy] :reload-policy (:reload-policy definition)}))
       (check-params! (get effect :params {}) (get definition :params {}))
       (check-params! (get effect :params {}) (get definition :saved-params {})))
     :fixtures nil)
@@ -296,7 +306,7 @@
         _ (require! (nonnegative? release) :invalid-duration "Release duration must be nonnegative")
         clock (clock model time)
         reload-policy (or (:reload-policy launch) (:reload-policy cue) :pinned)
-        _ (require! (#{:pinned :restart :preserve-state} reload-policy) :invalid-launch "Unknown reload policy")
+        _ (require! (reload-policies reload-policy) :invalid-launch "Unknown reload policy")
         next-id (loop [candidate (inc (get-in model [:control :next-instance]))]
                   (if (contains? (:instances model) (str (:epoch model) ":" candidate))
                     (recur (inc candidate)) candidate))

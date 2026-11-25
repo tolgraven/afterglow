@@ -8,8 +8,10 @@ of this runtime alone.
   values, explicit logical time and deterministic priority/launch ordering.
 - `:revision` belongs to accepted commands. Rendering advances `:frame-number`;
   consumers compare epoch, revision and frame number together.
-- Reload defaults to `:pinned`. The explicit `:preserve-state` and `:restart`
-  policies validate retained parameters against new schemas. Launch/release
+- Reload defaults to `:pinned`. The explicit `:preserve-state`, `:restart` and
+  `:migrate` policies validate retained parameters against new schemas. `:migrate`
+  runs the pure state migration attached to the new compiled step once, at the
+  takeover frame; a failing migration is a `:migrate` reload fault. Launch/release
   durations stay fixed until relaunch. Recoverable candidate failures retain the
   captured last-good revision; valid newer versions or :instance/retry recover.
   A faulted current revision contributes nothing and retains its last valid state.
