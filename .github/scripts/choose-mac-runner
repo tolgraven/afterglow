@@ -50,7 +50,7 @@ def select_runner(repository, sha, token, context, *, offer):
         except (URLError, TimeoutError, HTTPException, ValueError, KeyError, TypeError) as error:
             interval = CLAIM_WAIT if offer else HEARTBEAT_LIFETIME.total_seconds()
             if elapsed >= MAX_WAIT or now - last_status >= interval:
-                print(f"Mac status unavailable ({type(error).__name__}). Using hosted macOS.", file=sys.stderr)
+                print(f"Mac status unavailable ({type(error).__name__}). Skipping the native Mac suite.", file=sys.stderr)
                 return "hosted"
             time.sleep(10)
             continue
