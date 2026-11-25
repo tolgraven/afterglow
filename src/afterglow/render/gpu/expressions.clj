@@ -26,11 +26,53 @@
               flat positions)
       (reduce append flat positions))))
 
-(defn- uniform-specs [{:keys [inputs uniforms]}]
+(defn- phase-keys [uniforms]
+  (into {}
+        (for [clock [:beat :elapsed-beats]]
+          [clock (first (remove #(contains? uniforms %)
+                                (map #(keyword (namespace ::phase) (str (name clock) "-phase-" %))
+                                     (range))))])))
+
+(defn- lower-beat-phase [node clock-keys]
+  (let [args (:args node)
+        phase (when (vector? args) (first args))
+        terms (:args phase)]
+    (cond
+      ;; A step can turn an insignificant floating difference into a large
+      ;; discrete move. Its existing native arithmetic stays intact.
+      (#{:floor :fract} (:op node)) node
+      (and (#{:sin :cos} (:op node)) (= :add (:op phase))
+           (= 2 (count terms)) (= #{:beat :position} (set (map :op terms))))
+      (assoc-in node [:args 0 :args]
+                (mapv (fn [term]
+                        (if (= :beat (:op term))
+                          {:op :param :type :number
+                           :key (clock-keys (if (= :absolute (:clock term)) :beat :elapsed-beats))}
+                          term))
+                      terms))
+      (vector? args) (assoc node :args (mapv #(lower-beat-phase % clock-keys) args))
+      :else node)))
+
+(defn- native-plan [outputs plan options xyz]
+  (let [aims (select-keys outputs [:aim :direction])]
+    (if (seq aims)
+      (let [clock-keys (phase-keys (:uniforms plan))
+            lowered (update-vals aims #(lower-beat-phase % clock-keys))]
+        (if (= aims lowered)
+          plan
+          (assoc (ir/emit-glsl-batch (merge outputs lowered) options)
+                 :phase-sources (into {} (map (fn [[clock key]] [key [clock]])) clock-keys)
+                 :position-ceiling (reduce (fn [largest v] (max largest (abs (double v)))) 0.0 xyz))))
+      plan)))
+
+(defn- uniform-specs [{:keys [inputs uniforms phase-sources position-ceiling]}]
   (let [clocks (for [[key uniform] (dissoc inputs :position :surface-uv)
                      :let [meter? (#{:beats-per-bar :bars-per-phrase} key)]]
                  {:path (if meter? [:meter key] [key]) :type :number :meter? meter? :name uniform})
-        params (for [[key spec] uniforms] (assoc spec :path [:params key]))]
+        params (for [[key spec] uniforms]
+                 (if-let [path (get phase-sources key)]
+                   (assoc spec :path path :phase-position-ceiling position-ceiling)
+                   (assoc spec :path [:params key])))]
     (into [] (concat clocks params))))
 
 (defn release-program! [^GL3 gl {:keys [program vao buffers]}]
@@ -95,8 +137,10 @@
    (let [n (position-count positions)
          _ (ir/validate-surface-uv-count! surface-uvs n)
          chart? (or (instance? double/1 surface-uvs) (some some? surface-uvs))
-         plan (ir/emit-glsl-batch outputs {:surface-uv? chart?})
-         xyz (snapshot-positions positions)]
+         options {:surface-uv? chart?}
+         original (ir/emit-glsl-batch outputs options)
+         xyz (snapshot-positions positions)
+         plan (native-plan outputs original options xyz)]
      (when (> (* (long n) (:stride plan)) 4000000)
        (throw (ex-info "Batch exceeds four million output components" {})))
      (cond-> (assoc (->Group outputs xyz plan) :bindings (uniform-specs plan))
@@ -130,8 +174,20 @@
    (let [group (group outputs positions surface-uvs)]
      (context/open! ::expressions timeout-ms #(compile-program! % group)))))
 
-(defn- uniform-values [env {:keys [path type meter?]}]
-  (let [value (get-in env path)]
+(defn- captured-phase [value ceiling path]
+  (when-not (and (number? value) (Double/isFinite (double value)))
+    (throw (ex-info "Beat phase requires a finite clock" {:type ::beat-phase :path path})))
+  (let [beat (double value)]
+    ;; After this point the CPU's original position + beat can itself round
+    ;; by more than one float32 step at unit scale. Use the original CPU
+    ;; expression rather than changing which bits of that sum survive.
+    (when (> (Math/ulp (+ (abs beat) (double ceiling))) (Math/ulp (float 1.0)))
+      (throw (ex-info "Beat phase addition needs the CPU reference" {:type ::beat-phase :path path})))
+    (Math/atan2 (Math/sin beat) (Math/cos beat))))
+
+(defn- uniform-values [env {:keys [path type meter? phase-position-ceiling]}]
+  (let [raw (get-in env path)
+        value (if (some? phase-position-ceiling) (captured-phase raw phase-position-ceiling path) raw)]
     (if (= type :number)
       (let [v (context/finite-float value)]
         (when (and meter? (not (pos? v))) (throw (ex-info "Meter must remain positive at float32 precision" {:path path})))

@@ -54,6 +54,94 @@
       (finally (.close runner)))
     (is (thrown? clojure.lang.ExceptionInfo (gpu/evaluate! runner env)))))
 
+(defn- beat-angle [op axis clock]
+  (operation op (operation :add {:op :position :axis axis} {:op :beat :clock clock})))
+
+(deftest periodic-native-geometry-keeps-beat-clocks-and-ordinary-fields-separate
+  (let [private-key ::gpu/beat-phase-0
+        absolute (beat-angle :cos :x :absolute)
+        elapsed (beat-angle :sin :z :elapsed)
+        fields {:aim (operation :vec3 absolute (const-node 1.0) elapsed)
+                :direction (operation :vec3 (operation :floor absolute) (const-node 0.0) (const-node 1.0))
+                :color (operation :vec3 (operation :fract {:op :beat :clock :absolute})
+                                  (param private-key :number) (const-node 0.75))}
+        positions [[0.55 3.5 -1.5] [-2.75 3.5 0.9]]
+        capture {:beat 200000.75 :elapsed-beats 18.150000000000123 :params {private-key 0.25}}
+        alternate (assoc capture :beat 18.125 :elapsed-beats 725000.375)
+        group (gpu/group fields positions)
+        values (zipmap (map (juxt :path #(contains? % :phase-position-ceiling)) (:bindings group))
+                       (gpu/capture-inputs (:bindings group) capture))
+        reference (ir/compile-batch fields)]
+    (is (= [200000.75] (values [[:beat] false])))
+    (is (= [0.25] (values [[:params private-key] false])))
+    (is (< (abs (first (values [[:beat] true]))) Math/PI))
+    (is (< (abs (first (values [[:elapsed-beats] true]))) Math/PI))
+    (is (not= (values [[:beat] true]) (values [[:elapsed-beats] true])))
+    (with-open [runner (gpu/open! fields positions)]
+      (doseq [env [capture alternate]]
+        (let [expected (ir/evaluate-batch reference env positions)
+              actual (gpu/evaluate! runner env)]
+          (verify expected actual)
+          (doseq [field [:direction :color]]
+            (is (= (vec (get-in expected [:outputs field :values]))
+                   (vec (get-in actual [:outputs field :values])))))))
+      (doseq [bad [(dissoc capture :elapsed-beats) (assoc capture :beat ##Inf)
+                   (assoc capture :beat 1.0e18)]]
+        (is (thrown? clojure.lang.ExceptionInfo (gpu/evaluate! runner bad)))))))
+
+(def airie-aim-operands
+  "Tolglow #609 capture at show time 9,075 ms (tolglow 2a5add3c,
+  native-movement-555/aim-operands.json). Head 5 crossed a fine-pan step."
+  {:aim (operation :vec3
+                   (operation :add
+                              (operation :multiply {:op :position :axis :x} (const-node -0.35))
+                              (operation :multiply (param :width :number)
+                                         (operation :sin (operation :add {:op :position :axis :x} {:op :beat}))))
+                   (param :height :number) (const-node 0.9))
+   :env {:params {:width 1.6562500000000462 :height 0.9261703921760138}
+         :beat 18.150000000000123 :elapsed-beats 18.150000000000123 :time-ms 9075
+         :meter {:beats-per-bar 4 :bars-per-phrase 4}}
+   :positions (mapv #(vector % 3.5 -1.5)
+                    [-3.85 -2.75 -1.65 -0.5499999999999998 0.5500000000000003
+                     1.65 2.7500000000000004 3.850000000000001])
+   :head-5-x -0.4392796365045701
+   :unlowered-native-x -0.43928152322769165})
+
+(deftest captured-airie-aim-phase-reaches-the-shader-reduced
+  ;; The same tree under :color is an ordinary field and keeps float32 phase
+  ;; addition; under :aim the captured elapsed beat is reduced in double first.
+  (let [{:keys [aim env positions head-5-x unlowered-native-x]} airie-aim-operands
+        fields {:aim aim :color aim}
+        group (gpu/group fields positions)
+        phases (keep (fn [[binding value]] (when (:phase-position-ceiling binding) [(:path binding) value]))
+                     (map vector (:bindings group) (gpu/capture-inputs (:bindings group) env)))
+        reference (ir/evaluate-batch (ir/compile-batch fields) env positions)
+        x-errors (fn [result field]
+                   (let [^doubles expected (get-in reference [:outputs :aim :values])
+                         ^doubles values (get-in result [:outputs field :values])]
+                     (mapv #(abs (- (aget values (* 3 %)) (aget expected (* 3 %)))) (range (count positions)))))]
+    (is (= head-5-x (aget ^doubles (get-in reference [:outputs :aim :values]) 12)))
+    (is (= 1 (count phases)) "Only the elapsed clock reaches the shader as a phase")
+    (let [[path [phase]] (first phases)]
+      (is (= [:elapsed-beats] path))
+      (is (<= (abs (- phase (- (:elapsed-beats env) (* 6 Math/PI)))) (Math/ulp (float 1.0)))))
+    (with-open [runner (gpu/open! fields positions)]
+      (let [actual (gpu/evaluate! runner env)
+            renderer (str (get-in runner [:resources :renderer]))
+            apple? (boolean (re-find #"^Apple M\d" renderer))
+            lowered (x-errors actual :aim)
+            ordinary (x-errors actual :color)]
+        (verify (update reference :outputs dissoc :color) (update actual :outputs dissoc :color))
+        (println "Airie aim phase" {:renderer renderer :max-lowered-x-error (apply max lowered)
+                                    :max-ordinary-x-error (apply max ordinary)
+                                    :head-5-ordinary-x (aget ^doubles (get-in actual [:outputs :color :values]) 12)})
+        (when apple?
+          ;; Measured bounds on Apple M-series; other drivers report only.
+          (is (= unlowered-native-x (aget ^doubles (get-in actual [:outputs :color :values]) 12))
+              "The ordinary field reproduces the captured Airie native value")
+          (is (< (apply max lowered) 4.0e-7))
+          (is (< (nth lowered 4) (/ (nth ordinary 4) 4))))))))
+
 (deftest zero-size-and-nonfinite-results
   (with-open [runner (gpu/open! fields [])]
     (verify (ir/evaluate-batch (ir/compile-batch fields) env []) (gpu/evaluate! runner env)))
