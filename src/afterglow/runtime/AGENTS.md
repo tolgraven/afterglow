@@ -16,6 +16,13 @@ of this runtime alone.
   captured last-good revision; valid newer versions or :instance/retry recover.
   A faulted current revision contributes nothing and retains its last valid state.
   Never repeatedly execute a quarantined revision on every frame.
+- A host whose frame inputs already follow a candidate (modulated parameters,
+  modulated layer priority) supplies `::engine/reload-fallback`. That frame reads
+  one input set throughout: candidates are attempted first, and one rejection
+  evaluates every captured revision on the fallback inputs and leaves the accepted
+  candidates pending, without a fault, for the next frame. Keep the fallback a
+  plain frame-input map and report the set read in `:reload-inputs`. Without it,
+  candidates keep their independent per-instance fallback.
 - Duration expiry starts release at its exact timestamp. The compiler owns the
   envelope during its declared release period; expired instances contribute
   nothing at or beyond the release deadline. A step may finish earlier.
@@ -40,6 +47,9 @@ of this runtime alone.
   attempted state/intents and discard its blocks, then resolve healthy results
   without running their code twice. Never retain typed results in saved state or
   silently hold stale emission. See doc/architecture/effect-fault-isolation.md.
+  The one exception is a rejected candidate in a frame that supplied
+  `::engine/reload-fallback`: that frame is evaluated once more on the fallback
+  inputs, so its last-good revisions render with the inputs computed for them.
 
 Use `afterglow.runtime.reuse` for declared pure calculations. Fold only captured
 inputs and immutable bindings into their results. Preserve per-frame intent
