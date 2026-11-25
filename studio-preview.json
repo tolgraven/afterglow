@@ -1,0 +1,675 @@
+{
+  "chromium": "156.0.8078.79",
+  "telemetry": {
+    "lightingMode": "interpolate",
+    "targetRefreshHz": 10,
+    "tierMaxHz": 10,
+    "displayHz": 60,
+    "ready": true,
+    "failed": null,
+    "renderer": "Three.js r187",
+    "quality": "low",
+    "deviceRenderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+    "softwareRenderer": true,
+    "pixels": [
+      153,
+      94
+    ],
+    "displayPixels": [
+      408,
+      250
+    ],
+    "sceneSamples": 0,
+    "edgeFilter": "FXAA",
+    "displayRange": "sdr",
+    "gpuTimeMs": 9208.018314,
+    "film": {
+      "bloom": 0.28,
+      "exposure": 0.85,
+      "grain": 0.0015
+    },
+    "measuredFrameMs": 9208.018314,
+    "renderScale": 0.5,
+    "frameCPUms": 3.3700000047683716,
+    "frameIntervalMs": 42759.7425756599,
+    "idleBudgetMs": 42756.37257565513,
+    "nextFrameAt": 481860.0603427951,
+    "frames": 14,
+    "geometryCount": 207,
+    "textureCount": 28,
+    "programCount": 24,
+    "activeLights": 8,
+    "reflectedPatches": [],
+    "lightIds": [
+      "head-1",
+      "head-2",
+      "head-3",
+      "head-4",
+      "head-5",
+      "head-6",
+      "head-7",
+      "head-8"
+    ],
+    "fixtureCount": 8,
+    "visibleFixtures": 8,
+    "lightCap": 16,
+    "shadowCount": 1,
+    "workLight": 0.12,
+    "fogAmount": 0.3,
+    "camera": [
+      1.0800000000000003,
+      2.400000000000001,
+      7.599999999999996
+    ],
+    "target": [
+      0,
+      1.9000000000000001,
+      -2.8000000000000007
+    ],
+    "fog": {
+      "quality": "phone",
+      "targetSize": [
+        50,
+        31
+      ],
+      "raySteps": 24,
+      "lightCount": 8,
+      "shadowCount": 1,
+      "cpuUpdateMs": 0.005000025033950806,
+      "uploads": 1,
+      "cells": 4800,
+      "steps": 0,
+      "time": 0,
+      "droppedSeconds": 0,
+      "meanDensity": 0.07000000029802322,
+      "maximumDensity": 0.07000000029802322,
+      "heat": 0,
+      "activeSources": 1,
+      "massEstimate": 42.000000178813934
+    },
+    "visible": true,
+    "hidden": false,
+    "lost": false,
+    "epoch": 0,
+    "revision": 19,
+    "frameNumber": 12564,
+    "thread": "main",
+    "fallbackReason": "Background renderer did not produce its first frame"
+  },
+  "report": [
+    {
+      "action": "All effects",
+      "revision": 11,
+      "frame": 8251,
+      "rendered": {
+        "completed": true,
+        "frame": 8762,
+        "activeLights": 8,
+        "drawCounter": 3,
+        "thread": "main"
+      },
+      "included": [
+        "0:1",
+        "0:2",
+        "0:3"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3",
+        "head-4",
+        "head-5",
+        "head-6",
+        "head-7",
+        "head-8"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-5": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-6": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-7": [
+          0.45,
+          0.08,
+          0.58
+        ],
+        "head-8": [
+          0.45,
+          0.08,
+          0.58
+        ]
+      }
+    },
+    {
+      "action": "Solo Ember",
+      "revision": 12,
+      "frame": 9545,
+      "rendered": {
+        "completed": true,
+        "frame": 9642,
+        "activeLights": 3,
+        "drawCounter": 4,
+        "thread": "main"
+      },
+      "included": [
+        "0:1"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0,
+          0,
+          0
+        ],
+        "head-5": [
+          0,
+          0,
+          0
+        ],
+        "head-6": [
+          0,
+          0,
+          0
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Add Solo Ice",
+      "revision": 13,
+      "frame": 9876,
+      "rendered": {
+        "completed": true,
+        "frame": 9910,
+        "activeLights": 6,
+        "drawCounter": 6,
+        "thread": "main"
+      },
+      "included": [
+        "0:1",
+        "0:2"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3",
+        "head-4",
+        "head-5",
+        "head-6"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-5": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-6": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Mute Ice",
+      "revision": 14,
+      "frame": 10440,
+      "rendered": {
+        "completed": true,
+        "frame": 10458,
+        "activeLights": 3,
+        "drawCounter": 7,
+        "thread": "main"
+      },
+      "included": [
+        "0:1"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0,
+          0,
+          0
+        ],
+        "head-5": [
+          0,
+          0,
+          0
+        ],
+        "head-6": [
+          0,
+          0,
+          0
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Add Mute Orchid",
+      "revision": 15,
+      "frame": 10807,
+      "rendered": {
+        "completed": true,
+        "frame": 10824,
+        "activeLights": 3,
+        "drawCounter": 8,
+        "thread": "main"
+      },
+      "included": [
+        "0:1"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0,
+          0,
+          0
+        ],
+        "head-5": [
+          0,
+          0,
+          0
+        ],
+        "head-6": [
+          0,
+          0,
+          0
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Solo Ice exclusively",
+      "revision": 16,
+      "frame": 11309,
+      "rendered": {
+        "completed": true,
+        "frame": 11385,
+        "activeLights": 0,
+        "drawCounter": 10,
+        "thread": "main"
+      },
+      "included": [],
+      "lit": [],
+      "emitted": {
+        "head-1": [
+          0,
+          0,
+          0
+        ],
+        "head-2": [
+          0,
+          0,
+          0
+        ],
+        "head-3": [
+          0,
+          0,
+          0
+        ],
+        "head-4": [
+          0,
+          0,
+          0
+        ],
+        "head-5": [
+          0,
+          0,
+          0
+        ],
+        "head-6": [
+          0,
+          0,
+          0
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Clear Solo Ice",
+      "revision": 17,
+      "frame": 11606,
+      "rendered": {
+        "completed": true,
+        "frame": 11651,
+        "activeLights": 3,
+        "drawCounter": 11,
+        "thread": "main"
+      },
+      "included": [
+        "0:1"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0,
+          0,
+          0
+        ],
+        "head-5": [
+          0,
+          0,
+          0
+        ],
+        "head-6": [
+          0,
+          0,
+          0
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Mute Orchid exclusively",
+      "revision": 18,
+      "frame": 11937,
+      "rendered": {
+        "completed": true,
+        "frame": 11942,
+        "activeLights": 6,
+        "drawCounter": 12,
+        "thread": "main"
+      },
+      "included": [
+        "0:1",
+        "0:2"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3",
+        "head-4",
+        "head-5",
+        "head-6"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-5": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-6": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-7": [
+          0,
+          0,
+          0
+        ],
+        "head-8": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "action": "Clear Mute Orchid",
+      "revision": 19,
+      "frame": 12309,
+      "rendered": {
+        "completed": true,
+        "frame": 12334,
+        "activeLights": 8,
+        "drawCounter": 14,
+        "thread": "main"
+      },
+      "included": [
+        "0:1",
+        "0:2",
+        "0:3"
+      ],
+      "lit": [
+        "head-1",
+        "head-2",
+        "head-3",
+        "head-4",
+        "head-5",
+        "head-6",
+        "head-7",
+        "head-8"
+      ],
+      "emitted": {
+        "head-1": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-2": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-3": [
+          1,
+          0.025,
+          0.008
+        ],
+        "head-4": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-5": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-6": [
+          0.2,
+          0.65,
+          0.72
+        ],
+        "head-7": [
+          0.45,
+          0.08,
+          0.58
+        ],
+        "head-8": [
+          0.45,
+          0.08,
+          0.58
+        ]
+      }
+    }
+  ]
+}

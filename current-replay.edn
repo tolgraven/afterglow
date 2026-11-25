@@ -1,0 +1,224 @@
+{:initial
+ {:selection
+  {:modes {:solo :exclusive, :mute :exclusive},
+   :solo-active? false,
+   :included-instance-ids ["0:2" "0:1" "0:3"],
+   :instances
+   [{:id "0:2", :soloed? false, :muted? false, :suppressed-by nil}
+    {:id "0:1", :soloed? false, :muted? false, :suppressed-by nil}
+    {:id "0:3", :soloed? false, :muted? false, :suppressed-by nil}],
+   :layers []},
+  :dmx-bytes [64 128 191 191],
+  :ordered-parameters
+  [{:id "0:2", :params {:level 0.5}}
+   {:id "0:1", :params {:level 0.25}}
+   {:id "0:3", :params {:level 0.75}}]},
+ :replay
+ [{:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? true,
+    :included-instance-ids ["0:1"],
+    :instances
+    [{:id "0:2", :soloed? false, :muted? false, :suppressed-by :solo}
+     {:id "0:1", :soloed? true, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? false, :suppressed-by :solo}],
+    :layers []},
+   :dmx-bytes [64 0 0 64],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Solo wash",
+   :ack
+   {:epoch 0,
+    :revision 10,
+    :selected-instance-ids ["0:1"],
+    :mode :exclusive,
+    :status :accepted,
+    :control :solo,
+    :show-id :main,
+    :instance-ids ["0:1"],
+    :command-id "replay-0",
+    :changed-instance-ids ["0:1"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? true,
+    :included-instance-ids ["0:2" "0:1"],
+    :instances
+    [{:id "0:2", :soloed? true, :muted? false, :suppressed-by nil}
+     {:id "0:1", :soloed? true, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? false, :suppressed-by :solo}],
+    :layers []},
+   :dmx-bytes [64 128 0 64],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Add Solo side",
+   :ack
+   {:epoch 0,
+    :revision 11,
+    :selected-instance-ids ["0:2" "0:1"],
+    :mode :additive,
+    :status :accepted,
+    :control :solo,
+    :show-id :main,
+    :instance-ids ["0:2"],
+    :command-id "replay-1",
+    :changed-instance-ids ["0:2"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? true,
+    :included-instance-ids ["0:1"],
+    :instances
+    [{:id "0:2", :soloed? true, :muted? true, :suppressed-by :mute}
+     {:id "0:1", :soloed? true, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? false, :suppressed-by :solo}],
+    :layers []},
+   :dmx-bytes [64 0 0 64],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Mute side",
+   :ack
+   {:epoch 0,
+    :revision 12,
+    :selected-instance-ids ["0:2"],
+    :mode :exclusive,
+    :status :accepted,
+    :control :mute,
+    :show-id :main,
+    :instance-ids ["0:2"],
+    :command-id "replay-2",
+    :changed-instance-ids ["0:2"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? true,
+    :included-instance-ids ["0:1"],
+    :instances
+    [{:id "0:2", :soloed? true, :muted? true, :suppressed-by :mute}
+     {:id "0:1", :soloed? true, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? true, :suppressed-by :mute}],
+    :layers []},
+   :dmx-bytes [64 0 0 64],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Add Mute accent",
+   :ack
+   {:epoch 0,
+    :revision 13,
+    :selected-instance-ids ["0:2" "0:3"],
+    :mode :additive,
+    :status :accepted,
+    :control :mute,
+    :show-id :main,
+    :instance-ids ["0:3"],
+    :command-id "replay-3",
+    :changed-instance-ids ["0:3"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? true,
+    :included-instance-ids [],
+    :instances
+    [{:id "0:2", :soloed? true, :muted? true, :suppressed-by :mute}
+     {:id "0:1", :soloed? false, :muted? false, :suppressed-by :solo}
+     {:id "0:3", :soloed? false, :muted? true, :suppressed-by :mute}],
+    :layers []},
+   :dmx-bytes [0 0 0 0],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Solo side exclusively",
+   :ack
+   {:epoch 0,
+    :revision 14,
+    :selected-instance-ids ["0:2"],
+    :mode :exclusive,
+    :status :accepted,
+    :control :solo,
+    :show-id :main,
+    :instance-ids ["0:2"],
+    :command-id "replay-4",
+    :changed-instance-ids ["0:1"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? false,
+    :included-instance-ids ["0:1"],
+    :instances
+    [{:id "0:2", :soloed? false, :muted? true, :suppressed-by :mute}
+     {:id "0:1", :soloed? false, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? true, :suppressed-by :mute}],
+    :layers []},
+   :dmx-bytes [64 0 0 64],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Clear Solo side",
+   :ack
+   {:epoch 0,
+    :revision 15,
+    :selected-instance-ids [],
+    :mode :exclusive,
+    :status :accepted,
+    :control :solo,
+    :show-id :main,
+    :instance-ids ["0:2"],
+    :command-id "replay-5",
+    :changed-instance-ids ["0:2"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? false,
+    :included-instance-ids ["0:2" "0:1"],
+    :instances
+    [{:id "0:2", :soloed? false, :muted? false, :suppressed-by nil}
+     {:id "0:1", :soloed? false, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? true, :suppressed-by :mute}],
+    :layers []},
+   :dmx-bytes [64 128 0 64],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Mute accent exclusively",
+   :ack
+   {:epoch 0,
+    :revision 16,
+    :selected-instance-ids ["0:3"],
+    :mode :exclusive,
+    :status :accepted,
+    :control :mute,
+    :show-id :main,
+    :instance-ids ["0:3"],
+    :command-id "replay-6",
+    :changed-instance-ids ["0:2"]}}
+  {:selection
+   {:modes {:solo :exclusive, :mute :exclusive},
+    :solo-active? false,
+    :included-instance-ids ["0:2" "0:1" "0:3"],
+    :instances
+    [{:id "0:2", :soloed? false, :muted? false, :suppressed-by nil}
+     {:id "0:1", :soloed? false, :muted? false, :suppressed-by nil}
+     {:id "0:3", :soloed? false, :muted? false, :suppressed-by nil}],
+    :layers []},
+   :dmx-bytes [64 128 191 191],
+   :ordered-parameters
+   [{:id "0:2", :params {:level 0.5}}
+    {:id "0:1", :params {:level 0.25}}
+    {:id "0:3", :params {:level 0.75}}],
+   :step "Clear Mute accent",
+   :ack
+   {:epoch 0,
+    :revision 17,
+    :selected-instance-ids [],
+    :mode :exclusive,
+    :status :accepted,
+    :control :mute,
+    :show-id :main,
+    :instance-ids ["0:3"],
+    :command-id "replay-7",
+    :changed-instance-ids ["0:3"]}}]}
