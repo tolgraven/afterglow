@@ -1,0 +1,14 @@
+16b30b164d39c335d67f3ad96d5f2c42e6e6fa2b
+
+lein test afterglow.render.frame-test
+
+lein test afterglow.render.layers-test
+
+lein test afterglow.render.atmosphere-test
+
+lein test afterglow.render.ir-test
+
+lein test afterglow.runtime.engine-test
+
+Ran 113 tests containing 1655 assertions.
+0 failures, 0 errors.
