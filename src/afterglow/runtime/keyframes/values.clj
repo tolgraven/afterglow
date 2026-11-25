@@ -35,7 +35,8 @@
     (loop [i 0]
       (or (= i (alength xs))
           (let [x (aget xs i)]
-            (and (Double/isFinite x) (<= lo x hi) (recur (inc i))))))))
+            ;; Two binary comparisons keep the column values primitive.
+            (and (Double/isFinite x) (<= lo x) (<= x hi) (recur (inc i))))))))
 
 (defn- valid-opacity? [x]
   (or (nil? x) (and (time/finite-number? x) (<= 0 x 1))))
