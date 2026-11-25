@@ -261,6 +261,51 @@
     (is (= :history-conflict (get-in stale-undo [:ack :code])))
     (is (identical? restored (:model stale-undo)))))
 
+(deftest temporary-cancel-preserves-a-value-adopted-under-narrower-bounds
+  (let [effect (assoc-in definition [:params :level :bounds] [0 1])
+        show (-> (control/new-show)
+                 (control! {:op :registry/publish :kind :effects :definition effect})
+                 (control! {:op :cue/put :cue {:id :pulse :effect-id :pulse}})
+                 (control! {:op :cue/launch :cue-id :pulse :launch {:reload-policy :preserve-state}}))
+        id (first (keys (:instances show)))
+        target [:instance-param id :level]
+        level-path [:instances id :params :level]
+        history-path [:control :edit-history]
+        submit (fn [model action]
+                 (control/apply-command model
+                   (merge (select-keys model [:show-id :epoch :time-ms])
+                          {:command-id (str (:revision model)) :source :runtime-test
+                           :instance-id id :param :level :control-id :encoder :gesture-id :touch}
+                          action)
+                   {:operator-id :runtime-test}))
+        begun (submit show {:op :gesture/begin :temporary? true})
+        sampled (submit (:model begun) {:op :gesture/sample :sequence 1 :value 0.8})
+        reload (fn [model effect time-ms]
+                 (let [published (control! model {:op :registry/publish :kind :effects :definition effect})]
+                   (:model (engine/advance published {:time-ms time-ms} (constantly identity)))))
+        renamed (reload (:model sampled) (assoc effect :version 2 :name "Pulse updated") 10)
+        compatible-cancel (submit renamed {:op :gesture/cancel})
+        narrowed (reload renamed (assoc effect :version 3
+                                       :params {:level {:type :number :default 0.75 :bounds [0.75 1]}}) 20)
+        canceled (submit narrowed {:op :gesture/cancel})]
+    (is (= [:accepted :accepted] (mapv #(get-in % [:ack :status]) [begun sampled])))
+    (is (= :accepted (get-in compatible-cancel [:ack :status])))
+    (is (nil? (get-in compatible-cancel [:ack :discarded])))
+    (is (= 0.5 (get-in (:model compatible-cancel) level-path)))
+    (is (= 3 (get-in narrowed [:instances id :effect-version])))
+    (is (= {:status :accepted :discarded :history-conflict}
+           (select-keys (:ack canceled) [:status :discarded])))
+    (is (= [] (:events canceled)))
+    (is (= 0.8 (get-in (:model canceled) level-path)))
+    (is (empty? (get-in (:model canceled) (conj history-path :open))))
+    (is (= [0 0] ((juxt :cursor :position) (get-in (:model canceled) history-path))))
+    (let [{saved :model settled :settled} (control/settle-temporary-gestures-for-save narrowed)]
+      (is (= 0.8 (get-in saved level-path)))
+      (is (= (:revision narrowed) (:revision saved)))
+      (is (= #{target} (set (keys settled))))
+      (is (empty? (get-in saved (conj history-path :open))))
+      (is (some? (get-in narrowed (conj history-path :open target)))))))
+
 (deftest compile-shared-definitions-once-per-frame
   (let [compiled (atom [])
         show (model (instance "a") (instance "b" :order 1))]

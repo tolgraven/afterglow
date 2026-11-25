@@ -560,7 +560,12 @@
             (require! (and (identifier? instance-id) (keyword? param)
                            (identifier? control-id) (identifier? gesture-id))
                       :invalid-gesture "Gesture needs an instance, scalar parameter, control and gesture ID"))
-        targets (if gesture? [target] (keys (:generations history)))
+        cancel-gesture (when (= :gesture/cancel op) (get-in history [:open target]))
+        ;; A reload can keep the sampled value while invalidating the rollback.
+        invalid-rollback? (and (:temporary? cancel-gesture)
+                               (not (params/valid-value? (get-in model [:instances instance-id :definition :params param])
+                                                         (:before cancel-gesture))))
+        targets (if gesture? (when-not invalid-rollback? [target]) (keys (:generations history)))
         cells (into {} (keep (fn [target]
                                (when-let [cell (history-cell model history target)]
                                  [target cell]))) targets)
