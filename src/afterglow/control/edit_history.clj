@@ -1,5 +1,6 @@
 (ns afterglow.control.edit-history
-  "Pure scalar parameter gesture and branching history transitions.")
+  "Pure parameter gestures and branching scalar edit history."
+  (:require [afterglow.control.params :as params]))
 
 (def ^:private open-limit 32)
 
@@ -23,12 +24,15 @@
   (cond-> {:status :rejected :history history :writes {} :code code}
     target (assoc :target target)))
 
-(defn- finite-number? [value]
-  (and (number? value) (Double/isFinite (double value))))
+(defn- valid-gesture-value? [{:keys [schema]} temporary? value]
+  (cond
+    (nil? schema) (params/finite-number? value)
+    temporary? (params/valid-value? schema value)
+    :else (and (#{:number :integer} (:type schema)) (params/finite-number? value))))
 
-(defn- canonical [targets target]
+(defn- canonical [targets target temporary?]
   (let [{:keys [value generation] :as cell} (get targets target)]
-    (when (and (finite-number? value) (integer? generation) (<= 0 generation))
+    (when (and (integer? generation) (<= 0 generation) (valid-gesture-value? cell temporary? value))
       cell)))
 
 (defn- current? [cell generation value]
@@ -59,8 +63,9 @@
 (defn- gesture-owner [action]
   (mapv action [:actor :control-id :gesture-id]))
 
-(defn- start-gesture [history targets {:keys [target] :as action}]
-  (let [cell (canonical targets target)
+(defn- start-gesture [history targets {:keys [target temporary?] :as action}]
+  (let [temporary? (true? temporary?)
+        cell (canonical targets target temporary?)
         [actor control-id gesture-id :as owner] (gesture-owner action)]
     (cond
       (some nil? owner) (rejected history :invalid-gesture target)
@@ -71,12 +76,12 @@
                                 (cond-> {:actor actor :control-id control-id :gesture-id gesture-id
                                          :before (:value cell) :after (:value cell)
                                          :generation (:generation cell) :last-sequence 0}
-                                  (true? (:temporary? action)) (assoc :temporary? true))) {}))))
+                                  temporary? (assoc :temporary? true))) {}))))
 
 (defn- gesture-action
   [history targets {:keys [op target value sequence last-sequence target-display] :as action}]
-  (let [{:keys [before after generation] :as gesture} (get-in history [:open target])
-        cell (canonical targets target)
+  (let [{:keys [before after generation temporary?] :as gesture} (get-in history [:open target])
+        cell (canonical targets target temporary?)
         owned-value? (current? cell generation after)]
     (cond
       (or (nil? gesture) (not= (gesture-owner action) (gesture-owner gesture)))
@@ -87,11 +92,12 @@
         (not owned-value?) (rejected history :history-conflict target)
         (not (and (integer? sequence) (> sequence (:last-sequence gesture))))
         (rejected history :stale-sample target)
-        (not (finite-number? value)) (rejected history :invalid-value target)
+        (not (and (contains? action :value) (valid-gesture-value? cell temporary? value)))
+        (rejected history :invalid-value target)
         :else (accepted (update-in history [:open target] assoc :after value :last-sequence sequence)
                         (if (= after value) {} {target value})))
 
-      (and (= :gesture/end op) (:temporary? gesture))
+      (and (= :gesture/end op) temporary?)
       (rejected history :temporary-gesture target)
 
       (and (= :gesture/end op) (not= last-sequence (:last-sequence gesture)))
@@ -121,7 +127,7 @@
     (loop [remaining steps, values {}]
       (if-let [[id read-key write-key] (first remaining)]
         (let [{:keys [target generation] :as node} (get nodes id)
-              cell (canonical targets target)
+              cell (canonical targets target false)
               value (get values target (:value cell))]
           (cond
             (nil? cell) (rejected history :target-unavailable target)
@@ -149,10 +155,10 @@
 (defn apply-action
   "Return next history and canonical writes for one admitted action. Commit both
   together through the show reducer, after validating all writes against current
-  schemas. The caller supplies live scalar cells keyed by target, each with
-  :value and :generation. Advance the generation for canonical value changes
-  outside these actions, keeping generations with tracked targets. Supply native
-  scalar values in the representation used for exact Clojure equality.
+  schemas. The caller supplies live cells keyed by target, each with :value
+  and :generation. Supply :schema for temporary gestures on typed parameters.
+  Advance the generation for canonical changes outside these actions, keeping
+  generations with tracked targets. Supply native values for exact equality.
 
   The caller owns authentication, command receipts and deadline scheduling. The
   :open map belongs to the live show epoch and is excluded from saved history. Use
@@ -160,7 +166,8 @@
   Begin, sample, end and cancel use a stable trusted :actor, :control-id,
   :gesture-id and :target. Samples require increasing :sequence values. End
   requires :last-sequence from the final accepted sample, or zero for no samples.
-  End can carry optional authoritative :target-display data for the node.
+  End commits scalar values and can carry authoritative :target-display data.
+  Begin with :temporary? true requires Cancel and creates no history node.
   Undo, redo and select require :expected-cursor and :expected-history-position.
   Redo and select use :node-id."
   [history targets {:keys [op] :as action}]
