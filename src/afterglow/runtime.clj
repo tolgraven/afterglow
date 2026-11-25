@@ -148,6 +148,8 @@
 (defn merge-results
   "Validate and deterministically merge already evaluated results. Used by the
   show coordinator to isolate effect faults without evaluating healthy work twice.
+  The context may carry a ::suppressed-instance-ids set to exclude output blocks
+  while keeping evaluation state, completion and intent emissions in the frame.
   For nonempty :intents, :intent-emissions carries their originating instance
   identities in the same order, even for steps that finish in this frame."
   [context evaluated]
@@ -157,10 +159,11 @@
         ordered (sort-by (fn [[position instance]]
                            (instance-order/sort-key instance position))
                          (map-indexed vector instances))
-        contributions (map (fn [[_ instance]] (get results (:id instance))) ordered)
-        blocks (into [] (mapcat :contributions) contributions)
+        ordered-results (map (fn [[_ instance]] (get results (:id instance))) ordered)
+        suppressed-ids (::suppressed-instance-ids context #{})
+        blocks (into [] (comp (remove #(contains? suppressed-ids (:id %))) (mapcat :contributions)) ordered-results)
         structured? (some #(or (:native-layer %) (= :batch (:kind %))) blocks)
-        intents (into [] (mapcat :intents) contributions)
+        intents (into [] (mapcat :intents) ordered-results)
         merged (assoc context
                       :effects (into [] (keep (fn [instance]
                                                (let [result (get results (:id instance))]
