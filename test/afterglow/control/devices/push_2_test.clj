@@ -247,6 +247,56 @@
                 (is (= expected (:level (values h id)))))))
           (finally (finish! h)))))))
 
+(deftest a-retouch-lift-precedes-settled-end-reconciliation
+  (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                         push-operator)
+        apply! (:dispatch! options)
+        end-command (atom nil)
+        completion (promise)
+        delegated (atom [])
+        competing-begin (atom nil)
+        competing-ack (atom nil)
+        device (session/create
+                 (assoc options
+                        :model! (fn []
+                                  (when-let [command (first (reset-vals! competing-begin nil))]
+                                    (let [{:keys [model ack]} (model/apply-command @show command {:operator-id "other"})]
+                                      (reset! show model)
+                                      (reset! competing-ack ack)))
+                                  @show)
+                        :dispatch! (fn [command]
+                                     (swap! delegated conj command)
+                                     (if (and (= :gesture/end (:op command))
+                                              (compare-and-set! end-command nil command))
+                                       {:status :pending :completion completion}
+                                       (apply! command)))))
+        h (fixture/ready! (assoc h :session device))
+        history #(get-in @show [:control :edit-history])]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (receive! h [0x80 0 0])
+        (receive! h [0x90 0 127])
+        (is (some? (get-in (local h) [:encoder-gestures :push-2/encoder-0 :retouch])))
+        (deliver completion (:ack (apply! @end-command)))
+        (let [before @delegated]
+          (reset! now 250)
+          (reset! competing-begin {:op :gesture/begin :command-id "other-begin" :source :test
+                                    :show-id :main :epoch 0 :time-ms @now :instance-id id :param :level
+                                    :control-id :other/encoder :gesture-id "other-gesture"})
+          ;; The other operator acts on the model read for the decoded lift.
+          (receive! h [0x80 0 0])
+          (is (= :accepted (:status @competing-ack)))
+          (is (= "other-gesture" (get-in (history) [:open [:instance-param id :level] :gesture-id])))
+          (is (= 250 (get-in (local h) [:encoder-releases :push-2/encoder-0])))
+          (receive! h [0xb0 71 1])
+          (is (= before @delegated))
+          (is (= 1 (:cursor (history))))
+          (is (= 0.51 (:level (values h id))))
+          (is (empty? (:encoder-gestures (local h))))))
+      (finally (finish! h)))))
+
 (deftest held-encoder-retouch-recovers-after-repeated-transient-end-failures
   (doseq [failure [:busy :deferred-busy :exception]]
     (testing (name failure)

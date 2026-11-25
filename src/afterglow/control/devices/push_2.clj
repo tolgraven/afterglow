@@ -161,10 +161,14 @@
   (let [control-id (encoder-control-id note)
         gesture (get-in state [:encoder-gestures control-id])
         end (when-not (:released? gesture) (end-encoder-gesture gesture))
+        ;; A settled predecessor can disappear before input clears its retouch.
+        retouch? (or (:retouch gesture)
+                     (and (contains? (:touches state) note)
+                          (contains? (:encoder-releases state) control-id)))
         state (cond-> (-> state (update :touches dissoc note)
                           (update :touch-order #(vec (remove #{note} %))))
                 (:retouch gesture) (update-in [:encoder-gestures control-id] dissoc :retouch)
-                (or (:retouch gesture) (= :waiting (:status gesture)))
+                (or retouch? (= :waiting (:status gesture)))
                 (assoc-in [:encoder-releases control-id] (:time-ms envelope)))]
     (cond
       end {:state (-> state
@@ -595,13 +599,15 @@
 (defn- resume-gesture-begins [state model ending-controls event]
   ;; Reconciliation sees a decoded lift before the normal input clears its touch.
   (let [lifting (when (= :note-off (:type event)) (encoder-control-id (:note event)))
+        cancel-retouch? (some? (get-in state [:encoder-gestures lifting :retouch]))
+        state (cond-> state cancel-retouch? (update-in [:encoder-gestures lifting] dissoc :retouch))
         ready? (fn [{:keys [status control-id encoder waiting-for]}]
                  (and (= :waiting status) (not= control-id lifting)
                       (contains? (:touches state) encoder)
                       (not (contains? ending-controls control-id))
                       (not (detached-gesture-open? model waiting-for))))
         gestures (filter ready? (vals (:encoder-gestures state)))]
-    (when (seq gestures)
+    (when (or cancel-retouch? (seq gestures))
       (reduce (fn [{:keys [state commands]} gesture]
                 (let [resumed (begin-encoder-gesture state (dissoc gesture :status :waiting-for))]
                   {:state (:state resumed) :commands (into commands (:commands resumed))}))
