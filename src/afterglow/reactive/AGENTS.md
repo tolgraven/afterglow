@@ -63,6 +63,31 @@ skip missed beats. A busy source has at most one outstanding sample. Disposing
 and reacquiring gives the new lease a distinct result slot, even if a cancelled
 external read ignores interruption.
 
+`{:frames n}` follows the committed frame number. `{:cycles n}` follows an
+unwrapped cycle position, either from a pure `:cycle-position` function or from
+a named oscillator. A named oscillator is portable data registered on the
+graph; its position is `phase + beat / period-in-beats`, read from the frozen
+db's transport beat and meter. Bars and phrases use the committed meter, so a
+7/8 bar is 7/2 beats. Frame and cycle buckets belong to the show ID and epoch.
+
+```clojure
+(reg-oscillator! system :groove {:period {:bars 1} :phase 1/8})
+(reg-cofx! system :scene-colour {:mode :background :interval {:cycles 1/4}
+                                 :oscillator :groove :sample read-scene-colour})
+(oscillator-position system :groove) ; at the last committed db
+```
+
+A source samples once on entering a bucket (floor of position over n, exact for
+rationals). Crossing several boundaries in one frame requests one sample, as
+for skipped frames. Tempo changes move boundaries in time, never in cycles. A
+seek inside the current bucket does not sample; a seek or loop into another
+bucket samples once. A stopped transport or missing beat holds the bucket.
+Subscribers of one coeffect share its sampler, and the final lease cancels it.
+`reg-cofx!` rejects an unknown oscillator name. Removing or renaming it later
+reports a `:cofx` fault naming the missing and registered oscillators once
+and keeps the last value until the name returns. Oscillator and
+coeffect registrations are runtime setup; they are not part of `export-registry`.
+
 Use `:validate` with a predicate or a registered clojure.spec keyword. Options
 with a durable descriptor can include a named spec and a portable fallback.
 The default `:on-error :last-good` retains the most recent validated value and

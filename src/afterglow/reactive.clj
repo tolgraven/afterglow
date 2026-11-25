@@ -444,13 +444,52 @@
   owner submits work on entering a bucket (floor of position divided by n),
   skipping missed buckets and pausing new reads when transport is stopped.
   A rational position and interval use exact boundaries. Frame and cycle
-  buckets are scoped to the show identity and epoch."
+  buckets are scoped to the show identity and epoch.
+
+  Instead of :cycle-position, :oscillator names an oscillator registered with
+  reg-oscillator!. Its committed position is derived from the frozen db's
+  transport beat and meter. An unknown name is rejected here; an oscillator
+  removed or renamed later reports a :cofx fault and keeps
+  the last sampled value until the name is registered again."
   [system id options]
   (locking (:lock system)
     (ensure-open! system) (outside-evaluation!)
     (coeffects/register! (:coeffects system) id options)
     (write-state! system (mark-dependents (state-of system) [:cofx id]))
     id))
+
+(defn reg-oscillator!
+  "Register or replace a named musical oscillator used by
+  {:interval {:cycles n} :oscillator id} coeffects. The portable definition is
+  {:period {:beats|:bars|:phrases n} :phase p}. Its unwrapped cycle position at
+  a committed transport beat is p + beat / period-in-beats, so a tempo change
+  moves boundaries in time but never in cycles. Bars and phrases use the
+  committed transport meter."
+  [system id definition]
+  (locking (:lock system)
+    (ensure-open! system) (outside-evaluation!)
+    (coeffects/register-oscillator! (:coeffects system) id definition)))
+
+(defn remove-oscillator!
+  "Remove a named oscillator. Coeffects that still name it report a clear
+  :cofx fault until it is registered again. Returns whether it existed."
+  [system id]
+  (locking (:lock system)
+    (ensure-open! system) (outside-evaluation!)
+    (coeffects/remove-oscillator! (:coeffects system) id)))
+
+(defn oscillators
+  "Registered oscillator definitions by name."
+  [system]
+  (locking (:lock system) (coeffects/oscillators (:coeffects system))))
+
+(defn oscillator-position
+  "The named oscillator's unwrapped cycle position at the last committed db."
+  [system id]
+  (locking (:lock system)
+    (ensure-open! system) (outside-evaluation!)
+    (coeffects/oscillator-position (:coeffects system) id
+                                   (get-in @(:state system) [:source-snapshot :db] (get @(:sources system) :db)))))
 
 (defn reg-ref!
   ([system id ref] (reg-cofx! system id {:ref ref}))

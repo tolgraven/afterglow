@@ -11,13 +11,54 @@
     (newThread [_ task] (doto (Thread. task label) (.setDaemon true)))))
 
 (defn create []
-  {:definitions (volatile! {}) :active (volatile! {})
+  {:definitions (volatile! {}) :active (volatile! {}) :oscillators (volatile! {})
    :executor (delay (ThreadPoolExecutor. 2 2 30 TimeUnit/SECONDS (ArrayBlockingQueue. 32)
                                           (threads "afterglow-reactive-sampler") (ThreadPoolExecutor$AbortPolicy.)))
    :scheduler (delay (doto (ScheduledThreadPoolExecutor. 1 (threads "afterglow-reactive-schedule"))
                        (.setRemoveOnCancelPolicy true)))})
 
 (defn fork [manager] (assoc manager :active (volatile! {})))
+
+;; Named oscillators are portable data. Their committed position is derived
+;; only from the frozen db's transport, so replaying the same publications
+;; reproduces the same buckets.
+(defn- validate-oscillator [id {:keys [period phase] :or {phase 0} :as definition}]
+  (when-not (and (keyword? id) (map? definition) (= #{} (disj (set (keys definition)) :period :phase))
+                 (map? period) (= 1 (count period)) (#{:beats :bars :phrases} (ffirst period))
+                 (time/finite-number? (val (first period))) (pos? (val (first period)))
+                 (time/finite-number? phase))
+    (throw (ex-info "A reactive oscillator needs a keyword name, a positive :beats, :bars or :phrases :period and a finite :phase"
+                    {:type :afterglow.reactive/invalid-oscillator :oscillator id :definition definition})))
+  {:period period :phase phase})
+
+(defn register-oscillator! [manager id definition]
+  (vswap! (:oscillators manager) assoc id (validate-oscillator id definition))
+  id)
+
+(defn remove-oscillator! [manager id]
+  (let [present? (contains? @(:oscillators manager) id)]
+    (vswap! (:oscillators manager) dissoc id)
+    present?))
+
+(defn oscillators [manager] @(:oscillators manager))
+
+(defn- unknown-oscillator [manager id]
+  (let [registered (vec (sort (keys @(:oscillators manager))))]
+    (ex-info (str "Unknown reactive oscillator " id "; registered oscillators: " registered)
+             {:type :afterglow.reactive/unknown-oscillator :oscillator id :registered registered})))
+
+(defn oscillator-position
+  "Unwrapped cycle position of a named oscillator at the committed transport
+  beat: phase + beat / period-in-beats, using the committed meter. Exact when
+  the beat and definition are rational. Nil while the beat is unavailable."
+  [manager id db]
+  (let [{:keys [period phase] :as definition} (get @(:oscillators manager) id)]
+    (when-not definition (throw (unknown-oscillator manager id)))
+    (let [{:keys [beat meter]} (time/frame-clock db)]
+      (when (some? beat)
+        (when-not (time/finite-number? beat)
+          (throw (ex-info "Oscillator transport beat must be finite or nil" {:oscillator id})))
+        (+ phase (/ beat (time/duration->beats period (or meter {}))))))))
 
 (defn- sampling-interval [interval cycle-position]
   (let [[unit value] (when (and (map? interval) (= 1 (count interval))) (first interval))]
@@ -69,16 +110,30 @@
   (when (realized? (:executor manager)) (.shutdownNow ^ThreadPoolExecutor @(:executor manager))))
 
 (defn register!
-  [manager id {:keys [mode ref sample interval cycle-position] :or {mode :demand} :as definition}]
+  [manager id {:keys [mode ref sample interval oscillator] :or {mode :demand} :as definition}]
+  (when (and (contains? definition :oscillator)
+             (not (and (= :background mode) (not ref) (not (contains? definition :cycle-position))
+                       (map? interval) (contains? interval :cycles))))
+    (throw (ex-info "A named :oscillator needs :mode :background and :interval {:cycles n}, without :cycle-position"
+                    {:id id :mode mode :interval interval})))
   (when-not (and (keyword? id)
-                 (or (not (contains? definition :cycle-position))
+                 (or (not (or (contains? definition :cycle-position) (contains? definition :oscillator)))
                      (and (= :background mode) (not ref) (map? interval) (contains? interval :cycles)))
                  (if ref
                    (and (instance? clojure.lang.IRef ref) (not sample) (not interval))
                    (and (fn? sample) (#{:demand :frame :background} mode)
                         (or (= :background mode) (nil? interval)))))
     (throw (ex-info "Expected a watched reference or a sampled coeffect" {:id id :mode mode})))
-  (let [timing (when (= :background mode) (sampling-interval (or interval {:fps 10}) cycle-position))]
+  (when (contains? definition :oscillator)
+    (when-not (keyword? oscillator)
+      (throw (ex-info "A cycle :oscillator must be a registered oscillator name"
+                      {:type :afterglow.reactive/unknown-oscillator :id id :oscillator oscillator})))
+    (when-not (contains? @(:oscillators manager) oscillator)
+      (throw (unknown-oscillator manager oscillator))))
+  (let [definition (cond-> definition
+                     (contains? definition :oscillator)
+                     (assoc :cycle-position (fn [db] (oscillator-position manager oscillator db))))
+        timing (when (= :background mode) (sampling-interval (or interval {:fps 10}) (:cycle-position definition)))]
     (when-let [old (get @(:active manager) id)]
       (vswap! (:active manager) dissoc id)
       (stop! manager old))
