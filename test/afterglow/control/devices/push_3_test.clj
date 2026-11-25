@@ -239,6 +239,56 @@
                      (assoc-in config [:layout :buttons :variation] {:channel 0 :controller 49})]]
       (is (thrown? clojure.lang.ExceptionInfo (push/profile invalid))))))
 
+(deftest encoder-overlay-keeps-the-opening-touch-and-captured-pad-owners
+  (let [surface (atom nil)
+        display {:presentation-receipts? true :open! (constantly :capture) :close! (fn [_])
+                 :render! (fn [_ view] (reset! surface view))}
+        config (-> (overlay-options display)
+                   (assoc-in [:layout :encoder-touches :master] {:channel 2 :note 10})
+                   (assoc-in [:pad-overlay :open-encoder]
+                             (fn [_ id param positions]
+                               (when (and (= :level param) (some #{[1 0]} positions))
+                                 {:layout :from-touch :instance-id id}))))
+        {:keys [show log receive device]} (harness config)
+        press! #(@receive [0x93 % 100])
+        lift! #(@receive [0x83 % 0])
+        frame! #(presentation/presented! @surface)
+        overlay #(get-in @surface [:pad-overlay :layout])]
+    (try
+      (session/open! device)
+      (press! 12)
+      (@receive [0x92 9 127])
+      (is (= :from-touch (overlay)))
+      (let [chooser @surface]
+        (press! 13)
+        (frame!)
+        (press! 13)
+        (is (= 5 (get-in @show [:instances "0:1" :params :count])))
+        (lift! 13)
+        (@receive [0x92 10 127])
+        (@receive [0xb2 20 127])
+        (@receive [0x82 10 0])
+        (is (< (:master @show) 1))
+        (@receive [0xb4 28 127])
+        (@receive [0xb4 28 0])
+        (is (= :from-touch (overlay)))
+        (frame!)
+        (press! 13)
+        (is (= 8 (get-in @show [:instances "0:1" :params :count])))
+        (@receive [0x82 9 0])
+        (is (nil? (overlay)))
+        (presentation/presented! chooser)
+        (press! 14)
+        (lift! 12)
+        (is (= :instance/end (:op (last @log))))
+        (frame!)
+        (lift! 13)
+        (lift! 14)
+        (press! 13)
+        (is (= [:held :latched] (mapv :cue-id (filter #(= :cue/launch (:op %)) @log)))))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))))
+
 (deftest old-display-receipts-cannot-arm-choices-after-epoch-reset
   (let [surface (atom nil)
         display {:presentation-receipts? true :open! (constantly :capture) :close! (fn [_])
