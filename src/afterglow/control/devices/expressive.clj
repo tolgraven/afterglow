@@ -132,6 +132,7 @@
 
 (defn- supported? [{:keys [type size] :as schema} {:keys [component range]}]
   (and (params/valid-schema? schema)
+       (not= :gradient type)
        (if (#{:color :vector :range} type)
          (and (integer? component) (< component (case type :color 3 :range 2 size)))
          (nil? component))

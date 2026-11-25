@@ -8,9 +8,16 @@
   (let [[low high] (or (:bounds schema) [0 1])]
     [(max 0 low) (min 1 high)]))
 
+(defn- linear-rgb? [bounded? value]
+  (and (vector? value) (= 3 (count value))
+       (every? #(and (bounded? %) (<= 0 % 1)) value)))
+
 (defn valid-value?
   "Does value satisfy a parameter schema? Bounds are inclusive; unknown types
-  are rejected. Color is three linear RGB components in [0,1]."
+  are rejected. Color is three linear RGB components in [0,1]. Gradients are
+  nonempty vectors of {:position t :color rgb} stops in strictly increasing
+  position order within [0,1]. A single stop represents a solid color.
+  Gradient stops ignore :bounds; valid-schema? rejects :bounds/:size on them."
   [{:keys [type bounds values options size]} value]
   (let [bounded? (fn [v]
                    (and (finite-number? v)
@@ -24,8 +31,15 @@
       :boolean (instance? Boolean value)
       :enum (and (vector? (or values options))
                  (boolean (some #(= value %) (or values options))))
-      :color (and (vector? value) (= 3 (count value))
-                  (every? #(and (bounded? %) (<= 0 % 1)) value))
+      :color (linear-rgb? bounded? value)
+      :gradient (and (vector? value) (not (empty? value))
+                     (every? (fn [stop]
+                               (and (map? stop) (= #{:position :color} (set (keys stop)))
+                                    (let [{:keys [position color]} stop]
+                                      (and (finite-number? position) (<= 0 position 1)
+                                           (linear-rgb? finite-number? color)))))
+                             value)
+                     (apply < (map :position value)))
       :vector (and (vector? value) (or (nil? size) (= size (count value)))
                    (every? bounded? value))
       :range (and (vector? value) (= 2 (count value))
@@ -36,12 +50,13 @@
   "Check the core schema contract before publishing a definition."
   [{:keys [type bounds values options size] :as schema}]
   (and (map? schema)
-       (#{:number :integer :boolean :enum :color :vector :range} type)
+       (#{:number :integer :boolean :enum :color :gradient :vector :range} type)
        (or (nil? bounds)
            (and (vector? bounds) (= 2 (count bounds))
                 (every? finite-number? bounds) (<= (first bounds) (second bounds))))
        (or (not= type :enum) (and (vector? (or values options)) (seq (or values options))))
        (or (not= type :vector) (and (integer? size) (pos? size)))
+       (or (not= type :gradient) (and (nil? bounds) (nil? size)))
        (contains? schema :default)
        (valid-value? schema (:default schema))))
 

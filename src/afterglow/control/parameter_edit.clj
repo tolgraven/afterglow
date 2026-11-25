@@ -76,7 +76,8 @@
   "Return a schema-valid value for relative delta or absolute normalized input.
   Options: :mode :relative|:absolute, :component index and :fine?. Enum values
   (including waveform selections) are returned unchanged. Range endpoints never
-  cross. Color components are HSV editing over the model's linear RGB values."
+  cross. Color components are HSV editing over the model's linear RGB values.
+  Gradients have no scalar control mapping and are returned unchanged."
   [schema value input {:keys [mode component fine?] :or {mode :relative} :as options}]
   (when-not (and (params/valid-value? schema value) (params/finite-number? input)
                  (#{:relative :absolute} mode))
@@ -109,6 +110,7 @@
                                  (if absolute? fraction
                                      (bindings/clamp (+ (nth hsv component) (* input (or (when fine? (resolution/fine-step (:dmx-bits options) [0 1])) (if fine? 0.001 0.01)))) [0 1])))]
                    (control-to-color schema (hsv->rgb (assoc hsv component changed))))
+          :gradient value
           (:vector :range)
           (let [bounds (numeric-range schema (nth value component))
                 bounds (if (= :range (:type schema))
@@ -140,6 +142,7 @@
       :enum (let [values (or (:values schema) (:options schema))]
               (if (= 1 (count values)) 0.0 (/ (discrete-index values value) (double (dec (count values))))))
       :color (nth (rgb->hsv (color-to-control schema value)) component)
+      :gradient 0.0
       :vector (normalized (nth value component) (numeric-range schema (nth value component)))
       :range (let [[low high] (numeric-range schema (nth value component))]
                (normalized (nth value component)

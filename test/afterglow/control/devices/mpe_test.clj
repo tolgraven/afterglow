@@ -284,3 +284,14 @@
         plan (expressive/plan schemas #{:pressure :slide} (:params policy) policy)]
     (is (= 62 (count (:mappings plan))))
     (is (= [{:code :mapping-limit :limit 62}] (:diagnostics plan)))))
+
+(deftest gradient-parameters-are-not-scalar-axis-targets
+  (let [gradient {:type :gradient :default [{:position 0 :color [1 0 0]} {:position 1 :color [0 0 1]}]
+                  :control/axis :pressure}
+        plan (expressive/plan {:wash gradient :level (:level schemas)} #{:pressure :slide}
+                              {:wash {:axis :pressure :range [0 1]}})]
+    (is (= [{:param :wash :axis :pressure :code :unsupported-schema}] (:diagnostics plan)))
+    (is (not-any? #(= :wash (:param %)) (:mappings plan)))
+    (is (not (contains? (expressive/values plan {:pressure 0.42 :slide 0.5}) :wash)))
+    (is (= [{:param :wash :axis :slide :code :unsupported-schema}]
+           (:diagnostics (expressive/plan {:wash gradient} #{:slide} {:wash {:axis :slide :component 0}}))))))
