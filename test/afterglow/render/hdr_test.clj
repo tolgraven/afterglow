@@ -193,3 +193,62 @@
         run #(frame/resolve-frame p [(row :red :color [2 0 0]) (row :red :shutter %)] {:observe-hdr? true})]
     (is (empty? (:hdr-contacts (run 0))))
     (is (< (abs (- 0.8 (get-in (run 1) [:hdr-contacts :red :near]))) 1e-8))))
+
+(deftest authored-falloff-curves-are-portable-validated-data
+  (testing "a two-point ramp is the linear preset, bit for bit"
+    (is (== 0.375 (.invokePrim (hdr/falloff-weight [[0 1] [1 0]]) 0.625)))
+    (doseq [u [0.0 0.1 0.25 0.5 0.9 0.999]]
+      (is (== (.invokePrim (hdr/falloff-weight :linear) u)
+              (.invokePrim (hdr/falloff-weight [[0 1] [1 0]]) u)))))
+  (testing "piecewise-linear interpolation between monotone distance fractions"
+    (let [f (hdr/falloff-weight [[0 1] [0.4 1] [0.6 0.25] [1 0]])]
+      (doseq [[u w] [[0.0 1.0] [0.2 1.0] [0.4 1.0] [0.5 0.625] [0.6 0.25] [0.9 0.0625] [1.0 0.0]]]
+        (is (< (abs (- w (.invokePrim f u))) 1e-12) (str u)))
+      (is (identical? f (hdr/falloff-weight [[0 1] [0.4 1] [0.6 0.25] [1 0]])) "compiled once and shared")))
+  (testing "rejected before any frame renders"
+    (doseq [bad [[[0 1]] [[0.1 1] [1 0]] [[0 1] [0.9 0]] [[0 1] [0.5 2] [1 0]]
+                 [[0 1] [0.5 0.5] [0.5 0.4] [1 0]] [[0 1] [0.6 0.5] [0.4 0.4] [1 0]]
+                 [[0 ##NaN] [1 0]] [[0 1] [1 -0.1]] [[0 1 2] [1 0]] '([0 1] [1 0]) [[0 1] [1 :x]]
+                 (vec (for [i (range 65)] [(/ i 64.0) 1]))]]
+      (is (thrown? Exception (hdr/validate! {:falloff bad})) (pr-str bad))
+      (is (thrown? Exception (frame/resolve-frame rig [(row :source :red 1.0)] {:hdr {:falloff bad}}))))))
+
+(deftest authored-falloff-spills-by-distance-through-rich-and-dense-paths
+  (doseq [b [(block (row :source :color [1.21 0 0])) (batch :source :color [1.21 0 0])]]
+    (let [hdr {:spill 1 :radius 1 :white-mix 0 :spill-white-mix 0 :fixture-ids [:source :near :far]}]
+      (is (= (native-and-rich [b] {:hdr hdr})
+             (native-and-rich [b] {:hdr (assoc hdr :falloff [[0 1] [1 0]])})))
+      ;; Excess 0.21. Near is 0.5 of the radius away: weight 0.625, red 0.13125.
+      ;; Far is 0.9 away: weight 0.0625, red 0.013125.
+      (is (= [255 0 0 33 0 0 3 0 0 0 0 0 0 0 0]
+             (native-and-rich [b] {:hdr (assoc hdr :falloff [[0 1] [0.4 1] [0.6 0.25] [1 0]])})))
+      (is (= [255 0 0 0 0 0 5 0 0 0 0 0 0 0 0]
+             (native-and-rich [b] {:hdr (assoc hdr :falloff [[0 0] [0.7 0] [0.8 0.1] [1 0.1]])}))))))
+
+(defn- strip-pixel [i]
+  (rgb-head (keyword (str "px-" i)) (inc (* 3 i)) [(* 0.1 i) 0 0]))
+
+(deftest excess-spills-to-neighbouring-strip-pixels-by-distance
+  (let [strip (frame/compile-patch (mapv strip-pixel (range 9)))
+        hot (block (row :px-4 :color [1.21 0 0]))
+        red #(vec (take-nth 3 (mapv (fn [b] (bit-and 255 b)) (take 27 (get-in % [:universes 1])))))
+        render (fn [opts]
+                 (let [rich (frame/resolve-contributions strip [hot] opts)
+                       dense (frame/resolve-contributions strip [hot] (assoc opts :include-values? false :compact-values? true))]
+                   (is (= (red rich) (red dense)))
+                   (red rich)))
+        hdr {:spill 1 :radius 0.35 :white-mix 0 :spill-white-mix 0}]
+    ;; Linear weights at 0.1, 0.2 and 0.3 m are 5/7, 3/7 and 1/7 of the 0.21
+    ;; excess: 0.15, 0.09 and 0.03 of red. The pixel at 0.4 m is outside.
+    (is (= [0 8 23 38 255 38 23 8 0] (render {:hdr hdr})))
+    (is (= [0 0 0 0 255 0 0 0 0] (render {:hdr (assoc hdr :spill 0)})))
+    (is (= [0 0 0 0 255 0 0 0 0] (render {:hdr {}})) "neutral HDR only clamps")
+    (testing "quadratic and authored curves fall off faster or hold at the source"
+      ;; Squared weights 25/49, 9/49 and 1/49.
+      (is (= [0 1 10 27 255 27 10 1 0] (render {:hdr (assoc hdr :falloff :quadratic)})))
+      ;; Authored weights 1, 0.819 and 0.286: full strength out to 0.3 of the radius.
+      (is (= [0 15 44 54 255 54 44 15 0]
+             (render {:hdr (assoc hdr :falloff [[0 1] [0.3 1] [0.6 0.8] [1 0]])}))))
+    (testing "scope limits receivers to the selected segment"
+      (is (= [0 0 0 38 255 38 0 0 0]
+             (render {:hdr (assoc hdr :fixture-ids [:px-3 :px-4 :px-5])}))))))
