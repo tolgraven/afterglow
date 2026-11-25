@@ -10,7 +10,8 @@
   (snapshot fn), :dispatch! (command -> result/ack synchronously), :now-ms!.
   Grid cue launch/release and opted-in operator gestures may return queue
   receipts. A pending gesture carries its final :completion promise. Profiles
-  reconcile receipts before input and feedback.
+  reconcile receipts before input and feedback. A reconciliation that observes
+  a newer owner commit can request a fresh snapshot with :refresh-model? true.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
@@ -49,9 +50,12 @@
       :source {:adapter (:id profile) :session-id session-id}
       :time-ms (max (:time-ms model 0) now)})))
 
+(defn- show-identity [model]
+  [(:show-id model) (:epoch model)])
+
 (defn- adopt-epoch! [session model]
   (let [epoch (:epoch model) state @(:state session)]
-    (when-not (= [(:show-id model) epoch] [(:show-id state) (:epoch state)])
+    (when-not (= (show-identity model) (show-identity state))
       (update-state! session assoc :show-id (:show-id model) :epoch epoch
                      :local (if-let [reset-model (:reset-model (:profile (:options session)))]
                               (reset-model (:local state))
@@ -123,7 +127,7 @@
   (if-let [reconcile (get-in session [:options :profile :reconcile])]
     (let [result (reconcile (:local @(:state session)) model)]
       (enact! session result)
-      (if (seq (:commands result))
+      (if (or (:refresh-model? result) (seq (:commands result)))
         (let [model ((get-in session [:options :model!]))]
           (adopt-epoch! session model)
           model)
@@ -197,8 +201,10 @@
                    (resume! session))
                  (let [model (model!)]
                    (adopt-epoch! session model)
-                   (let [model (reconcile! session model)]
-                     (enact! session ((:input profile) (:local @(:state session)) event model (envelope! session model))))
+                   (let [reconciled (reconcile! session model)]
+                     (when (= (show-identity model) (show-identity reconciled))
+                       (enact! session ((:input profile) (:local @(:state session)) event
+                                        reconciled (envelope! session reconciled)))))
                    (refresh! session)))))
            (catch Exception error
              (record-error! session error)

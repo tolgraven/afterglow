@@ -60,6 +60,71 @@
 (defn- admitted-commands [h]
   (mapv second (filter #(= :command (first %)) @(:log h))))
 
+(defn- pending-sample-harness []
+  (let [{:keys [show options] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                     push-operator)
+        apply! (:dispatch! options)
+        after-model-read (atom nil)
+        complete-sample (atom nil)
+        device (session/create
+                 (assoc options
+                        :model! (fn []
+                                  (let [snapshot @show]
+                                    (when-let [after-read (first (reset-vals! after-model-read nil))]
+                                      (after-read))
+                                    snapshot))
+                        :dispatch! (fn [{:keys [op sequence] :as command}]
+                                     (if (and (= :gesture/sample op) (= 1 sequence))
+                                       (let [completion (promise)]
+                                         (reset! complete-sample #(deliver completion (:ack (apply! command))))
+                                         {:status :pending :completion completion})
+                                       (apply! command)))))]
+    (fixture/ready! (assoc h :session device :after-model-read after-model-read
+                            :complete-sample complete-sample :apply! apply!))))
+
+(deftest pending-encoder-sample-reloads-the-edit-basis-before-the-next-detent
+  (let [{:keys [after-model-read complete-sample] :as h} (pending-sample-harness)]
+    (try
+      (let [id (launch! h 37)]
+        (receive! h [0x90 0 127])
+        (receive! h [0xb0 71 1])
+        (is (= 0.5 (:level (values h id))))
+        ;; Commit after receive! has selected its first snapshot and before reconciliation.
+        (reset! after-model-read @complete-sample)
+        (receive! h [0xb0 71 1])
+        (is (= [[1 0.51] [2 0.52]] (mapv (juxt :sequence :value)
+                                          (filter #(= :gesture/sample (:op %)) (admitted-commands h)))))
+        (receive! h [0x80 0 0])
+        (is (= 0.52 (:level (values h id))))
+        (is (= 0.52 (get-in @(:show h) [:control :edit-history :nodes 1 :after]))))
+      (finally (finish! h)))))
+
+(deftest pending-encoder-reconciliation-discards-input-crossing-an-epoch
+  (let [{:keys [session show callbacks after-model-read complete-sample apply!] :as h} (pending-sample-harness)]
+    (try
+      (let [old-receive (last @callbacks)
+            owner-command! (fn [command]
+                             (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                            {:source {:adapter :test}} command)))]
+        (launch! h 37)
+        (old-receive [0x90 0 127])
+        (old-receive [0xb0 71 1])
+        (reset! after-model-read #(do (@complete-sample)
+                                      (owner-command! {:op :show/restart :command-id "restart"})
+                                      (owner-command! {:op :cue/launch :cue-id :latched :command-id "replacement"})))
+        (old-receive [0xb0 71 1])
+        (is (= :cue/launch (:op (peek (admitted-commands h)))))
+        (is (= (:epoch @show) (:epoch (session/snapshot session))))
+        (is (empty? (:encoder-gestures (local h))))
+        (is (= [0.5] (mapv #(get-in % [:params :level]) (vals (:instances @show)))))
+        (session/close! session true)
+        (fixture/ready! h)
+        (let [before (admitted-commands h)]
+          (old-receive [0x80 0 0])
+          (old-receive [0xb0 71 1])
+          (is (= before (admitted-commands h)))))
+      (finally (finish! h)))))
+
 (deftest scalar-encoder-touch-pins-the-target-through-selection-and-commits-once
   (let [h (gesture-harness push-operator nil)]
     (try

@@ -495,9 +495,11 @@
                                                    (if (and completion (realized? completion))
                                                      (acknowledge-encoder state command @completion)
                                                      state)))
-                                               state (vals (:encoder-gestures state)))]
-                          (or (when reconcile (reconcile resolved model))
-                              (when-not (identical? resolved state) {:state resolved})))))))
+                                               state (vals (:encoder-gestures state)))
+                              resolved? (not (identical? resolved state))]
+                          (cond-> (or (when reconcile (reconcile resolved model))
+                                      (when resolved? {:state resolved}))
+                            resolved? (assoc :refresh-model? true)))))))
 
 (defn profile
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
