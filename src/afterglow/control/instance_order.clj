@@ -11,10 +11,11 @@
 
 (defn compare-priority
   "Compare finite priorities without losing exact values. Floating-point values
-  use their standard decimal representation when compared across types."
+  use their standard decimal representation when compared across types. Missing
+  priorities in partial models sort before numeric priorities."
   ^long [left right]
   (cond
-    (identical? (class left) (class right)) (compare left right)
+    (or (identical? (class left) (class right)) (nil? left) (nil? right)) (compare left right)
     (ratio? left) (compare-ratio-to-decimal left (bigdec right))
     (ratio? right) (- (compare-ratio-to-decimal right (bigdec left)))
     :else (.compareTo (bigdec left) (bigdec right))))

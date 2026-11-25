@@ -1,5 +1,6 @@
 (ns afterglow.control.views-test
   (:require [clojure.test :refer [deftest is]]
+            [afterglow.control.model :as model]
             [afterglow.control.views :as views]))
 
 (def show
@@ -22,6 +23,13 @@
   (is (false? (:active? (views/cue-view show :blue))))
   (is (nil? (views/cue-view show :missing)))
   (is (= [[1 1] [0 0]] (mapv (juxt :x :y) (:cells (views/page-view show :main))))))
+
+(deftest partial-instances-sort-before-numeric-priorities
+  (let [partial-show (model/new-show (update-in show [:instances "a"] dissoc :priority))
+        ids ["a" "b"]]
+    (is (= ids (mapv :id (views/active-instances partial-show))))
+    (is (= ids (:instances (views/cue-view partial-show :red))))
+    (is (= ids (mapv :id (:instances (views/snapshot partial-show)))))))
 
 (deftest grouped-instances-preserve-cue-and-pad-projections
   (let [index (group-by :cue-id (views/active-instances show))]
