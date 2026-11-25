@@ -3,8 +3,11 @@
             [clojure.test :refer [deftest is testing]]))
 
 (def level [:instance-param "1:1" :level])
+
 (def speed [:instance-param "1:1" :speed])
+
 (def push-level {:actor "push" :control-id "encoder-1" :target level :gesture-id "level-1"})
+
 (def studio-speed {:actor "studio" :control-id "slider" :target speed :gesture-id "speed-1"})
 
 (defn- new-show [limit]

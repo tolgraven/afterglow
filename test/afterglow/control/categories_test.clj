@@ -7,10 +7,12 @@
 (defn command [show payload]
   (merge {:op :cue/launch :source :test :show-id (:show-id show) :epoch (:epoch show)
           :command-id (str (:epoch show) "/" (:revision show)) :time-ms (:time-ms show)} payload))
+
 (defn apply! [show payload]
   (let [result (model/apply-command show (command show payload))]
     (when-not (= :accepted (get-in result [:ack :status])) (throw (ex-info "Rejected test command" (:ack result))))
     (:model result)))
+
 (defn show []
   (reduce (fn [show definition]
             (-> show

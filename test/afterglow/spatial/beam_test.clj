@@ -7,6 +7,7 @@
 
 (def lamp {:id :head :position [0 0 0] :direction [0 0 1] :beam-angle 20.0 :lens-radius-m 0.1
            :channels {:red 1 :green 2 :blue 3 :pan 4 :tilt 5} :universe 1 :address 1})
+
 (def lit {:emitted-color [0.8 0.1 0] :intensity 1.0 :direction [0 0 1]})
 
 (deftest custom-occluders-still-decide-visibility-for-prepared-volume-queries

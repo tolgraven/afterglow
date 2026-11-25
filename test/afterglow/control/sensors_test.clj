@@ -5,13 +5,17 @@
             [afterglow.control.model :as model]))
 
 (def base-config {:version 1 :channels [{:id :tilt :input :pitch}]})
+
 (defn sample [id time beat values]
   {:version 1 :device-id "phone" :session-id "one" :sample-id id :time-ms time
    :device-time-ms time :beat beat :meter {:beats-per-bar 7/2 :bars-per-phrase 4}
    :values values :gestures []})
+
 (defn state [& [armed?]] (sensors/new-state {:device-id "phone" :session-id "one" :armed? (boolean armed?)
                                            :meter {:beats-per-bar 7/2 :bars-per-phrase 4}}))
+
 (defn near? [a b] (< (Math/abs (double (- a b))) 1.0e-9))
+
 (def shot {:op :cue/launch :cue-id :flash :launch {:mode :one-shot :duration {:beats 1/8}}})
 
 (deftest calibration-transform-pipelines-and-physical-time-filter-are-explicit

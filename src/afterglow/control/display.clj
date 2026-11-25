@@ -4,10 +4,15 @@
   (:require [afterglow.control.pages :as pages]))
 
 (def modes #{:parameters :pages :simulator :rig :audio :block-trace})
+
 (def page-palettes [:both :cue :type])
+
 (def parameter-views [:auto :history :spatial :controls])
+
 (def history-spans [0.5 1 2 4 8 16])
+
 (def camera-lenses [:fit :panorama :audience])
+
 (def parameter-only-capabilities {:modes #{:parameters} :actions #{}})
 
 (defn option [state model k default]

@@ -121,6 +121,7 @@
           (recur (concat (next remaining) (:commands result)) (inc count)))))))
 
 (def ^:private gesture-end-retry-ms 100)
+
 (def ^:private gesture-end-limit 8)
 
 (defn- settle-gesture-end! [{:keys [gesture-ends]} command time-ms {:keys [status code reason completion]}]

@@ -12,6 +12,7 @@
    :lift {:range [0 1] :phase :release :message :note-off-velocity}})
 
 (def neutral {:pressure 0.0 :glide 0.0 :slide 0.5})
+
 (defn initial-state [] {:counter 0 :voices {} :channels {}})
 
 (defn compile-zone

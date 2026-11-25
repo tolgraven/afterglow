@@ -7,7 +7,9 @@
   (:import [java.util.concurrent CountDownLatch Executors TimeUnit Callable]))
 
 (defn value-sub [{:keys [db]} _] (:value @db))
+
 (def value-definition {:id ::value :kind :sub :implementation {:type :var :symbol "afterglow.reactive-test/value-sub"}})
+
 (defn- error-type [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo error (:type (ex-data error)))))
 
@@ -513,6 +515,7 @@
         (is (= {:value 1} @(reactive/db-signal system))))
       (is (empty? (:faults (reactive/publish! system))))
       ((:close! lease)))))
+
 (deftest untrusted-var-restoration-requires-local-registration-or-explicit-allowlist
   (let [empty (reactive/create-system {:value 2}) known (reactive/create-system {})
         data {:registrations [value-definition]}]

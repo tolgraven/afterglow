@@ -4,6 +4,7 @@
 
 (defn event [state type at & fields]
   (:state (clock/apply-event state (merge {:source-id :midi :type type :time-ms at} (apply hash-map fields)))))
+
 (defn close? [a b] (< (Math/abs (double (- a b))) 1.0e-8))
 
 (deftest midi-system-message-decoding-is-explicit

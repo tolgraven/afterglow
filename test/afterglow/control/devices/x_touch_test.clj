@@ -5,6 +5,7 @@
             [afterglow.control.devices.x-touch :as touch]))
 
 (defn cue-id [n] (keyword (str "cue-" n)))
+
 (defn initial-model []
   (control/new-show
    {:registry {:effects {:wash {:id :wash :version 1
@@ -13,6 +14,7 @@
                                          :mode {:type :enum :values [:a :b :c] :default :b}
                                          :color {:type :color :default [1 0 0]}}}}
                :cues (into {} (for [n (range 40)] [(cue-id n) {:id (cue-id n) :version 1 :effect-id :wash :name (str "Cue " n)}]))}}))
+
 (defn harness []
   (let [model (atom (initial-model)) commands (atom []) now (atom 0) callbacks (atom {}) log (atom [])]
     {:model model :commands commands :now now :callbacks callbacks :log log
@@ -27,10 +29,14 @@
                               (swap! commands conj command)
                               (let [result (control/apply-command @model command)]
                                 (reset! model (:model result)) result)))}}))
+
 (defn options [h id overrides]
   (merge (:options h) {:session-id id :channels (:channels h) :transport ((:transport h) id)} overrides))
+
 (defn input! [h id bytes] ((get @(:callbacks h) id) bytes))
+
 (defn instance-for [h cue] (last (sort-by :order (filter #(= cue (:cue-id %)) (vals (:instances @(:model h)))))))
+
 (defn sent [h] (mapv #(nth % 2) (filter #(= :send (first %)) @(:log h))))
 
 (deftest touch-gated-faders-and-relative-encoders-drive-real-validated-parameters

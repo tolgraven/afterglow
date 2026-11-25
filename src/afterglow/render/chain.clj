@@ -10,13 +10,19 @@
   [] (atom {}))
 
 (def ^:private eligible-attributes #{:color :dimmer :focus :zoom :pan :tilt :aim :direction :red :green :blue :white})
+
 (def ^:private spatial-ops #{:position :surface-uv})
+
 (def ^:private capture-ops #{:param :time :beat :bar :phrase})
 
 (defn- unit? [n] (and (number? n) (<= 0 n 1)))
+
 (defn- only? [allowed item] (every? allowed (keys item)))
+
 (defn- request [block] (get-in block [:batch :field-request]))
+
 (defn- group [block] (:group (request block)))
+
 (defn- expressions [group] (or (:expressions group) (get-in group [:shader :outputs])))
 
 (defn- candidate? [{:keys [kind batch] :as block}]
@@ -45,6 +51,7 @@
      (set (keys (:scales (request block)))) (:target-ids batch)]))
 
 (defn- param [key] {:op :param :key key})
+
 (defn- op [operation & args] {:op operation :args (vec args)})
 
 (defn- lower-field

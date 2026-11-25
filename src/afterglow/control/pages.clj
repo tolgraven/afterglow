@@ -6,7 +6,9 @@
   ["afterglow.control/recent-cues"])
 
 (def ^:private side 8)
+
 (def ^:private limit (* side side))
+
 (def ^:private history-path [:control :recent-cue-ids])
 
 (defn recent-page-source

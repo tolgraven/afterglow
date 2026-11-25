@@ -6,14 +6,20 @@
             [thi.ng.color.core :as color]))
 
 (defn- fail! [msg data] (throw (ex-info msg data)))
+
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
+
 (defn- unit? [x] (and (finite? x) (<= 0 x 1)))
+
 (defn- xyz? [v] (and (vector? v) (= 3 (count v)) (every? finite? v)))
+
 (defn- color? [x] (and (record? x) (satisfies? color/IRGBConvert x)))
+
 (defn- rgb [x]
   (if (color? x)
     (let [c (color/as-rgba x)] [(:r c) (:g c) (:b c)])
     x))
+
 (defn- typed [high? attribute value]
   (if (= attribute :color)
     (let [v (rgb value)]
@@ -23,7 +29,9 @@
     value))
 
 (def ^:private reads #{:previous :incoming :field})
+
 (def ^:private operators #{:add :multiply :divide :rotate-y :rotate-hue})
+
 (defn- validate-expr! [x depth]
   (cond
     (> depth 32) (fail! "Layer expression is too deeply nested" {})

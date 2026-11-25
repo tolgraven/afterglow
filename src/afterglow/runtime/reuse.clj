@@ -5,7 +5,9 @@
            [java.util.concurrent.atomic AtomicReference]))
 
 (def ^:private missing (Object.))
+
 (def ^:private uncacheable (ex-info "Value cannot be retained in an effect cache" {}))
+
 (def ^:private scalar-classes
   #{Boolean Character Byte Short Integer Long Float Double java.math.BigInteger
     java.math.BigDecimal clojure.lang.BigInt clojure.lang.Ratio})

@@ -12,11 +12,17 @@
   (:import [java.util.logging Level Logger]))
 
 (def validate-registry registry/validate-registry)
+
 (def ^:dynamic ^:private *transaction* nil)
+
 (def ^:dynamic ^:private *dependencies* nil)
+
 (def ^:dynamic ^:private *stack* [])
+
 (def ^:dynamic ^:private *delivery-trace* nil)
+
 (def ^:dynamic ^:private *managed-query* false)
+
 (def ^:dynamic ^:private *publishing?* false)
 
 (defn- node-name [[kind id]]
@@ -31,6 +37,7 @@
       (vswap! trace update :skipped inc))))
 
 (defrecord ReactiveSystem [lock state sources coeffects on-fault!])
+
 (defprotocol Handle
   (-system [handle]) (-id [handle]) (-kind [handle]))
 (declare read-cell read-reaction change-cell! compare-cell! option! options subscribe queue-action!)
@@ -70,21 +77,28 @@
   Object (toString [_] (str "#<reaction " id ">")))
 
 (defn- fail! [message data] (throw (ex-info message data)))
+
 (defn- same-transaction? [system] (identical? system (:system *transaction*)))
+
 (defn- ensure-open! [system]
   (when (:closed? @(:state system)) (fail! "Reactive system is closed" {:type ::closed})))
+
 (defn- state-of [system]
   (if (same-transaction? system) @(:working *transaction*) @(:state system)))
+
 (defn- ensure-handle! [handle]
   (let [system (-system handle)
         path (if (= :source (-kind handle)) :cell-handles :handles)]
     (ensure-open! system)
     (when-not (identical? handle (get-in (state-of system) [path (-id handle)]))
       (fail! "Reactive handle was disposed or replaced" {:type ::disposed :id (-id handle)}))))
+
 (defn- outside-evaluation! []
   (when *transaction* (fail! "Change reactive graph structure only between owner batches" {:type ::mutation-during-evaluation})))
+
 (defn- write-state! [system state]
   (if (same-transaction? system) (vreset! (:working *transaction*) state) (reset! (:state system) state)))
+
 (defn- reaches-node? [nodes start target]
   (loop [pending [start] seen #{}]
     (if-let [id (peek pending)]
@@ -227,6 +241,7 @@
   (locking (:lock (-system handle))
     (ensure-handle! handle)
     (get-in (state-of (-system handle)) [:options [(-kind handle) (-id handle)]] {})))
+
 (defn option! [handle option value]
   (let [system (-system handle) key [(-kind handle) (-id handle)]]
     (locking (:lock system)
@@ -244,6 +259,7 @@
 (defn- check-value! [handle value]
   (when-let [validator (:validator (options handle))]
     (when-not (validator value) (fail! "Validator rejects reactive value" {:type ::invalid-value :id (-id handle)}))))
+
 (defn- notify-watches! [handle old new]
   (doseq [[key f] (sort-by (comp pr-str key) (:watches (options handle)))
           :let [state (state-of (-system handle))
@@ -271,6 +287,7 @@
         (reset! (:sources system) (assoc @(:sources system) id new))
         (notify-watches! cell old new)
         [old new]))))
+
 (defn compare-cell! [cell old value]
   (locking (:lock (-system cell))
     (ensure-handle! cell)
@@ -278,12 +295,15 @@
       (fail! "Source writes are not allowed while reconstructing a saved graph" {:type ::restore-mutation}))
     (if (identical? old (get @(:sources (-system cell)) (-id cell)))
       (do (change-cell! cell (constantly value)) true) false)))
+
 (defn reset-cell! [cell value] (reset! cell value))
+
 (defn swap-cell! [cell f & args] (apply swap! cell f args))
 
 (defn- mark-dependents [state dependency]
   (reduce (fn [s id] (if (contains? (:nodes s) id) (assoc-in s [:nodes id :dirty?] true) s))
           state (get-in state [:dependents dependency])))
+
 (defn- replace-dependencies [state id old new]
   (if (= old new) state
     (let [state (reduce (fn [s dep]
@@ -484,6 +504,7 @@
                            (valid-output? (:validate options) (:fallback options)))))
      (fail! "Invalid subscription failure policy or fallback" {:type ::invalid-registration :id id}))
    (register! system :sub id handler (cond-> descriptor (and descriptor (seq options)) (assoc :options options)) options)))
+
 (defn reg-fx!
   ([system id handler] (reg-fx! system id handler nil))
   ([system id handler descriptor] (register! system :fx id handler descriptor (:options descriptor))))
