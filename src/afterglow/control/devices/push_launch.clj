@@ -56,7 +56,7 @@
                                   (fn [commands]
                                     (mapv #(if (= :cue/launch (:op %))
                                              (cond-> (merge envelope % {:grid grid})
-                                               (seq raw) (assoc :raw raw))
+                                               (and (seq raw) (not (contains? % :raw))) (assoc :raw raw))
                                              %) commands)))
                           result)))
              :ack (fn [state command receipt]
