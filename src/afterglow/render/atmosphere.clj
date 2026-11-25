@@ -48,6 +48,10 @@
 (defn- inverse-channel-value [pivot physical]
   (/ (if (and pivot (>= physical pivot)) (+ pivot (- 255.0 physical)) physical) 255.0))
 
+(defn- physical-dmx-value [pivot level]
+  (let [raw (* 255.0 (double level))]
+    (if (and pivot (>= raw pivot)) (- 255.0 (- raw pivot)) raw)))
+
 (defn- bin-center [[coarse fine]]
   (if (or (nil? fine) (= 255 coarse))
     (double coarse)
@@ -63,9 +67,8 @@
   (let [pivot (some-> inverted-from double)
         target (physical-bytes channel physical)
         matches? (fn [v]
-                   (let [raw (* 255.0 v)
-                         out (if (and pivot (>= raw pivot)) (- 255.0 (- raw pivot)) raw)]
-                     (and (<= 0.0 v 1.0) (= target (physical-bytes channel out)))))
+                   (and (<= 0.0 v 1.0)
+                        (= target (physical-bytes channel (physical-dmx-value pivot v)))))
         level (inverse-channel-value pivot (double physical))]
     (if (matches? level)
       level
@@ -75,6 +78,16 @@
                    (Math/nextDown level) (Math/nextUp level)])
             (throw (ex-info "No representable input for requested fog channel bytes"
                             {:pivot pivot :physical physical :bytes target})))))))
+
+(defn mix-physical-level
+  "Interpolate two normalized fog inputs in physical DMX space. Crossing an
+  inversion pivot in logical space can otherwise open a closed pump."
+  [{:keys [inverted-from] :as channel} from to opacity]
+  (if (some? inverted-from)
+    (let [before (physical-dmx-value inverted-from from)
+          after (physical-dmx-value inverted-from to)]
+      (physical-level channel (+ before (* (double opacity) (- after before)))))
+    (+ from (* opacity (- to from)))))
 
 (defn plan
   "Compile the fog-capable part of a patch. Pass the room in metres and a

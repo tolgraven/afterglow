@@ -81,10 +81,10 @@
             :rotate-hue (do (when-not (finite? b) (fail! "rotate-hue needs a color and turns" {}))
                             (color/rotate-hue (typed high? :color a) (* 2.0 Math/PI b)))))))))
 
-(defn- over [high? blend-value field before value blend opacity]
-  (typed high? field (blend-value (rgb before) (rgb value) blend opacity)))
+(defn- over [high? blend-field id field before value blend opacity]
+  (typed high? field (blend-field id field (rgb before) (rgb value) blend opacity)))
 
-(defn- set-assignment [high? blend-value validate! fields {:keys [attribute value blend opacity] :as a}]
+(defn- set-assignment [high? blend-field validate! fields {:keys [target-id attribute value] :as a}]
   (let [value (typed high? attribute value)
         opacity (get a :opacity 1)
         blend (get a :blend :replace)]
@@ -94,7 +94,7 @@
       (validate! (assoc a :value (rgb value))))
     (if (zero? opacity)
       fields
-      (let [result (over high? blend-value attribute (get fields attribute) value blend opacity)]
+      (let [result (over high? blend-field target-id attribute (get fields attribute) value blend opacity)]
         (if (= :beat-ratio attribute)
           (when-not (finite? result) (fail! "Beat-ratio arithmetic overflow" {:assignment a}))
           (validate! (assoc a :value (rgb result))))
@@ -126,7 +126,7 @@
               (ex-info "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer})
               source)))))
 
-(defn- apply-member [high? state blocks rows blend-value validate! allowed]
+(defn- apply-member [high? state blocks rows blend-field validate! allowed]
   (let [{:keys [source native-layer] :as first-block} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
@@ -142,7 +142,7 @@
                                (reduce (fn [m a] (update m (:target-id a) (fnil conj []) a))
                                        acc (rows block allowed)))
                              initial blocks)
-              apply-row (partial set-assignment high? blend-value validate!)]
+              apply-row (partial set-assignment high? blend-field validate!)]
           (reduce-kv
            (fn [st id assignments]
              (let [prior (get-in st [:fields id] {})
@@ -163,7 +163,7 @@
                (reduce (fn [acc field]
                          (-> acc
                              (assoc-in [:fields id field]
-                                       (over high? blend-value field (get prior field) (get post field) :replace member-opacity))
+                                       (over high? blend-field id field (get prior field) (get post field) :replace member-opacity))
                              (assoc-in [:sources id field] source))) st written)))
            state inputs)))
       (catch Exception ex (throw (faults/attributed-error ex source))))))
@@ -187,7 +187,7 @@
   (when (and (some? weights) (not (and (map? weights) (every-weight? unit? weights))))
     (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {}) source))))
 
-(defn- group-blocks [high? backdrop blocks rows blend-value validate!]
+(defn- group-blocks [high? backdrop blocks rows blend-field validate!]
   (let [members (ordered-members blocks)
         group (:native-layer (first blocks))
         opacity (:opacity group 1)
@@ -196,7 +196,7 @@
     (if (or (zero? opacity) (and allowed (empty? allowed)))
       []
       (let [{:keys [fields sources]}
-            (reduce #(apply-member high? %1 %2 rows blend-value validate! allowed) {:fields backdrop :sources {}} members)
+            (reduce #(apply-member high? %1 %2 rows blend-field validate! allowed) {:fields backdrop :sources {}} members)
             writes (for [[id attrs] (sort-by (comp pr-str key) sources)
                          [field source] (sort-by key attrs)
                          :when (not= :beat-ratio field)]
@@ -298,15 +298,15 @@
        :else result))
    [] blocks))
 
-(defn compose
+(defn compose-fields
   "Compose tagged blocks at the last member's position in the ordinary priority
   stream. Only affected target rows are read into the native backdrop. Each
-  target/field result retains the source of its final contributing member.
+  target/field result retains the source of its final contributing member. The
+  blend function receives the target ID and attribute before the blend inputs.
   Optional :target-weights maps head IDs to [0,1]. Omitted heads receive no
   group output. Multiply the final group opacity by this weight once, after
   composing all native transforms and their inputs."
-  ([blocks rows blend-value validate!] (compose blocks rows blend-value validate! false))
-  ([blocks rows blend-value validate! high?]
+  [blocks rows blend-field validate! high?]
   (if-not (some :native-layer blocks)
     blocks
     (let [tagged (filterv :native-layer blocks)
@@ -322,7 +322,7 @@
         (if (every? some? (vals planned))
         (order-direct-blocks blocks planned anchors)
         (let [last-anchor (apply max (vals anchors))
-              apply-row (partial set-assignment high? blend-value validate!)
+              apply-row (partial set-assignment high? blend-field validate!)
               targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
                         (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
                                             (concat (:target-ids native-layer)
@@ -334,9 +334,17 @@
               (let [layer (:native-layer block)
                     entries (cond (nil? layer) [block]
                                   (= i (get anchors (:id layer)))
-                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-value validate!)
+                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate!)
                                   :else [])]
                 (cond-> (update state :out into entries)
                   (< i last-anchor)
                   (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks)))))))))
+            {:backdrop {} :out []} blocks))))))))
+
+(defn compose
+  "Compose native layers using a common blend function for all fields."
+  ([blocks rows blend-value validate!] (compose blocks rows blend-value validate! false))
+  ([blocks rows blend-value validate! high?]
+   (compose-fields blocks rows (fn [_ _ before value blend opacity]
+                                 (blend-value before value blend opacity))
+                   validate! high?)))
