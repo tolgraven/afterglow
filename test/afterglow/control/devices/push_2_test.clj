@@ -247,6 +247,111 @@
                 (is (= expected (:level (values h id)))))))
           (finally (finish! h)))))))
 
+(deftest held-encoder-retouch-recovers-after-repeated-transient-end-failures
+  (doseq [failure [:busy :deferred-busy :exception]]
+    (testing (name failure)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            attempts (atom [])
+            recovered? (atom false)
+            completion (promise)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (= :gesture/end (:op command))
+                                (let [count (count (swap! attempts conj (:time-ms command)))]
+                                  (cond
+                                    (= 1 count) {:status :pending :completion completion}
+                                    @recovered? (apply! command)
+                                    (= :busy failure) {:status :rejected :code :dispatch-busy}
+                                    (= :deferred-busy failure)
+                                    {:status :pending :completion (deliver (promise) {:status :rejected :code :dispatch-busy})}
+                                    :else (throw (ex-info "end dispatcher unavailable" {}))))
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))
+            history #(get-in @show [:control :edit-history])]
+        (try
+          (let [id (launch! h 37)]
+            (receive! h [0x90 0 127])
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (receive! h [0x90 0 127])
+            (deliver completion {:status :rejected :code :dispatch-busy})
+            (dotimes [_ 3] (session/refresh! device))
+            (is (= [0 0] @attempts))
+            (reset! now 99)
+            (session/refresh! device)
+            (is (= [0 0] @attempts))
+            (reset! now 100)
+            (dotimes [_ 3] (session/refresh! device))
+            (is (= [0 0 100] @attempts))
+            (reset! recovered? true)
+            (reset! now 199)
+            (session/refresh! device)
+            (is (= [0 0 100] @attempts))
+            (reset! now 200)
+            (session/refresh! device)
+            (is (= [0 0 100 200] @attempts))
+            (receive! h [0xb0 71 1])
+            (receive! h [0x80 0 0])
+            (is (= [0 0 100 200 200] @attempts))
+            (is (= [0.51 0.52] (mapv #(get-in (history) [:nodes % :after]) [1 2])))
+            (is (empty? (:open (history))))
+            (doseq [[cursor expected] [[2 0.51] [1 0.5]]]
+              (let [ack (:ack (apply! (merge (select-keys @show [:show-id :epoch :time-ms])
+                                             {:command-id (str "recover-undo-" cursor) :source :test :op :history/undo
+                                              :expected-cursor cursor :expected-history-position (:position (history))})))]
+                (is (= :accepted (:status ack)))
+                (is (= expected (:level (values h id))))))
+            (is (= (if (= :exception failure) ["end dispatcher unavailable" "end dispatcher unavailable"] [])
+                   (:errors (session/snapshot device)))))
+          (finally (session/close! device true)))))))
+
+(deftest retouch-cadence-stops-on-release-or-permanent-rejection
+  (doseq [stopped-by [:release :permanent-rejection]]
+    (testing (name stopped-by)
+      (let [{:keys [show options now] :as h} (fixture/harness {:profile (push/profile {:operator-gestures? true})}
+                                                             push-operator)
+            apply! (:dispatch! options)
+            attempts (atom 0)
+            recovered? (atom false)
+            device (session/create
+                     (assoc options :dispatch!
+                            (fn [command]
+                              (if (= :gesture/end (:op command))
+                                (let [attempt (swap! attempts inc)]
+                                  (cond
+                                    @recovered? (apply! command)
+                                    (and (= 2 attempt) (= :permanent-rejection stopped-by))
+                                    {:status :rejected :code :operator-required}
+                                    :else {:status :rejected :code :dispatch-busy}))
+                                (apply! command)))))
+            h (fixture/ready! (assoc h :session device))]
+        (try
+          (launch! h 37)
+          (receive! h [0x90 0 127])
+          (receive! h [0xb0 71 1])
+          (receive! h [0x80 0 0])
+          (receive! h [0x90 0 127])
+          (is (= 2 @attempts))
+          (when (= :release stopped-by)
+            (receive! h [0x80 0 0]))
+          (let [previous-attempts @attempts]
+            (reset! recovered? true)
+            (doseq [time [100 200 300]]
+              (reset! now time)
+              (session/refresh! device))
+            (is (= previous-attempts @attempts))
+            (session/close! device true)
+            (is (= (inc previous-attempts) @attempts)))
+          (is (= [:cue/launch :gesture/begin :gesture/sample :gesture/end]
+                 (mapv :op (admitted-commands h))))
+          (let [history (get-in @show [:control :edit-history])]
+            (is (= 1 (:cursor history)))
+            (is (empty? (:open history))))
+          (finally (finish! h)))))))
+
 (deftest encoder-detents-and-touch-strip-share-one-scalar-gesture
   (let [h (gesture-harness push-operator nil)]
     (try

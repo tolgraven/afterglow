@@ -104,6 +104,7 @@
       {:state state})))
 
 (def ^:private encoder-release-tail-ms 200)
+(def ^:private encoder-end-retry-ms 100)
 
 (defn- encoder-control-id [note]
   (keyword "push-2" (str "encoder-" note)))
@@ -120,9 +121,9 @@
               (update :encoder-releases dissoc control-id))
    :commands [(gesture-command gesture :gesture/begin)]})
 
-(defn- retry-encoder-end [state {:keys [control-id retouch retouch-retry?] :as gesture}]
-  (if-let [end (and retouch (not retouch-retry?) (end-encoder-gesture gesture))]
-    {:state (assoc-in state [:encoder-gestures control-id :retouch-retry?] true)
+(defn- retry-encoder-end [state {:keys [control-id retouch] :as gesture}]
+  (if-let [end (and retouch (end-encoder-gesture gesture))]
+    {:state (assoc-in state [:encoder-gestures control-id :end-retry] :in-flight)
      :commands [end]}
     {:state state}))
 
@@ -147,8 +148,11 @@
                            :show-id (:show-id envelope) :epoch (:epoch envelope) :last-sequence 0)]
           (if gesture
             ;; One still-held touch waits for the preceding end on this encoder.
-            (let [ending (assoc gesture :retouch touch)]
-              (retry-encoder-end (assoc-in state path ending) ending))
+            (let [ending (assoc gesture :retouch touch)
+                  state (assoc-in state path ending)]
+              (if (= :ready (:end-retry ending))
+                (retry-encoder-end state ending)
+                {:state state}))
             (begin-encoder-gesture state touch)))
         {:state state}))
     {:state state}))
@@ -159,7 +163,7 @@
         end (end-encoder-gesture gesture)
         state (cond-> (-> state (update :touches dissoc note)
                           (update :touch-order #(vec (remove #{note} %))))
-                (:retouch gesture) (-> (update-in [:encoder-gestures control-id] dissoc :retouch :retouch-retry?)
+                (:retouch gesture) (-> (update-in [:encoder-gestures control-id] dissoc :retouch)
                                        (assoc-in [:encoder-releases control-id] (:time-ms envelope))))]
     (cond
       end {:state (cond-> state
@@ -515,20 +519,28 @@
     (begin-encoder-gesture state retouch)
     {:state (update state :encoder-gestures dissoc control-id)}))
 
-(defn- acknowledge-encoder [state {:keys [op control-id gesture-id sequence] :as command}
-                            {:keys [status code completion]}]
+(defn- acknowledge-encoder [state {:keys [op control-id gesture-id sequence time-ms] :as command}
+                            {:keys [status code reason completion]}]
   (let [path [:encoder-gestures control-id]
-        gesture (get-in state path)]
+        gesture (get-in state path)
+        failure (or code reason)]
     (cond
       (not= gesture-id (:gesture-id gesture)) {:state state}
 
       (= :gesture/end op)
       (cond
-        (#{:stale-epoch :wrong-show} code) {:state (update state :encoder-gestures dissoc control-id)}
-        (or (= :accepted status) (= :unknown-gesture code)) (finish-encoder-gesture state gesture)
-        (= :pending status) {:state (assoc-in state (conj path :pending-end) completion)}
-        :else (let [ending (dissoc gesture :pending-end)]
-                (retry-encoder-end (assoc-in state path ending) ending)))
+        (#{:stale-epoch :wrong-show} failure) {:state (update state :encoder-gestures dissoc control-id)}
+        (or (= :accepted status) (= :unknown-gesture failure)) (finish-encoder-gesture state gesture)
+        (= :pending status) {:state (assoc-in state (conj path :pending-end) [command completion])}
+        (#{:dispatch-busy :dispatch-error :queue-full :gesture-end-queued} failure)
+        ;; The first retry can follow the old receipt. Further attempts use the feedback clock.
+        (let [retry (if (= :in-flight (:end-retry gesture)) (+ time-ms encoder-end-retry-ms) :ready)
+              ending (assoc (dissoc gesture :pending-end) :end-retry retry)
+              state (assoc-in state path ending)]
+          (if (= :ready retry)
+            (retry-encoder-end state ending)
+            {:state state}))
+        :else {:state (update-in state path dissoc :pending-end :end-retry)})
 
       (and (= :gesture/begin op) (= :rejected status) (:released? gesture))
       (finish-encoder-gesture state gesture)
@@ -541,11 +553,12 @@
                           (= :gesture/begin op) (assoc :status (if (= :operator-required code) :pass-through status))
                           (and (= :gesture/sample op) (= :accepted status)) (assoc :last-sequence sequence)))})))
 
-(defn- settled-encoder-receipts [{:keys [pending pending-end] :as gesture}]
-  (let [[command completion] pending]
+(defn- settled-encoder-receipts [{:keys [pending pending-end]}]
+  (let [[command completion] pending
+        [end end-completion] pending-end]
     (cond-> []
       (and completion (realized? completion)) (conj [command @completion])
-      (and pending-end (realized? pending-end)) (conj [(gesture-command gesture :gesture/end) @pending-end]))))
+      (and end-completion (realized? end-completion)) (conj [end @end-completion]))))
 
 (defn- reconcile-encoders [state]
   (reduce (fn [{:keys [state commands]} [command ack]]
@@ -554,10 +567,24 @@
           {:state state :commands []}
           (mapcat settled-encoder-receipts (sort-by :control-id (vals (:encoder-gestures state))))))
 
+(defn- retry-due-encoder-ends [{:keys [state] :as result} time-ms]
+  (reduce (fn [result {:keys [end-retry retouch] :as gesture}]
+            (if (and retouch (number? end-retry) (>= time-ms end-retry))
+              (let [retry (retry-encoder-end (:state result) gesture)]
+                (-> result (assoc :state (:state retry))
+                    (update :commands (fnil into []) (:commands retry))))
+              result))
+          result (sort-by :control-id (vals (:encoder-gestures state)))))
+
 (defn- with-encoder-gestures [profile]
-  (let [{:keys [reconcile stop]} profile]
+  (let [{:keys [feedback reconcile stop]} profile]
     (assoc profile
            :operator-gestures? true
+           :feedback (fn [state model envelope]
+                       (let [result (feedback state model envelope)]
+                         (if (and (get-in result [:state :ready?]) (nil? (:lifecycle result)))
+                           (retry-due-encoder-ends result (:time-ms envelope))
+                           result)))
            :stop (fn [state model envelope disconnected?]
                    ;; Settle receipts for cleanup without enacting a waiting touch.
                    (stop (:state (reconcile-encoders state)) model envelope disconnected?))
