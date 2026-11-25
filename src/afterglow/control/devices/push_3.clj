@@ -5,9 +5,11 @@
             [afterglow.control.codecs.push-3 :as codec]
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
+            [afterglow.control.devices.push-cue-gesture :as gesture]
             [afterglow.control.devices.push-launch :as launch]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
+            [afterglow.control.devices.transports :as transports]
             [afterglow.control.display :as display]
             [afterglow.control.devices.target-picker :as targets]
             [afterglow.control.pages :as pages]
@@ -165,9 +167,59 @@
     :button (button options state event model)
     {:state state}))
 
+(defn- gesture-result [state result]
+  (let [next-gesture (:state result)
+        selection (:selection next-gesture)]
+    (assoc result :state
+           (cond-> (assoc state :cue-gesture next-gesture)
+             (not= (get-in state [:cue-gesture :selection]) selection)
+             (assoc :selected-cue (:cue-id selection) :selected-instance (:instance-id selection))
+             (:target-consumed? result) (dissoc :target-once)))))
+
+(defn- gesture-step [options state event model envelope]
+  (gesture-result state
+    (gesture/step (::gesture options) (:cue-gesture state) event
+                  (assoc (select-keys state [:page-id :origin])
+                         :pressed-buttons (:buttons state)
+                         :target-selector (get-in state [:target-once :selector]))
+                  model envelope)))
+
+(defn- gesture-pad [options state event model envelope]
+  (let [{:keys [gesture-key pressed? cell]} event]
+    (cond
+      (contains? (:picker-pads state) gesture-key)
+      {:state (if pressed? state (targets/release-pad state gesture-key))}
+
+      (and pressed? cell (:target-picker state)
+           (not (contains? (get-in state [:cue-gesture :pads]) gesture-key)))
+      {:state (targets/pad state gesture-key cell)}
+
+      :else (gesture-step options state event model envelope))))
+
+(defn- gesture-axis [options state key axis value model envelope]
+  (gesture-step options state {:type :axis :gesture-key key :axis axis :value value} model envelope))
+
+(defn- gesture-input [options state event model envelope]
+  (case (:type event)
+    :pad (gesture-pad options state (assoc event :cell (:control-id event)) model envelope)
+    :poly-pressure (if (= :poly-aftertouch (:expression-mode options))
+                     (gesture-axis options state (:gesture-key event) :pressure (:value event) model envelope)
+                     {:state state})
+    :mono-pressure (let [pads (keys (get-in state [:cue-gesture :pads]))]
+                     (if (and (= :mono-aftertouch (:expression-mode options)) (= 1 (count pads))
+                              (empty? (:picker-pads state)))
+                       (gesture-axis options state (first pads) :pressure (:value event) model envelope)
+                       {:state state}))
+    :button (let [result (input options state event model envelope)
+                  page (juxt :page-id :origin)]
+              (if (= (page state) (page (:state result)))
+                result
+                (assoc result :state (:state (gesture-step options (:state result) {:type :context} model envelope)))))
+    (input options state event model envelope)))
+
 (defn- surface-state [state]
   (if-let [controls (:controls state)]
-    (cond-> controls (get-in state [:mpe :selected-instance])
+    (cond-> controls (and (not (:cue-gesture controls)) (get-in state [:mpe :selected-instance]))
       (assoc :selected-instance (get-in state [:mpe :selected-instance])))
     state))
 
@@ -219,21 +271,38 @@
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
-                       (#{:shift :blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)))
+                       (#{:shift :blackout :transport :page-left :page-right :page-up :page-down :suspend :target-picker} action)
+                       (and (::gesture options) (= action (get-in options [::gesture :gesture-modifier])))))
               "Button bindings need a captured ID and supported semantic action" {:id id}))
     (doseq [key [:pressure-param :touch-strip-param] :when (contains? options key)]
       (valid! (keyword? (get options key)) "Expression targets must be parameter keywords" {:key key}))
     (when (contains? options :launch-mode)
       (valid! (#{:held :persistent :one-shot} (:launch-mode options)) "Invalid launch-mode override" {}))
-    {:id :push-3 :capabilities capabilities
-     :initial-state (reset-interactions {:page-id page-id :origin [0 0]})
-     :decode (partial codec/decode compiled)
-     :input (partial input options)
-     :ack acknowledge
-     :reset-model reset-interactions
-     :stop (fn [state _model envelope _disconnected?]
-             {:state (reset-interactions state)
-              :commands (bindings/release-holds (:holds state) envelope)})}))
+    (let [reset-model (fn [state]
+                        (cond-> (reset-interactions state)
+                          (::gesture options) (assoc :cue-gesture (gesture/initial-state))))]
+      (cond-> {:id :push-3 :capabilities capabilities
+               :initial-state (reset-model {:page-id page-id :origin [0 0]})
+               :decode (partial codec/decode compiled)
+               :input (partial input options)
+               :ack acknowledge
+               :reset-model reset-model
+               :stop (fn [state _model envelope _disconnected?]
+                       {:state (reset-model state)
+                        :commands (bindings/release-holds (:holds state) envelope)})}
+        (::gesture options)
+        (assoc :capabilities (update capabilities :controls conj :cue-gestures)
+               :input (partial gesture-input options)
+               :ack (fn [state command ack]
+                      (gesture-result state (gesture/acknowledge (:cue-gesture state) command ack)))
+               :advance (fn [state model envelope]
+                          (when-let [deadline (gesture/next-deadline-ms (:cue-gesture state))]
+                            (when (<= deadline (:time-ms envelope))
+                              (gesture-step options state {:type :tick} model envelope))))
+               :unique-command-prefix? true
+               :fence-captured-commands? true
+               :stop (fn [state _model envelope _disconnected?]
+                       (assoc (gesture/stop (:cue-gesture state) envelope) :state (reset-model state))))))))
 
 (defn- mpe-profile [options]
   (valid! (seq (:mpe-note-cells options))
@@ -290,10 +359,63 @@
              (combine ((:stop controls) (:controls state) model envelope disconnected?)
                       ((:stop notes) (:mpe state) model envelope disconnected?)))}))
 
+(defn- mpe-gesture-member [options zone state bytes model envelope]
+  (let [{decoder :state :keys [events diagnostics]} (mpe-codec/advance zone (get-in state [:mpe :decoder]) bytes)
+        state (-> state (assoc-in [:mpe :decoder] decoder)
+                  (update-in [:mpe :diagnostics] #(vec (take-last 32 (into % diagnostics)))))]
+    (reduce (fn [{:keys [state commands]} {:keys [type voice-id note axis value reason] :as event}]
+              (let [controls (:controls state)
+                    result (case type
+                             (:note-on :note-off)
+                             (gesture-pad options controls
+                                          {:type :pad :gesture-key voice-id :cell (get (:mpe-note-cells options) note)
+                                           :pressed? (= :note-on type) :axes (:axes event)
+                                           :cancelled? (and (= :note-off type) (not= :released reason))}
+                                          model envelope)
+                             :axis (gesture-axis options controls voice-id axis value model envelope)
+                             {:state controls})]
+                {:state (assoc state :controls (:state result)) :commands (into commands (:commands result))}))
+            {:state state :commands []} events)))
+
+(defn- mpe-gesture-profile [options]
+  (let [note-cells (:mpe-note-cells options)
+        zone (mpe-codec/compile-zone (:zone options))
+        surface (user-profile (assoc options :expression-mode :poly-aftertouch))
+        initial-mpe {:decoder (mpe-codec/initial-state) :diagnostics []}
+        lift (fn [state result]
+               (when result (update result :state #(assoc state :controls %))))]
+    (valid! (and (seq note-cells)
+                 (every? (fn [[note cell]]
+                           (and (integer? note) (<= 0 note 127) (vector? cell) (= 2 (count cell))
+                                (every? #(and (integer? %) (<= 0 %)) cell))) note-cells))
+            "MPE needs captured notes mapped to Push pad cells" {})
+    (assoc surface
+           :initial-state {:controls (:initial-state surface) :mpe initial-mpe}
+           :capabilities (assoc (:capabilities surface) :mpe :explicit-zone-and-note-captures
+                                :available-axes (select-keys mpe-codec/axes [:strike :pressure :glide :slide])
+                                :supported-expression-modes #{:mpe :poly-aftertouch :mono-aftertouch})
+           :decode identity
+           :input (fn [state bytes model envelope]
+                    (let [status (first bytes)
+                          channel (when (and (integer? status) (<= 0x80 status 0xef)) (bit-and status 0x0f))]
+                      (if (contains? (:member-channels zone) channel)
+                        (mpe-gesture-member options zone state bytes model envelope)
+                        (let [control ((:decode surface) bytes)]
+                          (if (and control (not (#{:pad :poly-pressure :mono-pressure} (:type control))))
+                            (lift state ((:input surface) (:controls state) control model envelope))
+                            {:state state})))))
+           :ack (fn [state command ack] (lift state ((:ack surface) (:controls state) command ack)))
+           :advance (fn [state model envelope] (lift state ((:advance surface) (:controls state) model envelope)))
+           :reset-model (fn [state] {:controls ((:reset-model surface) (:controls state)) :mpe initial-mpe})
+           :stop (fn [state model envelope disconnected?]
+                   (lift (assoc state :mpe initial-mpe)
+                         ((:stop surface) (:controls state) model envelope disconnected?))))))
+
 (defn- display-feedback [options state model _]
   (let [controls (surface-state state)
         index (push-view/cue-index model)
-        instance (or (get-in model [:instances (:selected-instance controls)]) (last (:active index)))
+        instance (or (get-in model [:instances (:selected-instance controls)])
+                     (when-not (get-in controls [:cue-gesture :selection]) (last (:active index))))
         touch (some (fn [id]
                       (when-let [k (get-in options [:encoder-bindings id :param])]
                         (when (get-in instance [:definition :params k])
@@ -304,7 +426,8 @@
                     :fine? (boolean (shift-held? options controls)))
         selected (assoc selected :selected-instance (:id instance) :last-display view)
         next-state (if (:controls state)
-                     (-> state (assoc :controls selected) (assoc-in [:mpe :selected-instance] (:id instance)))
+                     (cond-> (assoc state :controls selected)
+                       (not (:cue-gesture controls)) (assoc-in [:mpe :selected-instance] (:id instance)))
                      selected)]
     (cond-> {:state next-state}
       (not= view (:last-display controls)) (assoc :display view))))
@@ -313,22 +436,40 @@
   "Build Push 3 User Mode controls. :expression-mode :mpe additionally requires
   :zone and :mpe-note-cells {note [x y]} captured across rotating member channels.
   MPE exposes normalized Glide/Slide, not calibrated absolute pad coordinates.
+  :cue-gestures? true opts into shared tap/hold policy. :hold-ms sets its deadline;
+  bind a captured button to :cue-gesture or the configured :gesture-modifier.
   :launch-grid optionally routes pad launches to a musical grid owned by the host."
   [options]
+  (when (contains? options :cue-gestures?)
+    (valid! (boolean? (:cue-gestures? options)) "Cue gesture opt-in must be boolean" {}))
   (let [grid (launch/grid options)
-        options (assoc options ::grid grid)
-        profile (if (= :mpe (:expression-mode options)) (mpe-profile options) (user-profile options))]
+        mpe? (= :mpe (:expression-mode options))
+        options (cond-> (assoc options ::grid grid)
+                  (:cue-gestures? options)
+                  (assoc ::gesture (gesture/configure
+                                     (cond-> (assoc options :axes (if mpe? #{:strike :pressure :glide :slide}
+                                                                         #{:strike :pressure}))
+                                       mpe? (assoc :default-launch-mode :held)
+                                       (:pressure-param options) (update :param-mappings
+                                                                        #(merge {(:pressure-param options) :pressure} %))))))
+        profile (cond
+                  (and mpe? (::gesture options)) (mpe-gesture-profile options)
+                  mpe? (mpe-profile options)
+                  :else (user-profile options))]
     (cond-> (launch/with-grid profile grid (:launch-receipt options))
       (:display options) (assoc :feedback (partial display-feedback options)))))
 
 (defn connect!
   "Explicitly open an injected MIDI transport. Manual session/suspend! and
   session/resume! provide handoff; User itself cannot be mapped in User Mode.
-  A display must be an explicitly tagged Push 3 semantic transport."
+  A display must be an explicitly tagged Push 3 semantic transport. Cue
+  gestures use the supplied refresh schedule, or an owned 10 ms cadence."
   [options]
   (when-let [display (:display options)]
     (valid! (and (= :push-3 (:device display)) (= :view (:input display))
                  (every? #(fn? (get display %)) [:open! :render! :close!]))
             "Choose a tagged Push 3 display transport" {}))
   (session/open! (session/create (cond-> (assoc options :profile (profile options))
+                                    (and (:cue-gestures? options) (not (contains? options :schedule!)))
+                                    (assoc :schedule! (transports/scheduler (get options :refresh-ms 10)))
                                     (and (:transport options) (not (:midi options))) (assoc :midi (:transport options))))))

@@ -11,6 +11,7 @@
     afterglow.control.codecs.midi-test afterglow.control.codecs.osc-test afterglow.control.codecs.push-2-test
     afterglow.control.codecs.push-3-test afterglow.control.codecs.mpe-test
     afterglow.control.devices.push-3-test afterglow.control.devices.push-3-display-test afterglow.control.devices.mpe-test
+    afterglow.control.devices.push-cue-gesture-test afterglow.control.devices.push-3-cue-gestures-test
     afterglow.control.codecs.x-touch-test afterglow.control.devices.x-touch-test
     afterglow.control.devices.session-test afterglow.control.devices.transports-test
     afterglow.output.artnet-test afterglow.output.ola-test afterglow.output.scheduler-test afterglow.output.timeline-test

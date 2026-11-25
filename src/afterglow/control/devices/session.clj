@@ -3,7 +3,7 @@
   show dispatch remains the host coordinator's responsibility. No work starts at
   namespace load. Profiles are pure transitions; transports are injected maps.")
 
-(declare receive! refresh! close! suspend! resume!)
+(declare receive! refresh! refresh-session! close! suspend! resume!)
 
 (defn create
   "Create an inert session. Required options: :session-id, :profile, :model!
@@ -18,7 +18,9 @@
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
   A :feedback-source may supply :open! [], :project! [handle local model] and
   :close! [handle]. Only feedback sees its projection; input always receives
-  the committed model. Its handle belongs to the active session.
+  the committed model. Its handle belongs to the active session. A profile's
+  optional :advance [local model envelope] handles logical refresh deadlines
+  before projection and may emit commands.
   Hosts should durably queue operator gesture ends, including teardown ends.
   A host without durable admission can retain the session and call refresh!
   until :pending-gesture-ends is empty, even after the transports close.
@@ -28,7 +30,8 @@
                  (map? profile) (every? ifn? [model! dispatch! now-ms!]))
     (throw (ex-info "Session needs ID, profile, model!, dispatch! and now-ms!" {})))
   {:options options :lock (Object.) :resources (atom {}) :gesture-ends (atom {})
-   :command-prefix (if (:grid-launches? profile) (str (java.util.UUID/randomUUID)) session-id)
+   :command-prefix (if (or (:grid-launches? profile) (:unique-command-prefix? profile))
+                     (str (java.util.UUID/randomUUID)) session-id)
    :state (atom {:status :closed :generation 0 :counter 0
                  :local (:initial-state profile {}) :errors []})})
 
@@ -75,20 +78,21 @@
   (let [{:keys [dispatch! profile]} (:options session)
         ;; Use current admission time for deferred releases while checking captured show identity.
         envelope (envelope! session)
+        op (:op template)
         scheduled-launch? (grid-launch? template)
-        timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
+        timed-cue? (or scheduled-launch? (= :cue/cancel-launch op))
         gesture? (and (:operator-gestures? profile)
-                      (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
-        detached (when (and gesture? (= :gesture/begin (:op template)))
+                      (#{:gesture/begin :gesture/sample :gesture/end} op))
+        detached (when (and gesture? (= :gesture/begin op))
                    (get-in @(:gesture-ends session) [(:control-id template) :command]))
-        captured-order? (= :instance/move-after (:op template))
-        stale? (or (and (or gesture? captured-order?)
-                        (not= (show-identity template) (show-identity envelope)))
-                   (and (or timed-cue? (= :instance/end (:op template)))
-                        (some #(and (contains? template %)
-                                    (not= (get template %) (get envelope %)))
-                              [:show-id :epoch])))
-        command (cond-> (merge template envelope)
+        exact-identity? (or gesture? (= :instance/move-after op))
+        captured-identity (when (or exact-identity? timed-cue? (= :instance/end op)
+                                    (:fence-captured-commands? profile))
+                            (select-keys template [:show-id :epoch]))
+        stale? (if exact-identity?
+                 (not= (show-identity template) (show-identity envelope))
+                 (some (fn [[field value]] (not= value (get envelope field))) captured-identity))
+        command (cond-> (merge template envelope captured-identity)
                   (and scheduled-launch? (:command-id template)) (assoc :command-id (:command-id template)))
         response (cond
                    stale? {:status :rejected :reason :stale-epoch}
@@ -275,7 +279,7 @@
                      (when (= (show-identity model) (show-identity reconciled))
                        (enact! session ((:input profile) (:local @(:state session)) event
                                         reconciled (envelope! session reconciled)))))
-                   (refresh! session)))))
+                   (refresh-session! session false)))))
            (catch Exception error
              (record-error! session error)
              (when (:device/transport-failed (ex-data error))
@@ -299,11 +303,7 @@
         model))
     model))
 
-(defn refresh!
-  "Render latest model with bounded profile feedback while active. Also attempt
-  due teardown gesture ends even if suspended or closed. The caller owns any
-  retries after the session scheduler stops."
-  [session]
+(defn- refresh-session! [session advance?]
   (locking (:lock session)
     (try
       (retry-gesture-ends! session)
@@ -311,7 +311,12 @@
         (let [{:keys [profile model!]} (:options session)
               model (model!)]
           (adopt-epoch! session model)
-          (let [model (reconcile! session model nil)]
+          (let [model (reconcile! session model nil)
+                result (when-let [advance (when advance? (:advance profile))]
+                         (advance (:local @(:state session)) model (envelope! session model)))
+                _ (enact! session result)
+                model (if (seq (:commands result)) (model!) model)]
+            (adopt-epoch! session model)
             (when-let [feedback (:feedback profile)]
               (let [local (:local @(:state session))]
                 (enact! session (feedback local (feedback-model session local model) (envelope! session))))))))
@@ -322,6 +327,13 @@
           (update-state! session assoc :status :failed))
         (throw error)))
     (snapshot session)))
+
+(defn refresh!
+  "Process due profile work and render bounded feedback while active. Also
+  attempt due teardown gesture ends if suspended or closed. The caller owns
+  any retries after the session scheduler stops."
+  [session]
+  (refresh-session! session true))
 
 (defn suspend!
   "Release held gestures and restore device state before giving up its display.
