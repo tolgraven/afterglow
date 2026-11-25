@@ -385,14 +385,17 @@
         (update-in [:control :history]
                    #(apply dissoc (assoc % id {:command command :ack ack}) evicted)))))
 
-(defn apply-command
-  "Apply one command atomically as data. Accepted writes increment revision.
+(defn apply-domain-command
+  "Apply a pure [model command] operation inside the shared command envelope.
+  Hosts select the operation before calling. It returns :model, :events and
+  optional :result, or throws an ExceptionInfo with :control/error.
+
   Rejected commands return the identical model and a structured ack. Duplicate
   accepted IDs return their original ack and no events; a reused ID with changed
   payload is rejected. Retry history is bounded, so callers must expire sessions
   rather than replay commands after receipts have been evicted. Restart changes
   epoch and drops active instances; old epoch requests cannot alter the new show."
-  [model command]
+  [model command operation]
   (try
     (require! (map? command) :invalid-command "Command must be a map")
     (require! (identifier? (:command-id command)) :invalid-command "Command needs a stable ID")
@@ -407,7 +410,7 @@
           (require! (= (:revision model) (:expected-revision command))
                     :stale-revision "Show revision changed"))
         (when (contains? command :time-ms) (time! model command))
-        (let [{next-model :model events :events result :result} (apply-operation model command)
+        (let [{next-model :model events :events result :result} (operation model command)
               updated (cond-> (update next-model :revision inc)
                         (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
               ack (merge (receipt updated command :accepted) result)
@@ -425,3 +428,8 @@
          :ack (assoc (receipt model command :rejected) :code code :message (.getMessage e)
                      :details (:details (ex-data e)))}
         (throw e)))))
+
+(defn apply-command
+  "Apply an Afterglow command atomically. Accepted commands increment revision."
+  [model command]
+  (apply-domain-command model command apply-operation))

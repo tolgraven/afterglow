@@ -429,3 +429,31 @@
     (doseq [targets [nil 1 [:left :left] [:left nil]]]
       (is (= :invalid-targets (get-in (model/apply-command m (command m {:op :effect/launch :effect-id :wash
                                                                         :launch {:targets targets}})) [:ack :code]))))))
+
+(deftest domain-command-uses-the-shared-receipts-and-event-batch
+  (let [base (events/begin (model/new-show))
+        cmd (command base {:op :example/set :value 1 :expected-revision 0})
+        changed {:type :example/changed :value 1}
+        operation (fn [m {:keys [value]}]
+                    (when (neg? value)
+                      (throw (ex-info "Invalid value" {:control/error :invalid-value})))
+                    {:model (assoc-in m [:settings :example] value)
+                     :events [changed] :result {:value value}})
+        result (model/apply-domain-command base cmd operation)
+        updated (:model result)
+        duplicate (model/apply-domain-command updated cmd operation)]
+    (is (= {:status :accepted :revision 1 :value 1}
+           (select-keys (:ack result) [:status :revision :value])))
+    (is (= 1 (get-in updated [:settings :example])))
+    (is (= [changed] (mapv :event (events/pending updated))))
+    (is (= (:ack result) (:ack duplicate)))
+    (is (identical? updated (:model duplicate)))
+    (is (= [] (:events duplicate)))
+    (doseq [[code m c] [[:wrong-show base (assoc cmd :show-id :other)]
+                        [:stale-epoch base (assoc cmd :epoch 1)]
+                        [:stale-revision updated (assoc cmd :command-id :new)]
+                        [:command-id-conflict updated (assoc cmd :value 2)]
+                        [:invalid-value base (assoc cmd :value -1)]]]
+      (let [rejected (model/apply-domain-command m c operation)]
+        (is (= code (get-in rejected [:ack :code])))
+        (is (identical? m (:model rejected)))))))

@@ -85,6 +85,13 @@
            {:model-time-ms (:time-ms model) :frame-time-ms (:time-ms frame)}))
   (when (and (contains? frame :delta-ms) (not (nonnegative-number? (:delta-ms frame))))
     (fail! ::invalid-delta "Frame delta must be finite and nonnegative" {}))
+  (let [factors (get frame ::opacity-factors {})]
+    (when-not (map? factors)
+      (fail! ::invalid-opacity-factors "Expected an instance ID to opacity factor map" {}))
+    (doseq [[id factor] factors]
+      (when-not (and (contains? (:instances model) id) (finite-number? factor) (<= 0 factor 1))
+        (fail! ::invalid-opacity-factors "Opacity factors must be in [0,1] for active instances"
+               {:instance-id id :factor factor}))))
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
 
@@ -240,7 +247,7 @@
             (assoc :target-ids (:targets program-definition)))))))
 
 (defn- descriptor
-  [step {:keys [instance program intents expired? clock paused? input-state delta-ms number]}]
+  [step opacity-factor {:keys [instance program intents expired? clock paused? input-state delta-ms number]}]
   (let [instance (assoc instance :definition program)]
     {:id (:id instance) :priority (:priority instance) :order (:order instance)
      :state (:state instance) :instance instance
@@ -261,7 +268,8 @@
                    ;; contribution, preserving the kernel failure contract.
                    _ (when valid? (runtime/append-contributions result []))
                    result (if valid?
-                            (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))]
+                            (let [gain (* (get-in instance [:system :opacity] 1.0) (system/gain instance clock))
+                                  gain (if (== 1 opacity-factor) gain (* gain opacity-factor))]
                               (if-let [layer (native-layer instance program)]
                                 (let [tag (assoc layer :member-opacity gain)
                                       flushed (runtime/append-contributions result [])
@@ -323,7 +331,7 @@
    :state (get-in prepared [:instance :state]) :assignments [] :contributions []
    :intents (:intents prepared) :done? false})
 
-(defn- attempt [snapshot compiled prepared]
+(defn- attempt [snapshot compiled opacity-factor prepared]
   (let [instance (:instance prepared) {:keys [step error]} (get compiled (:program prepared))]
     (cond
       (and (not (:expired? prepared))
@@ -335,7 +343,7 @@
 
       :else
       (try
-        (let [value (runtime/evaluate-instance snapshot (descriptor step prepared))
+        (let [value (runtime/evaluate-instance snapshot (descriptor step opacity-factor prepared))
               source (assoc (select-keys instance [:effect-id :effect-version :cue-id]) :instance-id (:id instance))]
           (-> value
               (assoc :instance instance)
@@ -349,8 +357,9 @@
                                                  (take 4 (take-while some? (iterate #(.getCause ^Throwable %) error))))
                                          :result :evaluate) error)})))))
 
-(defn- evaluate-isolated [snapshot compiled prepared]
-  (let [result (attempt snapshot compiled prepared)
+(defn- evaluate-isolated [snapshot compiled factors prepared]
+  (let [opacity-factor (get factors (get-in prepared [:instance :id]) 1)
+        result (attempt snapshot compiled opacity-factor prepared)
         candidate? (:candidate? prepared)
         before (:before prepared)
         fault (:failure result)
@@ -360,7 +369,7 @@
                              (assoc :before before :candidate? false)
                              (assoc-in [:instance :reload-fault] fault)
                              (update :intents conj (faults/event :effect/reload-failed fault)))]
-            [(attempt snapshot compiled fallback) fallback])
+            [(attempt snapshot compiled opacity-factor fallback) fallback])
           [result prepared])
         succeeded? (and (nil? (:failure result)) (not (:skipped? result)))
         result (if-let [failure (:failure result)]
@@ -438,6 +447,10 @@
   time, beat and meter captured before any private offsets. No typed result
   buffers enter the model.
   System opacity weights the blend result, never authored parameter values.
+  The optional ::opacity-factors frame input is a sparse map from active
+  instance IDs to unit factors. It multiplies the evaluated instance's system
+  opacity and AR level at the contribution boundary, including native member
+  opacity. Factors stay outside the effect context and committed instance.
   A removed registry definition leaves captured running instances valid.
 
   Duration expiry enters release at the exact logical deadline. During a positive
@@ -471,7 +484,8 @@
          delta-ms (get frame :delta-ms (- time-ms (get model :last-frame-time-ms (:time-ms model))))
          _ (when-not (nonnegative-number? delta-ms)
              (fail! ::invalid-delta "Computed frame delta must be nonnegative" {}))
-         snapshot (merge {:fixtures []} frame
+         factors (::opacity-factors frame)
+         snapshot (merge {:fixtures []} (dissoc frame ::opacity-factors)
                          {:show-id (:show-id model) :epoch (:epoch model)
                           :revision (:revision model) :number frame-number
                           :time-ms time-ms :delta-ms delta-ms
@@ -493,7 +507,7 @@
                     keyframes/with-rig-positions)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
          descriptors (mapv #(assoc (select-keys (:instance %) [:id :priority :order :state]) :step identity) prepared)
-         evaluations (vec (map-work (partial evaluate-isolated snapshot compiled) prepared))
+         evaluations (vec (map-work (partial evaluate-isolated snapshot compiled factors) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
          evaluations (vec (sort-by (juxt #(get-in % [:instance :priority])
