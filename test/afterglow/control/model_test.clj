@@ -164,8 +164,13 @@
 
 (def ^:private studio-operator {:operator-id "studio-panel"})
 
+(defn- operator-command [show {:keys [op] :as operation}]
+  (command show (if (#{:history/undo :history/redo :history/select} op)
+                  (merge {:expected-history-position (get-in show [:control :edit-history :position] 0)} operation)
+                  operation)))
+
 (defn- operator! [show operation]
-  (let [{:keys [model ack]} (model/apply-command show (command show operation) studio-operator)]
+  (let [{:keys [model ack]} (model/apply-command show (operator-command show operation) studio-operator)]
     (when-not (= :accepted (:status ack))
       (throw (ex-info "Operator command rejected" ack)))
     model))
@@ -192,7 +197,8 @@
         duplicate (model/apply-command model value-command studio-operator)
         replay-forged (model/apply-command model value-command)
         replay-other (model/apply-command model value-command {:operator-id "other-panel"})
-        ended (operator! model (assoc gesture :op :gesture/end :last-sequence 1))
+        ended (operator! model (assoc gesture :op :gesture/end :last-sequence 1
+                                     :target-display {:cue-id :forged :cue-label "Forged"}))
         undone (operator! ended {:op :history/undo :expected-cursor 1})
         ordinary (apply! show (assoc gesture :op :param/set :value 0.7))]
     (is (= :operator-required (get-in forged [:ack :code])))
@@ -207,6 +213,8 @@
     (is (= :operator-required (get-in replay-forged [:ack :code])))
     (is (= :command-id-conflict (get-in replay-other [:ack :code])))
     (is (= "studio-panel" (get-in ended [:control :edit-history :nodes 1 :actor])))
+    (is (= {:cue-id :red :cue-label "red" :effect-id :wash :effect-label "wash"}
+           (get-in ended [:control :edit-history :nodes 1 :target-display])))
     (is (= 0.6 (get-in undone [:instances id :params :level])))
     (is (= 0.7 (get-in ordinary [:instances id :params :level])))
     (is (nil? (get-in ordinary [:control :edit-history])))))
@@ -223,7 +231,7 @@
                       (apply! {:op :param/set :instance-id id :param :level :value 0.8}))
         separate-undo (operator! automated {:op :history/undo :expected-cursor 2})
         conflict (model/apply-command separate-undo
-                   (command separate-undo {:op :history/undo :expected-cursor 1}) studio-operator)]
+                   (operator-command separate-undo {:op :history/undo :expected-cursor 1}) studio-operator)]
     (is (= 0 (get-in repeated [:control :edit-history :generations target])))
     (is (= 2 (get-in automated [:control :edit-history :generations target])))
     (is (= 2 (get-in separate-undo [:instances id :params :count])))
@@ -265,9 +273,9 @@
         edits (-> show (turn! (knob id :level :gesture-a) 0.8)
                        (turn! (knob id :count :gesture-b) 4))
         selection {:op :history/select :expected-cursor 2 :node-id 0}
-        valid (model/apply-command edits (command edits selection) studio-operator)
+        valid (model/apply-command edits (operator-command edits selection) studio-operator)
         reloaded (assoc-in edits [:instances id :definition :params :level :bounds] [0.7 1.0])
-        invalid (model/apply-command reloaded (command reloaded selection) studio-operator)]
+        invalid (model/apply-command reloaded (operator-command reloaded selection) studio-operator)]
     (is (= :accepted (get-in valid [:ack :status])))
     (is (= [:count :level] (mapv :param (:events valid))))
     (is (= 0 (get-in valid [:model :control :edit-history :cursor])))
@@ -288,7 +296,7 @@
                                         :sequence 1 :value 0.9))
         restart (apply! open {:op :show/restart})
         rejected (model/apply-command restart late-sample studio-operator)
-        root-undo (model/apply-command restart (command restart {:op :history/undo :expected-cursor 0})
+        root-undo (model/apply-command restart (operator-command restart {:op :history/undo :expected-cursor 0})
                                        studio-operator)]
     (is (= {[:instance-param id :count] 0} (get-in pruned [:control :edit-history :generations])))
     (is (seq (get-in open [:control :edit-history :open])))
@@ -296,6 +304,32 @@
     (is (= :stale-epoch (get-in rejected [:ack :code])))
     (is (= :at-history-root (get-in root-undo [:ack :code])))
     (is (identical? restart (:model root-undo)))))
+
+(deftest an-evicted-undo-cannot-replay-after-redo-returns-to-the-same-tip
+  (let [show (apply! (configured) {:op :cue/launch :cue-id :red})
+        id (first (keys (:instances show)))
+        edited (turn! show (knob id :level :gesture-a) 0.8)
+        undo (operator-command edited {:op :history/undo :expected-cursor 1})
+        undone (model/apply-command edited undo studio-operator)
+        redone (operator! (:model undone) {:op :history/redo :expected-cursor 0 :node-id 1})
+        cached (model/apply-command redone undo studio-operator)
+        evicted (reduce (fn [model _] (apply! model {:op :master/set :value 0.9})) redone (range 1024))
+        replayed (model/apply-command evicted undo studio-operator)
+        fresh (operator-command evicted {:op :history/undo :expected-cursor 1})
+        incomplete (model/apply-command evicted (dissoc fresh :expected-history-position) studio-operator)
+        disengaged (model/apply-command evicted fresh studio-operator)]
+    (is (= 2 (get-in undone [:ack :history-position])))
+    (is (= (:ack undone) (:ack cached)))
+    (is (identical? redone (:model cached)))
+    (is (nil? (get-in evicted [:control :history (:command-id undo)])))
+    (is (= [1 3] ((juxt :cursor :position) (get-in evicted [:control :edit-history]))))
+    (is (= 0.8 (get-in evicted [:instances id :params :level])))
+    (doseq [result [replayed incomplete]]
+      (is (= :stale-history-position (get-in result [:ack :code])))
+      (is (identical? evicted (:model result)))
+      (is (empty? (:events result))))
+    (is (= [:accepted 0 4] ((juxt :status :history-cursor :history-position) (:ack disengaged))))
+    (is (= 0.6 (get-in disengaged [:model :instances id :params :level])))))
 
 (deftest releases-address-instance-and-do-not-reset-release-clock
   (let [show (-> (configured) (apply! {:op :cue/launch :cue-id :red})

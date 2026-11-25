@@ -385,6 +385,24 @@
 (defn- parameter-target [{:keys [instance-id param]}]
   [:instance-param instance-id param])
 
+(defn- target-label [id label]
+  (if (and (string? label) (seq label))
+    label
+    (if (keyword? id) (subs (str id) 1) id)))
+
+(defn edit-target-display
+  "Return portable cue/effect labels for a live edit target. Completed edits
+  retain these labels independently of their target's availability."
+  [model [kind id]]
+  (when (= :instance-param kind)
+    (let [{:keys [cue-id effect-id definition]} (get-in model [:instances id])]
+      (not-empty
+        (cond-> {}
+          (identifier? cue-id)
+          (assoc :cue-id cue-id :cue-label (target-label cue-id (get-in model [:registry :cues cue-id :name])))
+          (identifier? effect-id)
+          (assoc :effect-id effect-id :effect-label (target-label effect-id (:name definition))))))))
+
 (defn- history-cell [model history [kind id param :as target]]
   (let [instance (get-in model [:instances id])
         schema (get-in instance [:definition :params param])
@@ -416,7 +434,8 @@
       (reduce (fn [history [target gesture]]
                 (let [result (edit-history/apply-action
                                history {target (history-cell model history target)}
-                               (assoc gesture :op :gesture/end :target target))]
+                               (assoc gesture :op :gesture/end :target target
+                                      :target-display (edit-target-display model target)))]
                   (retain-history-generations (:history result) :gesture/end target)))
               history
               (sort-by (comp pr-str key) (:open history)))
@@ -434,7 +453,9 @@
         cells (into {} (keep (fn [target]
                                (when-let [cell (history-cell model history target)]
                                  [target cell]))) targets)
-        proposal (edit-history/apply-action history cells (assoc command :actor operator-id :target target))
+        action (cond-> (assoc command :actor operator-id :target target)
+                 (= :gesture/end op) (assoc :target-display (edit-target-display model target)))
+        proposal (edit-history/apply-action history cells action)
         _ (require! (= :accepted (:status proposal)) (:code proposal)
                     "Edit history command rejected" (select-keys proposal [:target]))
         next-history (retain-history-generations (:history proposal) op target)
@@ -444,7 +465,9 @@
                        {:model model :events []}
                        (sort-by (comp pr-str key) (:writes proposal)))]
     (-> (if (= history next-history) result (assoc-in result [:model :control :edit-history] next-history))
-        (assoc :result (assoc (select-keys proposal [:discarded]) :history-cursor (:cursor next-history))))))
+        (assoc :result (assoc (select-keys proposal [:discarded])
+                             :history-cursor (:cursor next-history)
+                             :history-position (edit-history/position next-history))))))
 
 (defn- track-external-write [model {:keys [op instance-id param] :as command} result]
   (if (and (= :param/set op) (get-in model [:control :edit-history :generations]))
@@ -483,6 +506,8 @@
   Gesture and history operations require an :operator-id from a trusted caller
   in the separate authority argument. This is a public actor identifier for
   history and events. Adapters resolve it independently of command payloads.
+  History navigation checks both the expected cursor and the edit-tree position
+  within the show epoch, including after a retry receipt has been evicted.
   Ordinary :param/set keeps its original validation and numeric representation.
   Generation tracking compares canonical model values using Clojure equality."
   ([model command] (apply-command model command nil))

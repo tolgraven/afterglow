@@ -8,7 +8,13 @@
   [limit]
   (when-not (and (integer? limit) (<= 2 limit))
     (throw (ex-info "Edit history needs room for a root and one edit" {:limit limit})))
-  {:limit limit :next-id 1 :cursor 0 :nodes {0 {:parent nil}} :open {}})
+  {:limit limit :next-id 1 :cursor 0 :position 0 :nodes {0 {:parent nil}} :open {}})
+
+(defn position
+  "An epoch-scoped token for the edit tree and its cursor. Saved histories
+  created before the token was introduced start at zero in their new epoch."
+  [history]
+  (:position history 0))
 
 (defn- accepted [history writes]
   {:status :accepted :history history :writes writes})
@@ -42,12 +48,13 @@
                                     (assoc next-root {:parent nil}))))))))
 
 (defn- record-edit [{:keys [cursor next-id] :as history}
-                    target {:keys [actor control-id before after generation]}]
-  (prune (-> history
-             (assoc-in [:nodes next-id] {:parent cursor :target target :actor actor
-                                        :control-id control-id :before before :after after
-                                        :generation generation})
-             (assoc :cursor next-id :next-id (inc next-id)))))
+                    target {:keys [actor control-id before after generation]} target-display]
+  (let [node (cond-> {:parent cursor :target target :actor actor :control-id control-id
+                      :before before :after after :generation generation}
+               target-display (assoc :target-display target-display))]
+    (prune (-> history
+               (assoc-in [:nodes next-id] node)
+               (assoc :cursor next-id :next-id (inc next-id) :position (inc (position history)))))))
 
 (defn- gesture-owner [action]
   (mapv action [:actor :control-id :gesture-id]))
@@ -66,7 +73,7 @@
                                  :generation (:generation cell) :last-sequence 0}) {}))))
 
 (defn- gesture-action
-  [history targets {:keys [op target value sequence last-sequence] :as action}]
+  [history targets {:keys [op target value sequence last-sequence target-display] :as action}]
   (let [{:keys [before after generation] :as gesture} (get-in history [:open target])
         cell (canonical targets target)
         owned-value? (current? cell generation after)]
@@ -92,7 +99,7 @@
           (not owned-value?) (assoc (accepted closed {}) :discarded :history-conflict)
           (= before after) (accepted closed {})
           (= :gesture/cancel op) (accepted closed {target before})
-          :else (accepted (record-edit closed target gesture) {}))))))
+          :else (accepted (record-edit closed target gesture target-display) {}))))))
 
 (defn- lineage [nodes start]
   (loop [id start, path []]
@@ -118,15 +125,16 @@
             (or (not= generation (:generation cell)) (not= (get node read-key) value))
             (rejected history :history-conflict target)
             :else (recur (next remaining) (assoc values target (get node write-key)))))
-        (accepted (assoc history :cursor destination)
+        (accepted (assoc history :cursor destination :position (inc (position history)))
                   (into {} (remove (fn [[target value]] (= value (get-in targets [target :value]))))
                         values))))))
 
 (defn- navigate [{:keys [cursor nodes] :as history} targets
-                 {:keys [op expected-cursor node-id]}]
+                 {:keys [op expected-cursor expected-history-position node-id]}]
   (let [parent (get-in nodes [cursor :parent])]
     (cond
       (not= cursor expected-cursor) (rejected history :stale-history-cursor)
+      (not= (position history) expected-history-position) (rejected history :stale-history-position)
       (= :history/undo op) (if (nil? parent) (rejected history :at-history-root)
                               (travel history targets parent))
       (not (contains? nodes node-id)) (rejected history :unknown-history-node)
@@ -148,7 +156,9 @@
   Begin, sample, end and cancel use a stable trusted :actor, :control-id,
   :gesture-id and :target. Samples require increasing :sequence values. End
   requires :last-sequence from the final accepted sample, or zero for no samples.
-  Undo, redo and select require :expected-cursor. Redo and select use :node-id."
+  End can carry optional authoritative :target-display data for the node.
+  Undo, redo and select require :expected-cursor and :expected-history-position.
+  Redo and select use :node-id."
   [history targets {:keys [op] :as action}]
   (case op
     :gesture/begin (start-gesture history targets action)

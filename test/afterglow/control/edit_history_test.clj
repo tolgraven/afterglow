@@ -32,8 +32,11 @@
       (sample identity 1 value)
       (gesture :gesture/end identity {:last-sequence 1})))
 
+(defn- navigation [{:keys [history]} op & [node-id]]
+  {:op op :expected-cursor (:cursor history) :expected-history-position (history/position history) :node-id node-id})
+
 (defn- navigate [show op & [node-id]]
-  (apply! show {:op op :expected-cursor (get-in show [:history :cursor]) :node-id node-id}))
+  (apply! show (navigation show op node-id)))
 
 (deftest live-samples-commit-once
   (let [before (new-show 16)
@@ -45,10 +48,12 @@
     (is (= (map #(/ % 100.0) (range 1 81))
            (map #(get-in % [:targets level :value]) samples)))
     (is (= 0 (get-in sampled [:history :cursor])))
+    (is (= 0 (history/position (:history sampled))))
     (is (= {:parent 0 :target level :actor "push" :control-id "encoder-1"
             :before 0.2 :after 0.8 :generation 0}
            (get-in ended [:history :nodes 1])))
     (is (= 1 (get-in ended [:history :cursor])))
+    (is (= 1 (history/position (:history ended))))
     (is (= 2 (count (get-in ended [:history :nodes]))))
     (is (empty? (get-in ended [:history :open])))
     (doseq [sequence [79 80]]
@@ -73,14 +78,16 @@
     (is (= 2 (get-in redone [:history :cursor])))
     (is (= 0.8 (get-in redone [:targets level :value])))
     (is (= (:nodes (:history alternate)) (:nodes (:history redone))))
-    (is (= :stale-history-cursor (:code (propose redone {:op :history/undo :expected-cursor 1}))))
-    (is (= :not-a-history-child (:code (propose redone {:op :history/redo :expected-cursor 2 :node-id 1}))))))
+    (is (= [1 2 3 4 5 6] (mapv #(history/position (:history %)) [one root alternate original undone redone])))
+    (is (= :stale-history-cursor (:code (propose redone (navigation original :history/undo)))))
+    (is (= :stale-history-position (:code (propose redone (navigation alternate :history/undo)))))
+    (is (= :not-a-history-child (:code (propose redone (navigation redone :history/redo 1)))))))
 
 (deftest switching-equivalent-branches-only-moves-the-cursor
   (let [original (edit (new-show 16) push-level 0.5)
         alternate (edit (navigate original :history/undo)
                         (assoc push-level :gesture-id "other") 0.5)
-        result (propose alternate {:op :history/select :expected-cursor 2 :node-id 1})]
+        result (propose alternate (navigation alternate :history/select 1))]
     (is (= :accepted (:status result)))
     (is (= 1 (get-in result [:history :cursor])))
     (is (empty? (:writes result)))))
@@ -110,7 +117,7 @@
         externally-written (-> edited
                                (assoc-in [:targets level] {:value 0.5 :generation 1})
                                (assoc-in [:targets level] {:value 0.7 :generation 2}))
-        failed (propose externally-written {:op :history/select :expected-cursor 2 :node-id 0})
+        failed (propose externally-written (navigation externally-written :history/select 0))
         undone (navigate externally-written :history/undo)]
     (testing "A generation change catches another writer even when the observed value matches"
       (is (= :history-conflict (:code failed)))
@@ -121,15 +128,15 @@
       (is (= 20 (get-in undone [:targets speed :value])))
       (is (= 0.7 (get-in undone [:targets level :value])))
       (is (= 1 (get-in undone [:history :cursor])))
-      (is (= :history-conflict (:code (propose undone {:op :history/undo :expected-cursor 1})))))
+      (is (= :history-conflict (:code (propose undone (navigation undone :history/undo))))))
     (testing "A missing instance target cannot be revived by history"
       (is (= :target-unavailable
              (:code (propose (update undone :targets dissoc level)
-                             {:op :history/undo :expected-cursor 1})))))
+                             (navigation undone :history/undo))))))
     (testing "A differing value at the expected generation is also a conflict"
       (is (= :history-conflict
              (:code (propose (assoc-in edited [:targets speed :value] 63)
-                             {:op :history/undo :expected-cursor 2})))))))
+                             (navigation edited :history/undo))))))))
 
 (deftest conflicting-gesture-cannot-finish-or-roll-back-an-external-write
   (let [changed (-> (new-show 16) (gesture :gesture/begin push-level) (sample push-level 1 0.9))
@@ -158,4 +165,4 @@
     (is (= {:parent nil} (get-in rolled [:history :nodes 1])))
     (is (= 6 (get-in rolled [:history :cursor])))
     (is (= 0.4 (get-in boundary [:targets level :value])))
-    (is (= :at-history-root (:code (propose boundary {:op :history/undo :expected-cursor 1}))))))
+    (is (= :at-history-root (:code (propose boundary (navigation boundary :history/undo)))))))
