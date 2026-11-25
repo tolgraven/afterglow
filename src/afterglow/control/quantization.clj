@@ -38,9 +38,9 @@
   "Project pending launches in intake order. Command payloads stay private."
   [state]
   (mapv (fn [{:keys [request receipt]}]
-          (assoc (select-keys receipt [:command-id :mode :due-beat :requested-at])
-                 :cue-id (get-in request [:command :cue-id])
-                 :source (select-keys (get-in request [:command :source]) [:adapter :session-id])))
+          (let [{:keys [cue-id source]} (:command request)]
+            (assoc (select-keys receipt [:command-id :mode :due-beat :requested-at]) :cue-id cue-id
+                   :source (if (map? source) (select-keys source [:adapter :session-id]) source))))
         (sort-by #(get-in % [:receipt :order]) (vals (:pending state)))))
 
 (defn source
