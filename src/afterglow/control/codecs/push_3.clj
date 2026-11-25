@@ -9,7 +9,8 @@
   {:device :ableton/push-3 :mode :user
    :semantics-source official-source :semantics-verification :official-manual
    :address-source :caller-capture :automatic-address-map? false
-   :implemented #{:pads :encoder-touches :relative-encoders :buttons :poly-pressure :mono-pressure :touch-strip}
+   :implemented #{:pads :encoder-touches :relative-encoders :buttons :poly-pressure :mono-pressure
+                  :touch-strip :captured-strip-touch}
    :supported-expression-modes #{:poly-aftertouch :mono-aftertouch}
    :mpe :not-implemented :led-protocol :unverified :display-protocol :unverified
    :automatic-user-mode? false :standalone-host-transport :unverified :hardware-verified? false})
@@ -28,11 +29,13 @@
 (defn compile-layout
   "Validate explicit zero-based MIDI addresses and compile immutable lookups.
   :pads maps [x y] -> {:note n :channel c}; :encoder-touches maps logical IDs to
-  note addresses; :encoders and :buttons map IDs to CC addresses; optional
-  :touch-strip/:mono-pressure contain an explicitly captured :channel."
+  note addresses; :encoders and :buttons map IDs to CC addresses. Optional
+  :touch-strip and :mono-pressure contain a captured :channel, and optional
+  :touch-strip-touch contains a captured :note and :channel."
   [layout]
   (require! (map? layout) "A captured Push 3 layout map is required" {})
-  (require! (every? #{:pads :encoder-touches :encoders :buttons :touch-strip :mono-pressure} (keys layout))
+  (require! (every? #{:pads :encoder-touches :encoders :buttons :touch-strip :touch-strip-touch :mono-pressure}
+                    (keys layout))
             "Unknown captured layout section" {:keys (keys layout)})
   (let [records (vec
                   (mapcat (fn [[section kind address-field]]
@@ -50,7 +53,14 @@
                                   {:kind kind :id id :address [(:channel address) (get address address-field)]
                                    :family (if (= address-field :note) :note :cc)}))))
                           [[:pads :pad :note] [:encoder-touches :encoder-touch :note]
-                           [:encoders :encoder :controller] [:buttons :button :controller]]))]
+                           [:encoders :encoder :controller] [:buttons :button :controller]]))
+        records (if (contains? layout :touch-strip-touch)
+                  (let [{:keys [note channel] :as address} (:touch-strip-touch layout)]
+                    (require! (and (map? address) (= #{:note :channel} (set (keys address)))
+                                   (int-in? note 0 127) (int-in? channel 0 15))
+                              "Capture a complete strip touch note and zero-based channel" {})
+                    (conj records {:kind :touch-strip-touch :id :touch-strip :address [channel note] :family :note}))
+                  records)]
     (doseq [family [:note :cc]
             :let [addresses (map :address (filter #(= family (:family %)) records))]]
       (require! (= (count addresses) (count (distinct addresses)))
@@ -64,7 +74,7 @@
 
 (defn capture
   "Add one real or synthetic sample to a layout without side effects. sample is
-  {:kind :pad/:encoder-touch/:encoder/:button/:touch-strip/:mono-pressure,
+  {:kind :pad/:encoder-touch/:encoder/:button/:touch-strip/:touch-strip-touch/:mono-pressure,
    :id [x y] or keyword, :bytes [...]}. Tests use synthetic samples; this function
   does not certify the device that produced them. Releases cannot learn pads."
   [layout {:keys [kind id bytes]}]
@@ -75,11 +85,14 @@
                                    :encoder [:encoders :controller :control-change]
                                    :button [:buttons :controller :control-change]
                                    :touch-strip [:touch-strip nil :pitch-bend]
+                                   :touch-strip-touch [:touch-strip-touch :note :note-on]
                                    :mono-pressure [:mono-pressure nil :channel-pressure]
                                    (throw (ex-info "Unknown capture kind" {:type ::invalid-layout :kind kind})))
         _ (require! (= expected (:type event)) "The sample does not match the control being captured" {:kind kind :event event})
         address (cond-> {:channel (:channel event)} field (assoc field (get event field)))
-        next (if field (assoc-in layout [section id] address) (assoc layout section address))]
+        next (if (and field (not= :touch-strip-touch kind))
+               (assoc-in layout [section id] address)
+               (assoc layout section address))]
     (compile-layout next)
     next))
 

@@ -9,7 +9,7 @@
   "Create an inert session. Required options: :session-id, :profile, :model!
   (snapshot fn), :dispatch! (command -> result/ack synchronously), :now-ms!.
   Grid cue launch/release and opted-in operator gestures may return queue
-  receipts. Gesture commands carry the captured :show-id and :epoch. A pending
+  receipts. Commands may pin a captured :show-id and :epoch. A pending
   gesture carries its final :completion promise. Profiles
   reconcile receipts before input and feedback. A reconciliation that observes
   a newer owner commit can request a fresh snapshot with :refresh-model? true.
@@ -78,7 +78,8 @@
               timed-cue? (or scheduled-launch? (= :cue/cancel-launch (:op template)))
               gesture? (and (:operator-gestures? profile)
                             (#{:gesture/begin :gesture/sample :gesture/end} (:op template)))
-              stale? (or (and gesture? (not= (show-identity template) (show-identity envelope)))
+              captured? (or gesture? (and (contains? template :show-id) (contains? template :epoch)))
+              stale? (or (and captured? (not= (show-identity template) (show-identity envelope)))
                          (and timed-cue? (some #(and (contains? template %)
                                                      (not= (get template %) (get envelope %)))
                                                [:show-id :epoch])))

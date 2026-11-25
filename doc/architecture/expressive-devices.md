@@ -72,8 +72,9 @@ All channel numbers in these APIs are **zero based**. For example:
 ```
 
 The layout supports `:pads`, `:encoder-touches`, `:encoders`, `:buttons`,
-`:touch-strip` and `:mono-pressure`. It rejects overlapping note/CC identities
-within each message family. There is no default numeric address map.
+`:touch-strip`, `:touch-strip-touch` and `:mono-pressure`. It rejects
+overlapping note/CC identities within each message family. There is no default
+numeric address map.
 
 ```clojure
 (require '[afterglow.control.devices.push-3 :as push])
@@ -90,11 +91,20 @@ In Poly/Mono Aftertouch mode, pad cells follow the page's cue launch mode;
 default persistent cues toggle, held cues release their exact activation, and
 one-shots use the model's finite-duration rules. Repeated note-on and CC-down
 messages do not create repeated edges. Poly pressure targets the corresponding
-pressed pad's activation. Mono pressure and an explicitly bound strip target
-the selected activation. Encoder mappings use current schema bounds; integer
-parameters step by one unless overridden. Captured buttons can control blackout,
+pressed pad's activation. Mono pressure and `:touch-strip-param` expressions
+target the selected activation's configured parameter. Encoder mappings use
+current schema bounds. Integer parameters step by one unless overridden.
+Captured buttons can control blackout,
 transport, page scroll or suspend. `control-view` returns labels and values for
 another UI; it does not drive Push 3's screen.
+
+The default strip route edits selected-instance system opacity when the layout
+contains both the position and contact messages. Capture position with
+`:kind :touch-strip` and a distinct contact note-on with `:kind :touch-strip-touch`.
+For this route omit `:touch-strip-param`. Verify touch, position and release
+ordering on the User port. The device profile publishes committed opacity as
+`:touch-strip` in its semantic views. Push 3 strip LED feedback remains
+unqualified. [Ableton Push 3 User Mode manual](https://www.ableton.com/en/push/manual/#user-mode)
 
 For MPE, capture the note-to-pad relationship across repeated presses on rotating
 member channels. This is a separate explicit mapping, not a collapsed channel

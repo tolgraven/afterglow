@@ -51,6 +51,16 @@
   :default restores Push's point display and automatic center return."
   {:default 104 :level 65 :centered 81 :point 73 :off 67})
 
+;; Ableton Push 2 MIDI and Display Interface Manual, section 2.10.
+(defn strip-contact? [{:keys [type channel note]}]
+  (and (#{:note-on :note-off} type) (= 0 channel) (= 12 note)))
+
+(defn strip-position [raw-value]
+  (min 1.0 (/ raw-value 16320.0)))
+
+(defn strip-value [position]
+  (* 64 (Math/round (* 255.0 position))))
+
 (defn touch-strip-mode [device-id mode]
   (let [value (get touch-strip-modes mode)]
     (when-not value

@@ -6,6 +6,7 @@
             [afterglow.control.codecs.mpe :as mpe-codec]
             [afterglow.control.devices.mpe :as mpe]
             [afterglow.control.devices.push-launch :as launch]
+            [afterglow.control.devices.push-strip :as push-strip]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.display :as display]
@@ -18,9 +19,10 @@
 (def capabilities
   (assoc codec/capabilities :adapter :composable-session
          :controls #{:pad-cues :held-release :parameter-encoders :master-encoder
-                     :parameter-pressure :parameter-touch-strip :page-scroll
+                     :parameter-pressure :parameter-touch-strip :selected-opacity-strip :page-scroll
                      :manual-handoff :reconnect :shift-fine}
-         :feedback :semantic-view :display-protocol :tethered-descriptor-replay))
+         :feedback :semantic-view :touch-strip-feedback :semantic-view
+         :display-protocol :tethered-descriptor-replay))
 
 (defn- valid! [condition message data]
   (when-not condition (throw (ex-info message (assoc data :type ::invalid-options)))))
@@ -150,7 +152,7 @@
         {:state state})))
       {:state state})))
 
-(defn- input [options state event model envelope]
+(defn- route-input [options state event model envelope]
   (case (:type event)
      :pad (let [key (:gesture-key event)]
            (cond
@@ -161,9 +163,19 @@
              :else (targets/launch state (press-pad options state event model envelope))))
     :encoder (encoder options state event model)
     :encoder-touch {:state (update state :touches (if (:pressed? event) conj disj) (:control-id event))}
-    (:poly-pressure :mono-pressure :touch-strip) (expression options state event model)
+    (:poly-pressure :mono-pressure) (expression options state event model)
+    :touch-strip (if (:touch-strip-param options)
+                   (expression options state event model)
+                   (push-strip/sample state model (:value event)))
+    :touch-strip-touch {:state (if (:opacity-strip? state)
+                                 (if (:pressed? event) (push-strip/begin state model :opacity)
+                                     (push-strip/release state))
+                                 state)}
     :button (button options state event model)
     {:state state}))
+
+(defn- input [options state event model envelope]
+  (update (route-input options state event model envelope) :state push-strip/fence model))
 
 (defn- surface-state [state]
   (if-let [controls (:controls state)]
@@ -171,28 +183,37 @@
       (assoc :selected-instance (get-in state [:mpe :selected-instance])))
     state))
 
+(defn- strip-view [view state model]
+  (cond-> view
+    (:opacity-strip? state)
+    (assoc :touch-strip (when-let [value (push-strip/value state model)]
+                          {:target :opacity :instance-id (:selected-instance state) :value value}))))
+
 (defn control-view
-  "Pure grid and keyed parameter values for an external UI."
+  "Pure grid, committed strip opacity and keyed parameter values for an external UI."
   [state model]
   (let [state (surface-state state)]
-   (merge (display/view-options state model)
-          {:page (:page-id state) :origin (:origin state)
-   :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
-   :target-picker (targets/view state)
-   :touches (:touches state) :master (:master model) :blackout? (:blackout? model)
-   :parameters (get-in model [:instances (:selected-instance state) :params] {})
-   :cells (mapv (fn [[x y]] {:x x :y y :cue (some->> (cue-at state model [x y]) :id (views/cue-view model))})
-                (for [y (range 8) x (range 8)] [x y]))})))
+    (strip-view
+      (merge (display/view-options state model)
+             {:page (:page-id state) :origin (:origin state)
+              :selected-cue (:selected-cue state) :selected-instance (:selected-instance state)
+              :target-picker (targets/view state)
+              :touches (:touches state) :master (:master model) :blackout? (:blackout? model)
+              :parameters (get-in model [:instances (:selected-instance state) :params] {})
+              :cells (mapv (fn [[x y]] {:x x :y y :cue (some->> (cue-at state model [x y]) :id (views/cue-view model))})
+                           (for [y (range 8) x (range 8)] [x y]))})
+      state model)))
 
 (defn- acknowledge [state command ack]
   (let [hold (when-let [gesture (:gesture-id command)]
                (bindings/acknowledge-hold (:holds state) gesture ack))
         key (:control/pad-key command) token (:control/selection-token command)
         accepted? (and (= :cue/launch (:op command)) (= :accepted (:status ack)) (:instance-id ack))]
-    {:state (cond-> state
-              hold (assoc :holds (:state hold))
-              (and accepted? token (= token (:selection-token state))) (assoc :selected-instance (:instance-id ack))
-              (and accepted? token (= token (get-in state [:pads key :token]))) (assoc-in [:pads key :instance-id] (:instance-id ack)))
+    {:state (push-strip/fence-selection
+              (cond-> state
+                hold (assoc :holds (:state hold))
+                (and accepted? token (= token (:selection-token state))) (assoc :selected-instance (:instance-id ack))
+                (and accepted? token (= token (get-in state [:pads key :token]))) (assoc-in [:pads key :instance-id] (:instance-id ack))))
      :commands (:commands hold)}))
 
 (defn- user-profile
@@ -200,7 +221,8 @@
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
   :step n} or {:target :master}; :button-bindings maps IDs to semantic actions.
-  :pressure-param and :touch-strip-param opt into expression parameter control."
+  :pressure-param and :touch-strip-param opt into expression parameter control.
+  Capturing both strip value and touch addresses enables the default opacity route."
   [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings]
     :or {page-id :main encoder-bindings {} button-bindings {}} :as options}]
   (valid! (true? user-mode?) "Manually enable Push 3 User Mode before connecting" {})
@@ -226,13 +248,16 @@
     (when (contains? options :launch-mode)
       (valid! (#{:held :persistent :one-shot} (:launch-mode options)) "Invalid launch-mode override" {}))
     {:id :push-3 :capabilities capabilities
-     :initial-state (reset-interactions {:page-id page-id :origin [0 0]})
+     :initial-state (reset-interactions {:page-id page-id :origin [0 0]
+                                        :opacity-strip? (boolean (and (:touch-strip layout)
+                                                                      (:touch-strip-touch layout)
+                                                                      (not (:touch-strip-param options))))})
      :decode (partial codec/decode compiled)
      :input (partial input options)
      :ack acknowledge
-     :reset-model reset-interactions
+     :reset-model (comp push-strip/fence-selection reset-interactions)
      :stop (fn [state _model envelope _disconnected?]
-             {:state (reset-interactions state)
+             {:state (reset-interactions (push-strip/release state))
               :commands (bindings/release-holds (:holds state) envelope)})}))
 
 (defn- mpe-profile [options]
@@ -282,8 +307,10 @@
                     (assoc result :state (assoc state :controls (:state result))))
                   :else {:state state})))
      :ack (fn [state command ack]
-            (combine ((:ack controls) (:controls state) command ack)
-                     ((:ack notes) (:mpe state) command ack)))
+            (let [result (combine ((:ack controls) (:controls state) command ack)
+                                  ((:ack notes) (:mpe state) command ack))]
+              (update-in result [:state :controls] push-strip/fence-selection
+                         (:selected-instance (surface-state (:state result))))))
      :reset-model (fn [state] {:controls ((:reset-model controls) (:controls state))
                                :mpe ((:reset-model notes) (:mpe state))})
      :stop (fn [state model envelope disconnected?]
@@ -299,10 +326,11 @@
                         (when (get-in instance [:definition :params k])
                           {:instance-id (:id instance) :param k :component 0})))
                     (sort-by str (:touches controls)))
-        selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
-        view (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
-                    :fine? (boolean (shift-held? options controls)))
-        selected (assoc selected :selected-instance (:id instance) :last-display view)
+        selected (cond-> (assoc controls :selected-instance (:id instance))
+                   instance (assoc :selected-cue (:cue-id instance)))
+        view (strip-view (assoc (push-view/view selected model index {:status :ready :touched-parameter touch})
+                               :fine? (boolean (shift-held? options controls))) selected model)
+        selected (push-strip/fence (assoc selected :last-display view) model)
         next-state (if (:controls state)
                      (-> state (assoc :controls selected) (assoc-in [:mpe :selected-instance] (:id instance)))
                      selected)]

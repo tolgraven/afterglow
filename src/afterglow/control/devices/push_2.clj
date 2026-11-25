@@ -9,6 +9,7 @@
             [afterglow.control.views :as views]
             [afterglow.control.display :as display]
             [afterglow.control.devices.push-launch :as launch]
+            [afterglow.control.devices.push-strip :as push-strip]
             [afterglow.control.devices.push-view :as push-view]
             [afterglow.control.devices.session :as session]
             [afterglow.control.devices.target-picker :as targets]))
@@ -20,7 +21,7 @@
                         :encoder-touch :touch-strip :color-grid :enum-grid :shift-fine
                         :velocity-parameters :pad-pressure :shift-held-override
                         :cue-parameter-presets
-                        :touch-strip-feedback :master-touch :manual-tempo-encoder
+                        :touch-strip-feedback :selected-opacity-strip :master-touch :manual-tempo-encoder
                         :master-encoder :led-diff :palette-restore :display-view
                         :user-mode-handoff :reconnect}
          :hardware-verified? false))
@@ -294,6 +295,11 @@
         (edit-encoder-gesture state model gesture value :absolute)
         (edit-parameter state model selection value :absolute)))))
 
+(defn- strip-contact [state model pressed?]
+  (if pressed?
+    (push-strip/begin state model (if (or (system-touch state) (touched state model)) :encoder :opacity))
+    (push-strip/release state)))
+
 (defn- display-action [state model cc]
   (let [shift? (:shift? state)
         mode (display/mode state model)]
@@ -348,12 +354,16 @@
               (zero? (:raw-value event)) (dissoc :shift-patch))}
     (and (= :control-change (:type event)) (= 86 (:controller event)))
     {:state (assoc state :record? (pos? (:raw-value event)))}
+    (codec/strip-contact? event)
+    {:state (strip-contact state model (= :note-on (:type event)))}
     (and (= :note-on (:type event)) (<= 0 (:note event) 9))
     (touch-encoder state model (:note event) envelope operator-gestures?)
     (and (= :note-off (:type event)) (<= 0 (:note event) 9))
     (release-encoder state (:note event) envelope)
-    (= :pitch-bend (:type event))
-    (edit-touch-strip state model (:value event))
+    (and (= :pitch-bend (:type event)) (= 0 (:channel event)))
+    (if (= :opacity (get-in state [:strip-touch :route]))
+      (push-strip/sample state model (codec/strip-position (:raw-value event)))
+      (edit-touch-strip state model (:value event)))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (#{62 63} (:controller event)))
     (page-control state model (if (= 62 (:controller event)) -1 1))
     (and (= :control-change (:type event)) (pos? (:raw-value event)) (<= 20 (:controller event) 27))
@@ -400,7 +410,7 @@
   [state model]
   (indexed-display state model (push-view/cue-index model)))
 
-(defn- strip-feedback [state model]
+(defn- encoder-strip-feedback [state model]
   (if-let [target (system-touch state)]
     (if (and (= :tempo target) (not (manual-clock? model))) {:mode :off}
       {:mode :level :value (long (Math/round (* 16383.0
@@ -412,8 +422,14 @@
             mode (cond (or (= :enum (:type schema)) (and (= :color (:type schema)) (zero? component))) :point
                        (or (= :boolean (:type schema)) (:centered schema)) :centered
                        :else :level)]
-        {:mode mode :value (long (Math/round (* 16383.0 (parameter-edit/position schema value {:component component}))))})
-      {:mode :off})))
+        {:mode mode :value (long (Math/round (* 16383.0 (parameter-edit/position schema value {:component component}))))}))))
+
+(defn- strip-feedback [state model]
+  (or (when (not= :opacity (get-in state [:strip-touch :route]))
+        (encoder-strip-feedback state model))
+      (when-let [value (push-strip/value state model)]
+        {:mode :level :value (codec/strip-value value)})
+      {:mode :off}))
 
 (defn- next-led-batch [desired {:keys [last-leds led-cursor] :or {led-cursor 0}} limit]
   ;; Keep the ACK budget fair even when the first few pads change every frame.
@@ -426,7 +442,7 @@
         (range 64)))
 
 (defn- feedback [device-id timeout-ms batch-size state model envelope]
-  (let [state (selected-state state model)
+  (let [state (push-strip/fence (selected-state state model) model)
         alive (set (keys (:instances model)))
         state (-> state (update :parameter-banks #(select-keys % alive))
                   (update :components #(into {} (filter (fn [[[id _] _]] (alive id))) %)))
@@ -481,7 +497,7 @@
       (:fault state) (assoc :lifecycle :disconnect))))
 
 (defn- stop [device-id state _model envelope disconnected?]
-  {:state (assoc (dissoc (targets/clear-selection state) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
+  {:state (assoc (dissoc (targets/clear-selection (push-strip/release state)) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
                  :pads {} :holds {} :ready? false :last-leds {} :last-display nil
                  :last-touch-strip nil :display-buttons #{}
                  :touches {} :touch-order [] :shift? false :shift-patch nil :record? false :pressed-pads #{} :pad-instances {})
@@ -585,14 +601,16 @@
                   (contains? (:picker-pads state) (:note event))
                   {:state (if (= :note-off (:type event)) (targets/release-pad state (:note event)) state)}
                   (and (:target-picker state) x) {:state (targets/pad state (:note event) [x y])}
-                  :else (targets/launch state (input device-id grid (true? operator-gestures?) state event model envelope)))))
+                  :else (update (targets/launch state (input device-id grid (true? operator-gestures?) state event model envelope))
+                                :state push-strip/fence model))))
      :feedback (partial feedback device-id timeout-ms led-batch-size)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
-     :reset-model #(assoc (dissoc (targets/clear-selection %) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
+     :reset-model #(push-strip/fence-selection
+                     (assoc (dissoc (targets/clear-selection %) :grid-selection :grid-presses :encoder-gestures :encoder-releases)
                            :display-buttons #{} :pads {} :holds {} :selected-instance nil :selected-cue nil :last-leds {} :last-touch-strip nil
                            :parameter-banks {} :components {} :touches {} :touch-order [] :shift? false :shift-patch nil :record? false
-                           :pressed-pads #{} :pad-instances {})
+                           :pressed-pads #{} :pad-instances {}))
      :ack (fn [state command ack]
             (if (#{:gesture/begin :gesture/sample :gesture/end} (:op command))
               {:state (acknowledge-encoder state command ack)}
@@ -603,13 +621,14 @@
                     token (:command-id command)
                     gridded? (contains? command :grid)
                     selected? (and accepted? (or (not gridded?) (= token (:grid-selection state))))]
-                {:state (cond-> state
-                          hold (assoc :holds (:state hold))
-                          selected? (assoc :selected-instance (:instance-id ack))
-                          (and selected? gridded?) (assoc :selected-cue (:cue-id command))
-                          (and accepted? (contains? (:pressed-pads state) note)
-                               (or (not gridded?) (= token (get-in state [:grid-presses note]))))
-                          (assoc-in [:pad-instances note] (:instance-id ack)))
+                {:state (push-strip/fence-selection
+                          (cond-> state
+                            hold (assoc :holds (:state hold))
+                            selected? (assoc :selected-instance (:instance-id ack))
+                            (and selected? gridded?) (assoc :selected-cue (:cue-id command))
+                            (and accepted? (contains? (:pressed-pads state) note)
+                                 (or (not gridded?) (= token (get-in state [:grid-presses note]))))
+                            (assoc-in [:pad-instances note] (:instance-id ack))))
                  :commands (:commands hold)})))}
       grid launch-receipt)
       (true? operator-gestures?) with-encoder-gestures)))
