@@ -581,6 +581,67 @@
                                                        :sample (constantly nil)}))))
       (finally (reactive/close! sys)))))
 
+(deftest frame-paced-samples-from-an-old-epoch-cannot-reach-retained-watchers
+  (let [model {:show-id :show :epoch 0 :frame-number 0}
+        sys (reactive/create-system model)
+        old-started (CountDownLatch. 1) old-interrupted (CountDownLatch. 1)
+        release-old (CountDownLatch. 1) new-started (CountDownLatch. 1)
+        release-new (CountDownLatch. 1) probe-started (CountDownLatch. 1)
+        changes (LinkedBlockingQueue.)]
+    (try
+      (reactive/reg-cofx! sys ::reading
+                          {:mode :background :interval {:frames 2} :initial :waiting
+                           :sample (fn [{:keys [epoch]}]
+                                     (if (zero? epoch)
+                                       (do
+                                         (.countDown old-started)
+                                         (try (.await release-old)
+                                              (catch InterruptedException _
+                                                (.countDown old-interrupted)
+                                                (.await release-old)))
+                                         :stale)
+                                       (do
+                                         (.countDown new-started)
+                                         (.await release-new)
+                                         :current)))})
+      (reactive/reg-sub! sys ::reading (fn [{:keys [cofx]} _] (cofx ::reading)))
+      (reactive/reg-fx! sys ::launch
+                        (fn [_ value _]
+                          (when (#{:stale :current} value)
+                            {:op :cue/launch :cue-id value})))
+      (reactive/watch! sys ::watch-reading [::reading] ::launch)
+      (let [{:keys [signal]} (reactive/acquire! sys [::reading] #(.offer changes %))]
+        (is (.await old-started 3 TimeUnit/SECONDS))
+        (reactive/publish! sys)
+        (reactive/publish! sys (update model :epoch inc))
+        (is (.await old-interrupted 3 TimeUnit/SECONDS))
+        (is (.await new-started 3 TimeUnit/SECONDS))
+        ;; Both sampler threads are occupied. The probe can only start once
+        ;; the old worker has handled its result because the new one stays held.
+        (reactive/reg-cofx! sys ::probe {:mode :background :interval {:frames 2}
+                                        :sample (fn [_] (.countDown probe-started))})
+        (reactive/reg-sub! sys ::probe (fn [{:keys [cofx]} _] (cofx ::probe)))
+        (let [{:keys [close!]} (reactive/acquire! sys [::probe] identity)]
+          (.countDown release-old)
+          (is (.await probe-started 3 TimeUnit/SECONDS))
+          (reactive/publish! sys)
+          (is (= :waiting @signal))
+          (is (.isEmpty changes))
+          (is (empty? (reactive/drain-actions! sys)))
+          (close!))
+        (.countDown release-new)
+        (is (= :current (some (fn [_]
+                                (reactive/publish! sys)
+                                (.poll changes 20 TimeUnit/MILLISECONDS))
+                              (range 150))))
+        (reactive/publish! sys)
+        (is (.isEmpty changes))
+        (is (= [{:op :cue/launch :cue-id :current}] (reactive/drain-actions! sys))))
+      (finally
+        (.countDown release-old)
+        (.countDown release-new)
+        (reactive/close! sys)))))
+
 (deftest invalid-db-does-not-stop-independent-sources-or-drop-diagnostics
   (let [system (reactive/create-system {:value 1} {:on-fault! (fn [_ _])}) src (reactive/ratom system ::x 1)]
     (set-validator! (reactive/db-signal system) #(pos-int? (:value %)))

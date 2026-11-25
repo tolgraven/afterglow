@@ -60,8 +60,8 @@
 
 (defn register!
   "Background intervals may count committed show frames with {:frames n}.
-  The frame buckets restart on a show epoch change. Other intervals use a
-  physical scheduler or published musical time."
+  Frame buckets and results belong to one show identity and epoch. Other
+  intervals use a physical scheduler or published musical time."
   [manager id {:keys [mode ref sample interval] :or {mode :demand} :as definition}]
   (when-not (and (keyword? id)
                  (if ref
@@ -79,19 +79,25 @@
 
 (defn active-ids [manager] (keys @(:active manager)))
 
-(defn- activate! [manager id]
-  (or (get @(:active manager) id)
-      (when-let [{:keys [ref initial] :as definition} (get @(:definitions manager) id)]
-        (let [entry (assoc definition :slot (atom {:value initial}) :job (volatile! nil)
+(defn- activate! [manager id db]
+  (let [active (get @(:active manager) id)
+        owner (:frame-owner active)]
+    (if (and active (or (nil? owner) (= owner [(:show-id db) (:epoch db)])))
+      active
+      (if-let [{:keys [ref initial interval] :as definition} (get @(:definitions manager) id)]
+        (let [entry (assoc definition :frame-owner (when (:frames interval) [(:show-id db) (:epoch db)])
+                           :slot (atom {:value initial}) :job (volatile! nil)
                            :timer (volatile! nil) :schedule (volatile! nil) :db (atom nil) :stopped? (volatile! false)
                            :changed (atom 0) :watch-key (Object.))]
+          ;; A canceled sampler can still finish. Its retired slot stays private.
+          (when active (stop! manager active))
           ;; A watch only invalidates. Reading @ref at capture avoids older
           ;; out-of-order callbacks overwriting later concurrent resets.
           (when ref (add-watch ref (:watch-key entry) (fn [_ _ old new]
                                                         (when (not= old new) (swap! (:changed entry) inc)))))
           (vswap! (:active manager) assoc id entry)
-          entry))
-      (throw (ex-info "Unknown reactive coeffect" {:id id}))))
+          entry)
+        (throw (ex-info "Unknown reactive coeffect" {:id id}))))))
 
 (defn- submit! [manager {:keys [job sample slot stopped?] :as entry} db]
   (locking entry
@@ -114,9 +120,9 @@
 
 (defn- schedule! [manager {:keys [interval schedule] :as entry} db]
   (if-let [frames (:frames interval)]
-    (let [{:keys [show-id epoch frame-number]} db]
+    (let [frame-number (:frame-number db)]
       (when (and (integer? frame-number) (not (neg? frame-number)))
-        (schedule-bucket! manager entry db [show-id epoch (quot frame-number frames)])))
+        (schedule-bucket! manager entry db (quot frame-number frames))))
     (let [clock (time/frame-clock db) {:keys [value unit]} (time/normalize-duration interval (:meter clock))]
       (if (= :ms unit)
         (do
@@ -133,7 +139,7 @@
   "Sample once for the frozen transaction. An asynchronous result belongs only
   to the entry that requested it; removing or replacing a source orphans it."
   [manager id db restoring?]
-  (let [{:keys [mode ref sample select changed slot] :as entry} (activate! manager id)]
+  (let [{:keys [mode ref sample select changed slot] :as entry} (activate! manager id db)]
     (try
       (case mode
         :ref (let [version @changed cached @slot]
