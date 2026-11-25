@@ -15,7 +15,8 @@
             [afterglow.render.hdr.packed :as packed-hdr]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
-            [afterglow.runtime.faults :as faults]))
+            [afterglow.runtime.faults :as faults])
+  (:import [java.util BitSet]))
 
 (def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
 
@@ -1025,13 +1026,15 @@
   [^doubles target-values ^booleans target-present ^booleans excluded stride
    {:keys [target-ids target-indices]} {:keys [slot values] :as column}]
   (let [stride (long stride) skip (long (::coverage/validate-prefix column 0))
+        ^BitSet covered (::coverage/validate-targets column)
         rows (count target-ids) ^doubles tuple values]
     (dotimes [component (alength tuple)]
       (let [value (aget tuple component) field-slot (+ (int slot) component)]
         (loop [row skip]
           (when (< row rows)
             (let [index (if target-indices (long (aget ^ints target-indices row)) row)]
-              (when-not (and excluded (aget excluded index))
+              (when-not (or (and excluded (aget excluded index))
+                            (and covered (.get covered (int index))))
                 (let [destination (+ (* index stride) field-slot)]
                   (aset target-values destination value)
                   (aset target-present destination true))))
@@ -1044,6 +1047,7 @@
   (let [^doubles source values, row-count (count target-ids), components (int components)
         stride (long stride) opacity (double opacity) source-stride (long source-stride)
         skip (long (::coverage/validate-prefix column 0))
+        ^BitSet covered (::coverage/validate-targets column)
         high? (and (::hdr? patch) (hdr/light-attributes attribute))]
     (when (pos? skip)
       (validate-covered-prefix! patch attribute high? source components source-stride skip excluded))
@@ -1053,22 +1057,24 @@
             base (* index stride)
             opacity (if opacities (aget ^doubles opacities row) opacity)]
         (when-not (or (and opacities (zero? opacity)) (and excluded (aget excluded (int index))))
-          (dotimes [component components]
-            (let [value (aget source (+ (* row source-stride) component))
-                  permitted? (and high? (or (not= :dimmer attribute)
-                                             (::emission-channels (nth (:fixtures patch) index))))]
-              (when-not (and (Double/isFinite value) (<= 0.0 value) (or permitted? (<= value 1.0)))
-                (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
-              (let [destination (+ base (int slot) component)
-                    before (aget target-values destination)
-                    blended (case blend :replace value :add (+ before value) :max (max before value))
-                    level (if (== 1.0 opacity) blended (+ before (* opacity (- blended before))))]
-                (when-not (and (Double/isFinite level) (<= 0.0 level) (or permitted? (<= level 1.0)))
-                  (fail! "Blended assignment exceeds its finite attribute range"
-                         {:target-id (nth target-ids row) :attribute attribute :value level}))
-                (when (pos? opacity)
-                  (aset target-values destination level)
-                  (aset target-present destination true))))))))))
+          (let [validate-only? (and covered (.get covered (int index)))]
+            (dotimes [component components]
+              (let [value (aget source (+ (* row source-stride) component))
+                    permitted? (and high? (or (not= :dimmer attribute)
+                                               (::emission-channels (nth (:fixtures patch) index))))]
+                (when-not (and (Double/isFinite value) (<= 0.0 value) (or permitted? (<= value 1.0)))
+                  (fail! "Typed batch value must be finite and within [0,1]" {:attribute attribute :row row :value value}))
+                (when-not validate-only?
+                  (let [destination (+ base (int slot) component)
+                        before (aget target-values destination)
+                        blended (case blend :replace value :add (+ before value) :max (max before value))
+                        level (if (== 1.0 opacity) blended (+ before (* opacity (- blended before))))]
+                    (when-not (and (Double/isFinite level) (<= 0.0 level) (or permitted? (<= level 1.0)))
+                      (fail! "Blended assignment exceeds its finite attribute range"
+                             {:target-id (nth target-ids row) :attribute attribute :value level}))
+                    (when (pos? opacity)
+                      (aset target-values destination level)
+                      (aset target-present destination true))))))))))))
 
 (defn- merge-packed-batches!
   ([patch target-values target-present batches]
