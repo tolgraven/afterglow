@@ -1,0 +1,9 @@
+
+Testing afterglow.output.scheduler-test
+
+Testing afterglow.output.timeline-test
+
+Testing afterglow.output.artnet-test
+
+Ran 32 tests containing 214 assertions.
+0 failures, 0 errors.
