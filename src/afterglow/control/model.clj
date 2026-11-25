@@ -3,6 +3,7 @@
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
             [afterglow.control.edit-history :as edit-history]
+            [afterglow.control.effect-selection :as effect-selection]
             [afterglow.control.instance-order :as instance-order]
             [afterglow.control.pages :as pages]
             [afterglow.control.params :as params]
@@ -305,6 +306,7 @@
 
 (defn- apply-operation [model {:keys [op] :as command}]
   (case op
+    (:effect-selection/configure :effect-selection/toggle) (effect-selection/apply-operation model command)
     :registry/publish (publish-definition model (:kind command) (:definition command))
     :cue/put
     (let [cue (:cue command)
@@ -688,6 +690,10 @@
   standalone slots within each effective tier.
   Both return committed :instance-ids in render input order. Capture
   :expected-revision when the operation depends on a previously displayed order.
+
+  :effect-selection/toggle takes :control (:solo or :mute), a :selector,
+  and optional :additive? for a single action. :effect-selection/configure
+  takes :modes with either control set to :exclusive or :additive.
 
   Gesture and history operations require an :operator-id from a trusted caller
   in the separate authority argument. This is a public actor identifier for
