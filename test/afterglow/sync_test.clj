@@ -2,7 +2,8 @@
   (:require [clojure.test :refer :all]
             [afterglow.sync :as sync]
             [afterglow.sync.session :as session]
-            [afterglow.sync.beat-link :as dj])
+            [afterglow.sync.beat-link :as dj]
+            [afterglow.sync.peer :as pairing])
   (:import [java.net DatagramPacket InetAddress]
            [org.deepsymmetry.beatlink Beat DeviceAnnouncement]
            [java.util.concurrent CountDownLatch TimeUnit]))
@@ -75,14 +76,26 @@
               :hardware-address "00:01:02:03:04:ff" :observed-at-ms 12}
              (dj/announcement-data (DeviceAnnouncement. (DatagramPacket. packet 54 address 50000)) 12))))))
 
+(deftest address-only-beat-link-pairing-still-requires-the-player-number
+  (let [saved {:device-number 2 :address "192.0.2.2"}]
+    (is (pairing/matches-pairing? saved (assoc saved :hardware-address "02:00:00:00:00:02")))
+    (is (false? (pairing/matches-pairing? saved (assoc saved :device-number 3))))
+    (is (false? (pairing/matches-pairing? saved (assoc saved :address "192.0.2.3"))))
+    (is (false? (pairing/matches-pairing? nil saved)))))
+
 (deftest beat-link-pairing-does-not-follow-a-different-player
-  (let [peer {:device-number 2 :address "10.0.0.2" :hardware-address "00:01:02:03:04:ff"}
+  (let [peer {:device-number 2 :address "192.0.2.2" :hardware-address "02:00:00:00:00:ff"}
+        saved {:device-number 2 :address "192.0.2.3" :hardware-address "02:00:00:00:00:FF"}
+        different-peer (assoc saved :hardware-address "02:00:00:00:00:03")
         manager (sync/create-manager {:now-ms (constantly 1000)
                                       :config {:selected-source :beat-link
-                                               :beat-link {:peer (select-keys peer [:device-number :hardware-address]) :align-bars? true}}})]
+                                               :beat-link {:peer saved :align-bars? true}}})]
     (try
       (sync/start! manager {:events! identity}) (is (session/flush! manager))
       (session/ingest! manager {:type :peer/found :peer peer})
+      (session/ingest! manager {:type :peer/found :peer different-peer})
+      (session/ingest! manager {:type :beat-link/beat :source-id :beat-link :time-ms 1000 :bpm 120
+                            :beat-within-bar 3 :bar-meaningful? true :peer different-peer})
       (session/ingest! manager {:type :beat-link/beat :source-id :beat-link :time-ms 1000 :bpm 120
                             :beat-within-bar 3 :bar-meaningful? true :peer (assoc peer :device-number 3)})
       (is (session/flush! manager)) (is (= :waiting (:status (session/clock-at manager 1000))))
@@ -91,7 +104,7 @@
       (is (session/flush! manager)) (is (= 2.0 (get-in (session/clock-at manager 1000) [:clock :beat])))
       (session/ingest! manager {:type :peer/lost :peer peer}) (is (session/flush! manager))
       (is (= :disconnected (:status (session/clock-at manager 1000))))
-      (is (empty? (:peers (sync/status manager))))
+      (is (= [different-peer] (:peers (sync/status manager))))
       (finally (sync/close! manager)))))
 
 (deftest cancellation-interrupts-acquisition-and-closes-already-owned-resources

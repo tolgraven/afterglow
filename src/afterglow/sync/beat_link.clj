@@ -1,6 +1,7 @@
 (ns afterglow.sync.beat-link
   "Pro DJ Link discovery, clocks and optional VirtualCdj status."
   (:require [clojure.string :as str]
+            [afterglow.sync.peer :as pairing]
             [afterglow.time :refer [finite-number?] :rename {finite-number? finite?}]
             [afterglow.sync.session :refer [apply-clock! emit! fail!]])
   (:import [java.lang.reflect Proxy InvocationHandler]))
@@ -103,11 +104,8 @@
 (defn- peer-key [peer] [(:device-number peer) (:address peer)])
 
 (defn- paired-peer? [config peers peer]
-  (when-let [paired (get-in config [:beat-link :peer])]
-    (and (= (:device-number paired) (:device-number peer))
-         (if-let [mac (:hardware-address paired)]
-           (= (str/lower-case mac) (some-> (get peers (peer-key peer)) :hardware-address str/lower-case))
-           (= (:address paired) (:address peer))))))
+  (pairing/matches-pairing? (get-in config [:beat-link :peer])
+                           (assoc peer :hardware-address (get-in peers [(peer-key peer) :hardware-address]))))
 
 (defn receive! [manager run event at]
   (let [{:keys [config peers]} @(:state manager)]
