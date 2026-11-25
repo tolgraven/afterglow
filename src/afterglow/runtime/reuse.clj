@@ -5,7 +5,9 @@
            [java.util.concurrent.atomic AtomicReference]))
 
 (def ^:private missing (Object.))
+
 (def ^:private uncacheable (ex-info "Value cannot be retained in an effect cache" {}))
+
 (def ^:private scalar-classes
   #{Boolean Character Byte Short Integer Long Float Double java.math.BigInteger
     java.math.BigDecimal clojure.lang.BigInt clojure.lang.Ratio})
@@ -45,6 +47,17 @@
   (try (snapshot value (long-array [(long limit)]) arrays? 0)
        (catch clojure.lang.ExceptionInfo error
          (if (identical? error uncacheable) missing (throw error)))))
+
+(defn immutable-inputs?
+  "Whether a value fits the bounded immutable input contract used by reuse."
+  [value]
+  (not (identical? missing (capture value 65536 false))))
+
+(defn retained-output
+  "Admit bounded effect output data and detach its primitive arrays."
+  [value]
+  (let [saved (capture value 65536 true)]
+    (when-not (identical? missing saved) saved)))
 
 (defn- inputs-for [paths context]
   (reduce (fn [inputs path]

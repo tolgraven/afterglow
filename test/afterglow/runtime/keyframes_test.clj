@@ -1,6 +1,7 @@
 (ns afterglow.runtime.keyframes-test
   (:require [clojure.test :refer [deftest is]]
             [afterglow.control.model :as control]
+            [afterglow.reactive :as reactive]
             [afterglow.runtime.engine :as engine]
             [afterglow.runtime.keyframes :as kf]
             [afterglow.runtime.keyframes.storage :as storage]
@@ -29,6 +30,157 @@
                   {:time-ms (* beat 500) :keyframes (:keyframes previous)}
                   compile))
 
+(defn- reactive-frame [model previous step fixtures beat inputs]
+  (engine/advance (assoc-in model [:transport :beat] beat)
+                  {:time-ms (* beat 500) :keyframes (:keyframes previous)
+                   :fixtures fixtures :reactive-inputs inputs}
+                  (constantly step)))
+
+(deftest a-dependency-driven-effect-retargets-once-and-holds-its-committed-output
+  (let [system (reactive/create-system {})
+        level (reactive/ratom system ::level 0.0)
+        calls (atom [])
+        fixtures [{:id :lamp :universe 1 :address 1 :channels {:dimmer 1}}]
+        bindings {:level [:source ::level] :bias [:subscription [::bias]]}
+        step (kf/dependency-driven {:inputs [:level :bias] :transition {:beats 1/2}}
+                                   (fn [{:keys [level bias] :as inputs}]
+                                     (swap! calls conj inputs)
+                                     {:assignments [{:target-id :lamp :attribute :dimmer :value (+ level bias)}]}))
+        _ (reactive/reg-sub! system ::bias (fn [{:keys [db]} _] (get @db :bias 0.0)))
+        {:keys [close!]} (reactive/acquire! system [::bias] (constantly nil))
+        tick (fn [prior beat bias]
+               (let [inputs (:inputs (reactive/publish! system {:bias bias :unrelated beat} bindings))]
+                 (reactive-frame (or (:model prior) (show nil)) prior step fixtures beat inputs)))
+        rendered (fn [frame] (render/resolve-contributions fixtures (:contributions frame) {}))
+        current (fn [frame] (:result (kf/inspect (get-in frame [:keyframes "0:1"]) :lamp :dimmer)))]
+    (try
+      (let [initial (tick nil 0 0.0)
+            _ (reset! level 0.75)
+            first-change (tick initial 1/2 0.25)
+            in-flight (tick first-change 3/4 0.25)
+            _ (reset! level 0.125)
+            retargeted (tick in-flight 7/8 0.125)
+            endpoint (tick retargeted 11/8 0.125)
+            last-frame (reduce #(tick %1 %2 0.125) endpoint (range 2 302))]
+        (is (= [{:level 0.0 :bias 0.0} {:level 0.75 :bias 0.25} {:level 0.125 :bias 0.125}] @calls))
+        (is (= [[0.0] [0.0] [0.5] [0.5] [0.25] [0.25]]
+               (mapv current [initial first-change in-flight retargeted endpoint last-frame])))
+        (is (true? (get-in last-frame [:keyframes "0:1" :settled?])))
+        (is (identical? (get-in endpoint [:keyframes "0:1" :result])
+                        (get-in last-frame [:keyframes "0:1" :result])))
+        (is (nil? (storage/freeze (get-in endpoint [:keyframes "0:1"]))))
+        (is (= (first (current last-frame)) (get-in (rendered last-frame) [:values :lamp :dimmer])))
+        (is (= (seq (get-in (rendered endpoint) [:universes 1]))
+               (seq (get-in (rendered last-frame) [:universes 1]))))
+        (close!)
+        (is (empty? (reactive/demanded-queries system #{::bias})))
+        (is (empty? (:contributions (tick last-frame 302 0.125)))))
+      (finally (close!) (reactive/close! system)))))
+
+(deftest dependency-driven-transitions-use-whole-beat-ratio-steps-and-exact-endpoints
+  (let [step (kf/dependency-driven {:inputs [:ratio :strobe] :transition {:beats 1}}
+                                   (fn [{:keys [ratio strobe]}]
+                                     {:assignments [{:target-id :lamp :attribute :beat-ratio :value ratio}
+                                                    {:target-id :lamp :attribute :strobe :value strobe}]}))
+        initial (reactive-frame (show nil) nil step [] 0 {:ratio 1 :strobe 0})
+        next-inputs {:ratio (int 5) :strobe 1}
+        tick (fn [previous beat] (reactive-frame (:model previous) previous step [] beat next-inputs))
+        changed (tick initial 1/4)
+        before-step (tick changed 3/8)
+        after-step (tick before-step 1/2)
+        midpoint (tick after-step 3/4)
+        endpoint (tick midpoint 5/4)]
+    (is (= [[1 0] [1 0] [2 0] [3 1] [5 1]]
+           (mapv #(mapv :value (:assignments %)) [changed before-step after-step midpoint endpoint])))
+    (is (instance? Integer (get-in endpoint [:assignments 0 :value])))))
+
+(deftest scalar-and-typed-beat-ratios-use-the-same-step-boundaries
+  (doseq [batch? [false true]
+          [from to expected] [[1.0 5.0 [1.0 2.0 5.0]]
+                              [5/4 5/2 [1.40625 1.5625 2.5]]
+                              [1.0 5.5 [1.5625 2.125 5.5]]]]
+    (let [step (kf/dependency-driven {:inputs [:ratio] :transition {:beats 1}}
+                                     (fn [{:keys [ratio]}]
+                                       (if batch?
+                                         {:contributions [{:kind :batch
+                                                           :batch {:target-ids [:lamp]
+                                                                   :outputs {:beat-ratio {:type :number :components 1
+                                                                                          :values (double-array [ratio])}}}}]}
+                                         {:assignments [{:target-id :lamp :attribute :beat-ratio :value ratio}]})))
+          initial (reactive-frame (show nil) nil step [] 0 {:ratio from})
+          tick (fn [previous beat] (reactive-frame (:model previous) previous step [] beat {:ratio to}))
+          changed (tick initial 1/4)
+          early (tick changed 3/8)
+          step-time (tick early 1/2)
+          endpoint (tick step-time 5/4)
+          sampled (fn [frame]
+                    (first (:result (kf/inspect (get-in frame [:keyframes "0:1"]) :lamp :beat-ratio))))]
+      (is (= expected (mapv (comp double sampled) [early step-time endpoint])))
+      (is (= (if batch? (double to) to) (sampled endpoint))))))
+
+(deftest a-dependency-driven-tween-follows-the-private-transport-clock
+  (let [calls (atom 0)
+        step (kf/dependency-driven {:inputs [:level] :transition {:beats 1}}
+                                   (fn [{:keys [level]}]
+                                     (swap! calls inc)
+                                     {:assignments [{:target-id :lamp :attribute :dimmer :value level}]}))
+        command (fn [frame op extra]
+                  (let [model (:model frame)
+                        {:keys [model ack]} (control/apply-command model
+                                             (merge {:op op :source :test :command-id (name op) :instance-id "0:1"
+                                                     :show-id (:show-id model) :epoch (:epoch model) :time-ms (:time-ms model)} extra))]
+                    (is (= :accepted (:status ack)))
+                    (assoc frame :model model)))
+        tick (fn [previous beat level]
+               (reactive-frame (or (:model previous) (show nil)) previous step [] beat {:level level}))
+        initial (tick nil 0 0.0)
+        changed (tick initial 1/4 1.0)
+        running (tick changed 1/2 1.0)
+        paused (tick (command running :instance/pause {}) 2 1.0)
+        faster (command paused :transport/set {:transport {:bpm 150}})
+        resumed (tick (command faster :instance/resume {}) 5/2 1.0)
+        endpoint (tick resumed 11/4 1.0)]
+    (is (= 2 @calls))
+    (is (= [0.25 0.25 0.75 1.0] (mapv #(get-in % [:assignments 0 :value]) [running paused resumed endpoint])))))
+
+(deftest settled-native-batches-own-their-read-only-endpoints
+  (let [buffer (double-array [0.5])
+        step (kf/dependency-driven {:inputs [:level]}
+                                   (fn [_]
+                                     {:contributions [{:kind :batch :batch {:target-ids [:lamp]
+                                                       :outputs {:dimmer {:type :number :components 1 :values buffer}}}}]}))
+        initial (reactive-frame (show nil) nil step [] 0 {:level 0.5})
+        endpoint #(get-in % [:keyframes "0:1" :result 0 :batch :outputs :dimmer :values])
+        _ (aset-double buffer 0 0.9)
+        next (reactive-frame (:model initial) initial step [] 1 {:level 0.5})]
+    (is (not (identical? buffer (endpoint initial))))
+    (is (identical? (endpoint initial) (endpoint next)))
+    (is (= [0.5] (vec (endpoint next))))))
+
+(deftest dependency-driven-effects-do-not-retain-unsupported-inputs-or-intents
+  (let [calls (atom [])
+        step (kf/dependency-driven {:inputs [:level]}
+                                   (fn [{:keys [level]}]
+                                     (swap! calls conj level)
+                                     (if (nil? level)
+                                       {:intents [{:type :unwanted}]}
+                                       {:assignments [{:target-id :lamp :attribute :dimmer :value level}]})))
+        model (show nil)
+        missing (reactive-frame model nil step [] 0 {})
+        unsupported (reactive-frame model nil step [] 0 {:level (atom 0.5)})
+        initial (reactive-frame model nil step [] 0 {:level 0.5})
+        changed (reactive-frame (:model initial) initial step [] 1 {:level nil})
+        held (reactive-frame (:model changed) changed step [] 2 {:level 0.5})
+        restarted (reactive-frame (update (:model initial) :epoch inc) initial step [] 1 {:level 0.5})]
+    (is (= [0.5 nil 0.5] @calls))
+    (is (empty? (:fault-events missing)))
+    (doseq [frame [unsupported changed]]
+      (is (= [:effect/failed] (mapv :type (:fault-events frame))))
+      (is (empty? (:keyframes frame)))
+      (is (empty? (:contributions frame))))
+    (is (empty? (:contributions held)))
+    (is (= 0.5 (get-in restarted [:assignments 0 :value])))))
+
 (deftest a-beat-ahead-uses-the-private-future-transport-once
   (let [calls (atom []) compile (compile-recorder calls)
         model (show {:interval {:beats 1} :curve :linear})
@@ -39,6 +191,63 @@
     (is (= 0.0625 (get-in half [:assignments 0 :value])))
     (is (= 0.125 (get-in next [:assignments 0 :value])))
     (is (= 0.5 (get-in half [:keyframes "0:1" :progress])))))
+
+(deftest shared-transport-clock-survives-pause-resume-and-keyframe-forecast
+  (let [calls (atom [])
+        read-clocks (fn [{:keys [frame] :as context}]
+                      (let [shared (:transport-clock frame)
+                            meter (get-in shared [:meter :beats-per-bar] 4)]
+                        (swap! calls conj [(:beat frame) (get-in frame [:transport :beat]) (:beat shared)
+                                           (:time-ms frame) (:time-ms shared) meter])
+                        (assoc context :assignments [{:target-id :lamp :attribute :dimmer
+                                                      :value (double (/ (:beat shared) (* 8 meter)))}])))
+        compile (constantly (vary-meta (kf/predictable read-clocks) assoc ::kf/transport-clock? true))
+        change (fn [model op]
+                 (let [{:keys [ack model]} (control/apply-command model {:op op :instance-id "0:1" :source :test
+                                                                        :command-id (name op) :show-id (:show-id model)
+                                                                        :epoch (:epoch model) :time-ms (:time-ms model)})]
+                   (is (= :accepted (:status ack)))
+                   model))
+        before (advance (show {:interval {:beats 1/2}}) nil compile 1/2)
+        paused (advance (change (:model before) :instance/pause) before compile 2)
+        resumed (advance (change (:model paused) :instance/resume) paused compile 5/2)
+        meter-change (assoc-in (:model resumed) [:transport :meter] {:beats-per-bar 3 :bars-per-phrase 4})
+        edited (advance meter-change resumed compile 11/4)]
+    (is (every? true? (map #(every? true? (map == %1 %2)) @calls
+                          [[1/2 1/2 1/2 250 250 4]
+                           [1 1 1 500 500 4]
+                           [1/2 1/2 2 250 1000 4]
+                           [1 1 5/2 500 1250 4]
+                           [3/2 3/2 3 750 1500 4]
+                           [5/4 5/4 11/4 625 1375 3]
+                           [7/4 7/4 13/4 875 1625 3]])))
+    (is (= 7 (count @calls)))
+    (is (= 0.0625 (get-in paused [:assignments 0 :value])))
+    (is (= (double (/ 11/4 24)) (get-in edited [:assignments 0 :value])))))
+
+(deftest shared-time-forecast-refreshes-after-an-instance-pause-at-a-stationary-beat
+  (let [calls (atom [])
+        sample (fn [{:keys [frame] :as context}]
+                 (let [shared-ms (get-in frame [:transport-clock :time-ms])]
+                   (swap! calls conj [(:time-ms frame) shared-ms])
+                   (assoc context :assignments [{:target-id :lamp :attribute :dimmer
+                                                 :value (/ shared-ms 2000.0)}])))
+        compile (constantly (vary-meta (kf/predictable sample) assoc ::kf/transport-clock? true))
+        change (fn [model op at]
+                 (let [{:keys [ack model]} (control/apply-command model {:op op :instance-id "0:1" :source :test
+                                                                        :command-id (name op) :show-id (:show-id model)
+                                                                        :epoch (:epoch model) :time-ms at})]
+                   (is (= :accepted (:status ack)))
+                   model))
+        initial (advance (show {:interval {:beats 1}}) nil compile 0)
+        resumed (-> (:model initial) (change :instance/pause 0) (change :instance/resume 400))
+        after (engine/advance resumed {:time-ms 400 :keyframes (:keyframes initial)} compile)
+        window (get-in after [:keyframes "0:1"])]
+    (is (= {:clock-offset-beats 0 :clock-offset-ms 400}
+           (select-keys (get-in resumed [:instances "0:1" :system]) [:clock-offset-beats :clock-offset-ms])))
+    (is (= [[0.0 0.0] [500.0 500.0] [0.0 400.0] [500.0 900.0]] (mapv #(mapv double %) @calls)))
+    (is (= {:origin [0.2] :target [0.45] :result [0.2]}
+           (select-keys (kf/inspect window :lamp :dimmer) [:origin :target :result])))))
 
 (deftest progress-may-reverse-and-remain-short-of-a-boundary
   (let [opts {:interval {:beats 1} :progress {:mode :replace :variable [:audio :bass]}}

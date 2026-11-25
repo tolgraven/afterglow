@@ -4,7 +4,8 @@
   (:require [afterglow.control.bindings :as bindings]
             [afterglow.control.codecs.mpe :as codec]
             [afterglow.control.devices.expressive :as expressive]
-            [afterglow.control.devices.session :as session]))
+            [afterglow.control.devices.session :as session]
+            [afterglow.control.pages :as pages]))
 
 (def capabilities
   {:protocol :midi-1-mpe :axes codec/axes :automatic-schema-mapping? true
@@ -13,6 +14,7 @@
    :ambiguous-channel-expression :withheld :hardware-verified? false})
 
 (defn- initial [] {:decoder (codec/initial-state) :voices {} :holds {} :diagnostics []})
+
 (defn- diagnose [state entries]
   (update state :diagnostics #(vec (take-last 32 (into % entries)))))
 
@@ -21,7 +23,7 @@
       (when-let [cell (get (:note-cells options) note)]
         (let [page (get state :page-id (get options :page-id :main))
               coordinate (mapv + cell (get state :origin [0 0]))]
-          (get-in model [:pages page :cells coordinate])))
+          (pages/cue-id-at model page coordinate)))
       (:cue-id options)))
 
 (defn- mapped-commands [instance-id values]
@@ -48,7 +50,8 @@
             values (expressive/values plan (:axes event) current)
             voice-id (:voice-id event)
             gesture-id (str (:command-id envelope) ":mpe:" (pr-str voice-id))
-            hold (bindings/begin-hold (:holds state) id (assoc envelope :gesture-id gesture-id))]
+            hold (bindings/begin-hold (:holds state) id (assoc envelope :gesture-id gesture-id)
+                                      (::launch-grid options))]
         {:state (-> state (assoc :holds (:state hold) :selected-voice voice-id)
                     (assoc-in [:voices voice-id] {:gesture-id gesture-id :plan plan :pending-values {}
                                                  :cue-id id :device-id device-id :schemas (:params definition)
@@ -137,10 +140,9 @@
     {:id :mpe :capabilities (assoc capabilities :available-axes (select-keys codec/axes axes))
      :initial-state (initial) :decode identity :input (partial input zone options)
      :ack acknowledge :reset-model (fn [_] (initial))
-     :stop (fn [state _model _envelope _disconnected?]
+     :stop (fn [state _model envelope _disconnected?]
              {:state (initial)
-              :commands (mapv (fn [id] {:op :instance/end :instance-id id})
-                              (distinct (keep :instance-id (vals (get-in state [:holds :gestures])))))})}))
+              :commands (bindings/release-holds (:holds state) envelope)})}))
 
 (defn connect! [options]
   (session/open! (session/create (assoc options :profile (profile options)))))

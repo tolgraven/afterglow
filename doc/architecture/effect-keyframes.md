@@ -42,6 +42,49 @@ A changed leaf resamples both endpoints immediately. Other variable updates reta
 * `keyframes/inspect` with an instance window, target ID and attribute returns both clocks, eased progress and that field's origin, target and result. Omit the field to inspect timing only. Native arrays remain read-only. Use `keyframes.storage/freeze` and `restore` for portable Transit snapshots. Dense numeric endpoints use binary doubles in network order.
 * A recoverable error evaluating a forecast falls back to real samples through that segment. The inspector marks the window with `:forecast-failed?`. If the error actually occurs on the live timeline the ordinary per-effect fault event and quarantine handle it. A direction chord crossing zero, or an aim chord crossing its own fixture, also uses real samples so the head can follow its curved path. Disabling HDR reevaluates the current endpoint under the new output limits. Worker cancellation and VM failures propagate to the owner.
 
+## Dependency-driven effects
+
+The JVM runtime can bind a pure calculation to named values from a reactive
+owner. For example, a host can publish a ratom and a subscription together.
+
+```clojure
+(def bindings {:gain [:source :gain]
+               :level [:subscription [:input/level]]})
+
+(def dimmer
+  (keyframes/dependency-driven
+   {:inputs [:gain :level] :transition {:beats 1/2}}
+   (fn [{:keys [gain level]}]
+     {:assignments [{:target-id :wash :attribute :dimmer :value (* gain level)}]})))
+```
+
+An owner acquires `[:input/level]` through `reactive/acquire!`, captures its
+frame input with `(:inputs (reactive/publish! system db bindings))`, and sets
+`:reactive-inputs` on the frame passed to `engine/advance`. Close the lease when
+the last consumer leaves. Both values come from one publication, even if a
+callback changes a ratom during that publication. An unavailable binding emits
+no contributions until every input is available. Explicit `nil` is a value.
+
+The calculation receives only declared immutable values and can close over
+immutable compile-time data. It can return ordinary assignments or supported
+native batch blocks. Input and output data each fit the reuse limit of 65,536
+nodes or primitive elements. The runtime detaches returned arrays and owns
+these read-only copies. The calculation cannot request state changes, completion or intents.
+Predictive and dependency-driven declarations are mutually exclusive.
+
+An omitted transition commits the new result immediately. A beat transition
+starts from the last committed sample on the instance's private clock. Retargets
+use that same committed sample. Continuous fields interpolate. Whole-number
+beat ratios advance by whole steps, and shutter and strobe values switch at the
+midpoint. Incompatible output layouts and singular geometry switch as a whole at
+the midpoint. At the end, the exact target blocks are reused. Composition and
+rendering still see current inputs from other layers, including master and
+blackout. `keyframes/inspect` reports `:settled?` on these windows. The host
+carries them through committed frames and obtains fresh inputs after a restore.
+Hosts own frame cadence and Studio configuration.
+
+## Predictive geometry validation
+
 Geometry validation runs when a predictive interval builds its two endpoints.
 Aligned batch outputs retain their original arrays throughout this check. For
 each three-component aim target, the check subtracts the corresponding fixture

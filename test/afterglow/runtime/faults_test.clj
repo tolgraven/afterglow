@@ -7,6 +7,7 @@
             [afterglow.control.model :as control]))
 
 (defn- invoke [show t compile] (engine/advance show {:time-ms t} compile))
+
 (defn- calls-compiler [calls behavior]
   (fn [definition]
     (fn [context]
@@ -121,13 +122,16 @@
     (is (nil? (get-in held [:model :instances "live" :retry-fault])))))
 
 (deftest renderer-rejection-does-not-repeat-healthy-evaluation
-  (let [calls (atom []) compile (calls-compiler calls (fn [d c] ((fixture/compiler d) c)))
+  (let [calls (atom []) compile (calls-compiler calls (fn [d c] (update ((fixture/compiler d) c) :intents conj :spark)))
         show (fixture/model (fixture/instance "bad") (fixture/instance "good" :order 1))
         evaluated (invoke show 10 compile)
         error (ex-info "Nonfinite aim" {:effect-source {:instance-id "bad" :effect-version 1}})
         isolated (engine/reject-output evaluated error)]
     (is (= [["bad" 1] ["good" 1]] @calls))
     (is (= ["good"] (mapv :source (:assignments isolated))))
+    (is (= ["good"] (into [] (comp (filter #(= :spark (:intent %))) (map #(get-in % [:source :instance-id])))
+                           (:intent-emissions isolated))))
+    (is (= (:intents isolated) (mapv :intent (:intent-emissions isolated))))
     (is (= {:frames 0} (get-in isolated [:model :instances "bad" :state])))
     (is (= {:frames 1} (get-in isolated [:model :instances "good" :state])))
     (is (= :output (get-in isolated [:model :instances "bad" :fault :stage])))

@@ -7,7 +7,9 @@
             [afterglow.time :as time]))
 
 (defn- dot [a b] (reduce + (map * a b)))
+
 (defn- scale [v k] (mapv #(* k %) v))
+
 (defn- along [p d t] (mapv + p (scale d t)))
 
 (defn- unit [v]
@@ -214,6 +216,7 @@
 
 (def ^:private rim-offsets
   (mapv (fn [i] (let [angle (* i (/ Math/PI 4.0))] [(Math/cos angle) (Math/sin angle)])) (range 8)))
+
 (def ^:private cardinal-directions [[1 0 0] [-1 0 0] [0 1 0] [0 -1 0] [0 0 1] [0 0 -1]])
 
 (defn- polyhedron-points [{:keys [position axis spread lens-radius-m]} planes reach aimable?]
@@ -477,6 +480,12 @@
           (if (some? level) (->Emission id fixture level mounted) (read-fixture fixture))))
       read-fixture)))
 
+(defn- radial-contribution [fixture beam volume {:keys [radial] :as sampling} opts level]
+  (let [result (radial-beam beam radial opts level)]
+    (if (= ::probe result)
+      (select-points fixture beam volume sampling opts true false level)
+      result)))
+
 (defn- select-emission [fixture level pose volume {:keys [bounds] :as sampling} options]
   (let [{:keys [selection range-m intensity-threshold] :as opts}
         (if (::prepared options) options (prepare-options options))
@@ -489,13 +498,25 @@
       (when-let [beam @pose]
         (if (and illuminated? (not aimable?) (:radial sampling) (zero? (:extinction-per-m opts)))
           ;; The exact radial test already rejects points outside the cone.
-          (let [result (radial-beam beam (:radial sampling) opts level)]
-            (if (= ::probe result) (select-points fixture beam volume sampling opts true false level) result))
+          (radial-contribution fixture beam volume sampling opts level)
           (let [beam? (and illuminated? (or (nil? bounds) (beam-near-box? beam bounds range-m)))]
             (when (or beam? aimable?) (select-points fixture beam volume sampling opts beam? aimable? level))))))))
 
 (defn observed-contribution [^Emission emission volume sampling options]
   (select-emission (:fixture emission) (:level emission) (:pose emission) volume sampling options))
+
+(defn observed-volume-reader
+  "Prepare the query once for a volume sampled against committed emissions.
+  A clear-air radial beam query can use the rig's range certificate directly."
+  [volume {:keys [radial] :as sampling}
+   {:keys [selection extinction-per-m intensity-threshold] :as options}]
+  (if (and radial (::origins-in-range? options) (= #{:beam} selection) (zero? extinction-per-m))
+    (fn [^Emission emission]
+      (let [level (double (.-level emission))]
+        (when (and (pos? level) (>= level intensity-threshold))
+          (when-let [beam @(.-pose emission)]
+            (radial-contribution (.-fixture emission) beam volume sampling options level)))))
+    (fn [emission] (observed-contribution emission volume sampling options))))
 
 (defn contribution
   "Return nil or {:weight w, optional :aim [x y z]} for one fixture and volume.

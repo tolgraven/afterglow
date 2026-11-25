@@ -4,9 +4,13 @@
             [clojure.string :as str]))
 
 (def ^:private id [65 114 116 45 78 101 116 0])
+
 (def tod-request 0x8000)
+
 (def tod-data 0x8100)
+
 (def tod-control 0x8200)
+
 (def art-rdm 0x8300)
 
 (defn- route [universe]

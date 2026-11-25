@@ -7,6 +7,7 @@
             [clojure.test :refer [deftest is]]))
 
 (def patch (frame/compile-patch [{:id :spot :universe 0 :address 1 :channels {:focus [1 2]}}]))
+
 (def outputs {:focus {:op :position :axis :x}})
 
 (deftest cpu-renderer-packs-ordinary-and-deferred-fields
@@ -40,6 +41,44 @@
             actual (render patch [request] {})
             expected (frame/resolve-frame patch [{:target-id :spot :attribute :focus :value 0.25}])]
         (is (= (frame/portable-frame expected) (frame/portable-frame actual))))
+      (finally (compute/close! owner)))))
+
+(deftest contribution-gains-keep-terminal-maximum-sources-through-frame-rendering
+  (let [patch (frame/compile-patch [{:id :spot :universe 0 :address 1
+                                    :channels {:dimmer 1 :red 2 :green 3 :blue 4 :zoom 5}}])
+        owner (compute/open! {:compute-backend :distributed :budget-ms 5000})
+        prepare (compute/group-preparer owner)
+        block (fn [id values blend opacity]
+                (let [outputs (update-vals values (fn [value] {:op :const :value value}))
+                      group (prepare outputs [[0.0 0.0 0.0]] (ir/compile-batch outputs))]
+                  {:kind :batch :source {:cue-id id :instance-id id}
+                   :batch {:target-ids [:spot] :blend blend :opacity opacity
+                           :field-request {:group group :env {}}}}))
+        base (block :base {:dimmer 0.125 :zoom 0.0} :replace 1)
+        maxima (mapv (fn [i] (block i {:dimmer 0.0 :zoom (/ (double i) 16)} :max 0.5)) (range 1 10))
+        upper (block :last {:dimmer 0.5 :zoom 0.625} :max 0.5)
+        layers (conj (into [base] maxima) upper)
+        render (fn [owner blocks options]
+                 (frame/portable-frame ((compute/frame-renderer owner (System/nanoTime)) patch blocks options)))
+        compare-frame (fn [blocks options requests]
+                        (let [before (:cpu-fallbacks (compute/status owner))
+                              expected (render nil blocks options)
+                              actual (render owner blocks options)]
+                          (is (= expected actual))
+                          (is (= requests (- (:cpu-fallbacks (compute/status owner)) before)))
+                          actual))]
+    (try
+      (doseq [scope [:cue-gains :instance-gains]]
+        (let [rendered (compare-frame layers {:hdr {scope {:last 2.0}}} (count layers))]
+          (is (= 0.5625 (get-in rendered [:values :spot :channels :dimmer])))))
+      ;; The color source also owns the earlier dimmer. Fusing the dimmer
+      ;; chain would attribute it to :last and change the earlier color gain.
+      (let [color (assoc (block :base {:color [0.25 0.0 0.0]} :replace 1) :emission-gain 2.0)
+            intrinsic (into [color] layers)
+            rendered (compare-frame intrinsic {} (count intrinsic))]
+        (is (= 0.25 (get-in rendered [:values :spot :channels :red]))))
+      ;; The global and fixture-selected gains operate on composed fields.
+      (compare-frame layers {:hdr {:gain 1.25 :source-gains {:spot 1.5} :fixture-ids [:spot]}} 1)
       (finally (compute/close! owner)))))
 
 (deftest movement-owner-reports-intent-and-honors-the-frame-deadline

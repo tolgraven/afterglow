@@ -3,18 +3,25 @@
             [afterglow.render.frame :as frame]
             [afterglow.render.layers :as layers]
             [afterglow.runtime.engine :as engine]
+            [afterglow.runtime.keyframes :as keyframes]
             [clojure.test :refer [deftest is testing]]
             [thi.ng.color.core :as color]))
 
 (def patch (frame/compile-patch [{:id :head :address 1 :universe 0 :channels
                                   {:red 1 :green 2 :blue 3 :dimmer 4 :pan [5 6] :tilt [7 8] :focus 9}}]))
+
 (defn row [attr value] {:target-id :head :attribute attr :value value})
+
 (defn block [& rows] {:kind :assignments :assignments (vec rows)})
+
 (defn layer [member opacity transforms block]
   (assoc block :native-layer {:id :compound :member member :opacity opacity :transforms transforms}
                :source {:instance-id member}))
+
 (defn field [op attr] {:op op :attribute attr})
+
 (defn expr [op & args] {:op op :args (vec args)})
+
 (def transforms
   [{:attribute :beat-ratio :value (expr :divide 1 3)}
    {:attribute :color :value (expr :rotate-hue (field :previous :color) (field :field :beat-ratio))}
@@ -101,6 +108,78 @@
     (is (= (:contributions a) (:contributions b)))
     (is (== 0.5 (get-in (frame/resolve-contributions patch (:contributions a)) [:values :head :channels :focus])))))
 
+(deftest a-live-reorder-moves-the-rendered-compound-without-relaunching-members
+  (let [effect {:id :dimmer :version 1 :params {:level {:type :number :default 1}}}
+        model (control/new-show {:registry {:effects {:dimmer effect}
+                                            :cues {:dimmer {:id :dimmer :version 1 :effect-id :dimmer}}}})
+        apply-command (fn [model op fields]
+                        (control/apply-command model (merge {:command-id (str (:revision model))
+                                                            :show-id (:show-id model) :epoch (:epoch model)
+                                                            :time-ms (:time-ms model) :source {:adapter :test}
+                                                            :op op} fields)))
+        launch (fn [model level layer]
+                 (:model (apply-command model :cue/launch
+                                        (cond-> {:cue-id :dimmer :launch {:params {:level level}}}
+                                          layer (assoc :source {:adapter :test :native-layer layer})))))
+        show (-> model (launch 0.25 {:id :layer :member 0})
+                 (launch 0.1 {:id :layer :member 1 :transforms
+                              [{:attribute :dimmer :value (expr :multiply (field :previous :dimmer) 2)}]})
+                 (launch 1 nil))
+        compile-step (fn [_] (fn [ctx]
+                               (-> ctx (update-in [:state :frames] (fnil inc 0))
+                                   (update :assignments conj (row :dimmer (get-in ctx [:instance :params :level]))))))
+        render (fn [result] (frame/resolve-contributions patch (:contributions result)))
+        initial (engine/advance show {:time-ms 10} compile-step)
+        current (:model initial)
+        result (apply-command current :instance/move-after {:instance-id "0:1" :after-instance-id "0:3"})
+        moved (:model result)
+        live-frame (engine/advance moved {:time-ms 20} compile-step
+                                   (fn [f xs] (reverse (mapv f xs))))]
+    (is (= :accepted (get-in result [:ack :status])))
+    (is (= ["0:3" "0:1" "0:2"] (get-in result [:ack :instance-ids])))
+    (is (= (:instances current) (update-vals (:instances moved) #(dissoc % :render-order))))
+    (is (= {"0:1" 2 "0:2" 2 "0:3" 2}
+           (update-vals (get-in live-frame [:model :instances]) #(get-in % [:state :frames]))))
+    (is (= [255 128] (mapv #(bit-and 255 (aget ^bytes (get-in (render %) [:universes 0]) 3))
+                           [initial live-frame])))
+    (let [reverse-move (apply-command (:model live-frame) :instance/move-after
+                                      {:instance-id "0:3" :after-instance-id "0:1"})
+          reversed (engine/advance (:model reverse-move) {:time-ms 30} compile-step)]
+      (is (= ["0:1" "0:2" "0:3"] (get-in reverse-move [:ack :instance-ids])))
+      (is (= 255 (bit-and 255 (aget ^bytes (get-in (render reversed) [:universes 0]) 3)))))))
+
+(deftest standalone-cross-tier-reorder-preserves-bright-output-through-release
+  (let [effect {:id :dimmer :version 1 :params {:level {:type :number :default 1}}}
+        model (control/new-show {:registry {:effects {:dimmer effect}
+                                            :cues {:dimmer {:id :dimmer :version 1 :effect-id :dimmer}}}})
+        apply! (fn [model op fields]
+                 (let [result (control/apply-command model
+                                (merge {:command-id (str (:revision model)) :show-id (:show-id model)
+                                        :epoch (:epoch model) :time-ms (:time-ms model) :source :test :op op}
+                                       fields))]
+                   (is (= :accepted (get-in result [:ack :status])))
+                   (:model result)))
+        show (-> model
+                 (apply! :cue/launch {:cue-id :dimmer :launch {:params {:level 0.8}
+                                                               :system {:release {:ms 50}}}})
+                 (apply! :cue/launch {:cue-id :dimmer :launch {:priority 10}}))
+        compile-step (fn [_] #(update % :assignments conj (row :dimmer (get-in % [:instance :params :level]))))
+        advance (fn [model time]
+                  (engine/advance model {:time-ms time} compile-step
+                                  (fn [f xs] (reverse (mapv f xs)))))
+        first-frame (advance show 0)
+        moved (apply! (:model first-frame) :instance/move-after {:instance-id "0:1" :after-instance-id "0:2"})
+        moved-frame (advance moved 10)
+        released (apply! (:model moved-frame) :instance/end {:instance-id "0:1"})
+        release-frame (advance released 35)
+        final-frame (advance (:model release-frame) 60)
+        dmx (fn [result]
+              (bit-and 255 (aget ^bytes (get-in (frame/resolve-contributions patch (:contributions result))
+                                                [:universes 0]) 3)))]
+    (is (= [255 204 230 255] (mapv dmx [first-frame moved-frame release-frame final-frame])))
+    (is (= ["0:2" "0:1"] (mapv #(get-in % [:source :instance-id]) (:contributions release-frame))))
+    (is (= #{"0:2"} (set (keys (get-in final-frame [:model :instances])))))))
+
 (deftest muted-members-without-an-upstream-dont-change-the-frame
   (let [b (layer 0 1 [{:attribute :focus :value (field :previous :focus)}] (block (row :focus 0.5)))]
     (doseq [stream [[(assoc-in b [:native-layer :opacity] 0)]
@@ -134,6 +213,37 @@
     (doseq [finish? [false true]]
       (is (== 1/2 (get-in (frame/resolve-contributions patch (:contributions (advance m finish?)))
                            [:values :head :channels :focus]))))))
+
+(deftest an-unavailable-native-member-leaves-its-inherited-targets-alone
+  (let [base {:id :base :version 1 :params {}}
+        modifier {:id :adjust :version 1 :params {}
+                  :layer {:targets :previous :transforms [{:attribute :dimmer :value 0.75}]}}
+        show (control/new-show {:registry {:effects {:base base :adjust modifier}
+                                           :cues {:base {:id :base :version 1 :effect-id :base}
+                                                  :adjust {:id :adjust :version 1 :effect-id :adjust}}}})
+        launch (fn [m id]
+                 (:model (control/apply-command m {:op :cue/launch :cue-id id :command-id (name id) :source :test
+                                                    :show-id (:show-id m) :epoch (:epoch m) :time-ms 0})))
+        show (-> show (launch :base) (launch :adjust))
+        calls (atom [])
+        step (keyframes/dependency-driven {:inputs [:level]}
+                                          (fn [{:keys [level]}] (swap! calls conj level) {}))
+        compile-step (fn [definition]
+                       (if (= :adjust (:id definition)) step
+                           #(update % :assignments conj (row :dimmer 0.25))))
+        tick (fn [previous time inputs]
+               (engine/advance (or (:model previous) show)
+                               {:time-ms time :reactive-inputs inputs :keyframes (:keyframes previous)}
+                               compile-step))
+        missing (tick nil 0 {})
+        present (tick missing 1 {:level nil})
+        lost (tick present 2 {})
+        regained (tick lost 3 {:level 0.5})
+        samples [missing present lost regained]]
+    (is (= [nil 0.5] @calls))
+    (is (= [1 2 1 2] (mapv #(count (:contributions %)) samples)))
+    (is (= [0.25 0.75 0.25 0.75]
+           (mapv #(get-in (frame/resolve-contributions patch (:contributions %)) [:values :head :dimmer]) samples)))))
 
 (deftest opaque-replacements-remain-typed-blocks-at-their-group-anchor
   (let [prepared {:kind :batch :compiled {:target-ids [:head] :columns [{:attribute :focus}]

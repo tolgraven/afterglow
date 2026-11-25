@@ -18,18 +18,26 @@
             [afterglow.runtime.faults :as faults]))
 
 (def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
+
 (def ^:private extra-emitters (apply dissoc photometry/emitter-spectrum [:red :green :blue :white]))
+
 (def ^:private geometric-attributes #{:aim :direction})
+
 (def ^:private rgb-attributes [:red :green :blue])
 
 ;; Final fields, no mutable buffers: safe to share between render workers/frames.
 (deftype ChannelScatter [^long universe ^long index ^long fineUniverse ^long fineIndex ^double pivot ^boolean coarseRange])
+
 (deftype DenseChannel [^long kind ^long slot ^long compactIndex scatter fallback])
+
 (deftype EmitterTint [attribute ^long slot ^double red ^double green ^double blue])
+
 (deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints])
+
 (def ^:private compact-specs
   [[:pan :number 1] [:tilt :number 1] [:focus :number 1] [:zoom :number 1] [:strobe :number 1]
    [:emitted-color :vec3 3] [:intensity :number 1] [:aim :vec3 3] [:direction :vec3 3]])
+
 (def ^:private compact-channel-indices {:pan 0 :tilt 1 :focus 2 :zoom 3 :strobe 4 :shutter 9})
 
 (defn- packed-number? [value]
@@ -46,8 +54,11 @@
   (and (number? x) (Double/isFinite (double x))))
 
 (defn- unit? [x] (and (finite? x) (<= 0 x) (<= x 1)))
+
 (defn- vec3? [x] (and (vector? x) (= 3 (count x)) (every? finite? x)))
+
 (defn- positive-int? [x] (and (integer? x) (pos? x) (<= x Integer/MAX_VALUE)))
+
 (defn- clamp [x lo hi] (min hi (max lo x)))
 
 (defn- channel-spec [spec]
@@ -82,6 +93,24 @@
                                       (long (if fine (get universe-indices (first fine)) -1))
                                       (long (if fine (second fine) -1)) (double (or inverted-from -1.0))
                                       (boolean (function-range? attribute channel))))))
+
+(defn- emission-off-bytes [fixtures]
+  (into {}
+        (for [fixture fixtures
+              [attribute {:keys [coarse fine inverted-from] :as channel}] (:compiled-channels fixture)
+              ;; Match the pivot representation used by the channel packer.
+              :when (and (zero? (double (or inverted-from -1)))
+                         (or (= :dimmer attribute) (contains? emitter-attributes attribute)))
+              :let [word (long (emission/packed-word channel 0.0 false))]
+              entry (if fine
+                      [[coarse (unsigned-bit-shift-right word 8)] [fine (bit-and word 255)]]
+                      [[coarse word]])]
+          entry)))
+
+(defn physical-off-bytes
+  "Sparse physical slot values to overlay on zero-filled idle DMX universes."
+  [{:keys [::idle-off-bytes fixtures fog-off-bytes]}]
+  (or idle-off-bytes (into (or fog-off-bytes {}) (emission-off-bytes fixtures))))
 
 (defn- validate-footprints! [fixtures slots]
   (when (some #(contains? % :footprint) fixtures)
@@ -208,10 +237,12 @@
                                         ::fog-idle-level (atmosphere/physical-level
                                                            (get-in fixture [:compiled-channels :fog])
                                                            (first (get-in fixture [:fogger :dmx-range] [0 255]))))))
-                         compiled)]
+                         compiled)
+          fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)]
       {:type ::patch ::hdr-layout (delay (hdr/layout compiled attribute-slots))
        ::emission-layout (emission/compile-layout compiled universes ::emission-channels)
-       :fog-off-bytes (into {} (mapcat #(get-in % [:compiled-channels :fog ::fog-off])) compiled)
+       :fog-off-bytes fog-off-bytes
+       ::idle-off-bytes (into fog-off-bytes (emission-off-bytes compiled))
        :fixtures compiled :by-id (into {} (map (juxt :id identity) compiled))
        ::moving-heads (filterv #(contains? (::supported %) :aim) compiled)
        :target-order (mapv :id compiled) ::attribute-slots attribute-slots
@@ -246,6 +277,28 @@
       (mapv composite (or previous (vec (repeat (count value) 0))) value)
       (composite (or previous 0) value))))
 
+(defn- profiled-fog-channel [fixture]
+  (let [channel (get-in fixture [:compiled-channels :fog])]
+    (when (::fog-off channel) channel)))
+
+(defn- blend-profiled-fog [channel previous value blend opacity]
+  (let [start (or previous (::fog-idle-level channel))
+        end (blend-value previous value blend 1)]
+    (if (unit? end)
+      (atmosphere/mix-physical-level channel start end opacity)
+      ;; A partial add can fit even when its full logical endpoint overflows.
+      ;; Keep that range check and mix along the representable part of the ramp.
+      (let [partial-level (blend-value previous value blend opacity)]
+        (if (< start partial-level 1)
+          (atmosphere/mix-physical-level channel start 1 (/ (- partial-level start) (- 1 start)))
+          partial-level)))))
+
+(defn- blend-field [fixture attribute previous value blend opacity]
+  (if-let [channel (when (and (= :fog attribute) (not (== 1 opacity)))
+                     (profiled-fog-channel fixture))]
+    (blend-profiled-fog channel previous value blend opacity)
+    (blend-value previous value blend opacity)))
+
 (defn- assignment-value? [attribute value hdr?]
   (let [level? (if (and hdr? (hdr/light-attributes attribute))
                  #(and (finite? %) (not (neg? %))) unit?)]
@@ -276,7 +329,7 @@
           (let [index (int (::index fixture))
                 attributes (or (aget targets index) (transient {}))
                 previous (get attributes attribute)
-                blended (blend-value previous value blend opacity)]
+                blended (blend-field fixture attribute previous value blend opacity)]
             (when-not (assignment-value? attribute blended (and (::hdr? patch) (::emission-channels fixture)))
               (fail! "Blended assignment exceeds its finite attribute range" {:target-id target-id :attribute attribute :value blended}))
             (aset targets index (assoc! attributes attribute blended))
@@ -442,11 +495,11 @@
                nil) nil off-bytes))
 
 (defn idle-universes
-  "New, exclusively owned shutdown buffers. Fog uses its physical off endpoint.
-  Every other byte starts at zero."
+  "New, exclusively owned shutdown buffers with physical emission and fog off
+  bytes. Other slots start at zero."
   [patch]
   (let [buffers (:universes (create-buffers patch))]
-    (write-off-bytes! buffers (:fog-off-bytes patch))
+    (write-off-bytes! buffers (physical-off-bytes patch))
     buffers))
 
 (defn- pack-scatter! [^objects buffers ^ChannelScatter channel ^double level]
@@ -770,11 +823,12 @@
                                       blend opacity target-id attribute (and (::hdr? patch) (::emission-channels fixture) (hdr/light-attributes attribute)))))))
     (pack-dense-state patch values present options)))
 
-(defn- packed-assignment? [assignment]
-  (and (not (geometric-attributes (:attribute assignment)))
-       (packed-number? (:opacity assignment 1))
-       (let [value (:value assignment)]
-         (if (vector? value) (every? packed-number? value) (packed-number? value)))))
+(defn- packed-assignment? [patch {:keys [target-id attribute value opacity] :or {opacity 1}}]
+  (and (not (geometric-attributes attribute))
+       (packed-number? opacity)
+       (or (not= :fog attribute) (== 1 opacity)
+           (not (profiled-fog-channel (get (:by-id patch) target-id))))
+       (if (vector? value) (every? packed-number? value) (packed-number? value))))
 
 (defn- packed-plan? [patch]
   ;; A highly heterogeneous rig should not allocate target-count × every unique
@@ -828,7 +882,7 @@
        (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
 
        (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
-            (every? packed-assignment? assignments))
+            (every? (partial packed-assignment? patch) assignments))
        (resolve-packed-only patch assignments options)
 
        :else (pack-general-state patch (reduce-assignments patch assignments) options)))))
@@ -1069,17 +1123,25 @@
                      (:assignments block))))
 
 (defn- general-targets
-  "A target's entire ordered history must retain general arithmetic when any
-  write uses geometry or exact numbers. Other targets stay in dense storage."
-  [blocks]
+  "Keep the ordered history of targets using geometry, exact numbers or
+  profiled fog fades in general arithmetic. Other targets stay dense."
+  [patch blocks]
   (reduce (fn [targets block]
             (case (:kind block)
-              :assignments (into targets (keep #(when-not (packed-assignment? %) (:target-id %)))
+              :assignments (into targets (keep #(when-not (packed-assignment? patch %) (:target-id %)))
                                  (:assignments block))
-              :batch (let [{:keys [target-ids columns opacity]} (:compiled block)]
-                       (if (or (not (packed-number? opacity))
-                               (some #(geometric-attributes (:attribute %)) columns))
-                         (into targets target-ids) targets)))) #{} blocks))
+              :batch (let [{:keys [target-ids columns opacity] :as batch} (:compiled block)]
+                       (cond
+                         (or (not (packed-number? opacity))
+                             (some #(geometric-attributes (:attribute %)) columns))
+                         (into targets target-ids)
+
+                         (and (seq (:fog-off-bytes patch))
+                              (or (not (== 1 opacity)) (::layers/opacities batch))
+                              (some #(= :fog (:attribute %)) columns))
+                         (into targets (filter #(profiled-fog-channel (get (:by-id patch) %))) target-ids)
+
+                         :else targets)))) #{} blocks))
 
 (defn- expand-general-rows [{:keys [target-ids target-indices columns blend opacity ::layers/opacities]} ^booleans general]
   ;; A large pixel batch may have only a few geometric targets. Scan the mask
@@ -1105,7 +1167,43 @@
 (defn- tracking-ids [links]
   (into #{} (mapcat (juxt :leader :follower)) links))
 
-(defn- track-edge [patch ^objects assigned options {:keys [leader follower surface along]}]
+(defn- tracking-beam [head resolved]
+  ;; Missing direct axes pack as zero. Use the calibrated direction, which
+  ;; also accounts for a leader's mechanical stops.
+  (let [pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))]
+    (optics/fixture-beam head (assoc resolved :pose pose))))
+
+(defn- tracking-footprint [head ^objects assigned options surface]
+  (let [index (int (::index head))
+        attrs (aget assigned index)
+        sources (::geometry-sources options)
+        source (when sources (get (aget ^objects sources index) (if (:aim attrs) :aim :direction)))
+        resolved (resolve-geometry head attrs (previous-for-target options head) source)]
+    (optics/beam-footprint (tracking-beam head resolved) surface)))
+
+(defn- tracking-anchors [patch ^objects assigned options shared followers]
+  (into {}
+        (for [[id group] shared]
+          [id (into {}
+                    (keep (fn [leader]
+                            (when-let [head (get (:by-id patch) leader)]
+                              (when-let [spot (tracking-footprint head assigned options (:surface (first group)))]
+                                [leader spot]))))
+                    (remove followers (distinct (map :leader group))))])))
+
+(defn- follower-footprints [head calibrated placement occupied outgoing]
+  (let [placement-id (:surface-id placement)
+        footprints (if (contains? occupied placement-id) {placement-id placement} {})]
+    (if (seq outgoing)
+      (let [beam (tracking-beam head calibrated)]
+        (reduce-kv (fn [spots id surface]
+                     (if (= id placement-id) spots
+                       (if-let [spot (optics/beam-footprint beam surface)]
+                         (assoc spots id spot) spots)))
+                   footprints outgoing))
+      footprints)))
+
+(defn- track-edge [patch ^objects assigned options occupied outgoing {:keys [leader follower surface along]}]
   (let [head (get (:by-id patch) leader)
         next-head (get (:by-id patch) follower)]
     (cond
@@ -1113,45 +1211,58 @@
       (nil? next-head) {:reason :missing-follower}
       (not (contains? (::supported next-head) :aim)) {:reason :fixed-follower}
       :else
-      (let [index (int (::index head))
-            attrs (aget assigned index)
-            sources (::geometry-sources options)
-            source (when sources (get (aget ^objects sources index) (if (:aim attrs) :aim :direction)))
-            resolved (resolve-geometry head attrs (previous-for-target options head) source)
-            ;; Absent direct axes pack channel value zero, exactly as in the
-            ;; completed frame. Reconstruct travel limits from the command.
-            pose (fixture-pose head (merge {:pan 0.0 :tilt 0.0} resolved))
-            spot (optics/beam-footprint (optics/fixture-beam head (assoc resolved :pose pose)) surface)
+      (let [spot (tracking-footprint head assigned options surface)
             next-attrs (aget assigned (int (::index next-head)))
             follower-beam (optics/fixture-beam next-head next-attrs)]
         (if-let [solution (when spot (optics/edge-aim spot follower-beam surface along))]
           (let [target (assoc next-attrs :aim (:aim solution))
                 calibrated (resolve-geometry next-head target (previous-for-target options next-head) nil)]
-            (if (:aim-reachable? calibrated)
-              (select-keys solution [:aim :contact])
-              {:reason :unreachable}))
+            (if-not (:aim-reachable? calibrated)
+              {:reason :unreachable}
+              (let [footprints (follower-footprints next-head calibrated (:footprint solution) occupied (get outgoing follower))
+                    overlap? (some (fn [[receiver spot]]
+                                     (some (fn [[id other]]
+                                             (and (or (not= receiver (:id surface)) (not= id leader))
+                                                  (optics/footprints-overlap? spot other)))
+                                           (get occupied receiver)))
+                                   footprints)]
+                (if overlap? {:reason :overlap}
+                  (assoc solution :footprints footprints)))))
           {:reason (if spot :no-tangent :missed-receiver)})))))
 
 (defn- apply-tracking! [patch ^objects assigned options]
   (let [links (:edge-tracking options)]
     (when-not (vector? links) (fail! "Edge tracking must be an ordered vector" {}))
-    (loop [pending (seq links), seen #{}, suppressed #{}, reports []]
-      (if (seq pending)
-        (let [{:keys [leader follower] :as link} (first pending)]
-          (when (or (nil? leader) (nil? follower) (= leader follower) (contains? seen follower))
-            (fail! "Each follower must be new and distinct from its leader" {:link link}))
-          (let [result (if (contains? suppressed leader)
-                         {:reason :leader-suppressed}
-                         (track-edge patch assigned options link))
-                failed? (contains? result :reason)]
-            (when-let [fixture (get (:by-id patch) follower)]
-              (let [index (int (::index fixture))
-                    attrs (aget assigned index)]
-                (aset assigned index (if failed? (assoc attrs :dimmer 0.0) (assoc attrs :aim (:aim result))))))
-            (recur (next pending) (conj seen leader follower)
-                   (cond-> suppressed failed? (conj follower))
-                   (conj reports (merge {:leader leader :follower follower} result)))))
-        reports))))
+    (let [shared (into {} (filter (fn [[id group]] (and (some? id) (next group))))
+                       (group-by (comp :id :surface) links))
+          followers (set (map :follower links))
+          outgoing (reduce (fn [out {:keys [leader surface]}]
+                             (if (and (contains? followers leader) (contains? shared (:id surface)))
+                               (assoc-in out [leader (:id surface)] surface) out))
+                           {} links)]
+      ;; Seed independently aimed leaders first. Earlier successful followers
+      ;; reserve space both where placed and where they lead another link.
+      (loop [pending (seq links), seen #{}, suppressed #{}, reports []
+             occupied (tracking-anchors patch assigned options shared followers)]
+        (if (seq pending)
+          (let [{:keys [leader follower] :as link} (first pending)]
+            (when (or (nil? leader) (nil? follower) (= leader follower) (contains? seen follower))
+              (fail! "Each follower must be new and distinct from its leader" {:link link}))
+            (let [result (if (contains? suppressed leader)
+                           {:reason :leader-suppressed}
+                           (track-edge patch assigned options occupied outgoing link))
+                  failed? (contains? result :reason)]
+              (when-let [fixture (get (:by-id patch) follower)]
+                (let [index (int (::index fixture))
+                      attrs (aget assigned index)]
+                  (aset assigned index (if failed? (assoc attrs :dimmer 0.0) (assoc attrs :aim (:aim result))))))
+              (recur (next pending) (conj seen leader follower)
+                     (cond-> suppressed failed? (conj follower))
+                     (conj reports (merge {:leader leader :follower follower}
+                                          (select-keys result [:aim :contact :reason])))
+                     (reduce-kv (fn [spots id footprint] (assoc-in spots [id follower] footprint))
+                                occupied (:footprints result)))))
+          reports)))))
 
 (defn- finish-contributions [patch ^objects assigned options values present pack]
   (let [links (:edge-tracking options)
@@ -1206,7 +1317,7 @@
   (let [blocks (if (> (count blocks) 1) (coverage/plan blocks) blocks)
         size (* (int (::stride patch)) (count (:fixtures patch)))
         values (double-array size), present (boolean-array size)
-        targets (cond-> (general-targets blocks) (seq (:edge-tracking options)) (into (tracking-ids (:edge-tracking options))))]
+        targets (cond-> (general-targets patch blocks) (seq (:edge-tracking options)) (into (tracking-ids (:edge-tracking options))))]
     (if (empty? targets)
       (do (doseq [block blocks]
             (with-effect-source (:source block)
@@ -1265,7 +1376,10 @@
                              :batch (assoc block :compiled (first (validate-batches patch [(:batch block)] (:native-layer block))))
                              (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
           blocks (hdr/apply-contribution-gains blocks (:hdr options) #(get-in patch [:by-id % ::emission-channels]))
-          blocks (layers/compose blocks layer-rows blend-value
+          blocks (layers/compose-fields blocks layer-rows
+                                 (fn [id attribute previous value blend opacity]
+                                   (blend-field (when (= :fog attribute) (get (:by-id patch) id))
+                                                attribute previous value blend opacity))
                                  (fn [{:keys [target-id attribute value] :as a}]
                                    (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
                                                          (:blend a :replace) a (::hdr? patch))) (::hdr? patch))
@@ -1285,9 +1399,11 @@
   Heterogeneous patches, exact master levels and rich values use the general path.
   Assignments and batches accept :opacity in [0,1], default 1. Each write is
   previous + opacity * (blend(previous, value) - previous); zero skips the write,
-  preserving earlier contributions and absent-attribute defaults. Geometry uses
-  the same componentwise interpolation in world coordinates. Opacity never scales
-  authored parameters. Scalar channel overrides remain distinct from RGB color.
+  preserving earlier contributions and absent-attribute defaults. Profiled fog
+  uses its calibrated off level when no earlier write exists and interpolates in
+  physical DMX space. Geometry uses the same componentwise interpolation in world
+  coordinates. Opacity never scales authored parameters. Scalar channel overrides
+  remain distinct from RGB color.
   Blocks may carry :source provenance. Output validation/blending failures add
   that exact value as :effect-source in ex-data, retaining the original cause
   and data. Final geometric failures identify the last effective positive-opacity
@@ -1296,8 +1412,10 @@
   stays per block and sparse geometric target; no source maps are copied per pixel.
   Optional :edge-tracking links run after blending. Each {:leader id :follower id
   :surface receiver :along xyz} places the next beam tangent to its leader on the
-  receiver. A missed or unreachable spot suppresses that follower's light for
-  the frame and the returned :edge-tracking reports its reason.
+  receiver. Independently aimed leaders and earlier followers take precedence
+  on shared receivers, including where a follower leads another link. A missed,
+  unreachable, or overlapping spot suppresses that follower's light for the
+  frame and the returned :edge-tracking reports its reason.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))

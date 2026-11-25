@@ -41,6 +41,7 @@
      :cyan [0.407 [0.0 1.0 0.8]] :lime [0.995 [0.55 1.0 0.06]] :uv [0.0 [0.0 0.0 0.0]]}))
 
 (def ^:private white-response (into {} (map (fn [[k [response]]] [k response])) emitter-spectrum))
+
 (def ^:private rgb-white (/ (+ (:red white-response) (:green white-response) (:blue white-response)) 3))
 
 (defn relative-brightness

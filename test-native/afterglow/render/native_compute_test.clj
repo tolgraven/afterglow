@@ -9,9 +9,12 @@
 
 (def fixture {:id :spot :universe 0 :address 1 :position [0.5 0 0]
               :channels {:pan [1 2] :tilt [3 4] :focus [5 6]}})
+
 (def patch (frame/compile-patch [fixture]))
+
 (def expressions {:focus {:op :position :axis :x}
                   :direction {:op :vec3 :args [{:op :param :key :x} {:op :const :value 0.25} {:op :const :value 1.0}]}})
+
 (defn- blocks [x]
   (let [group (compute/prepare-group expressions [[0.5 0 0]] (ir/compile-batch expressions))]
     [{:kind :assignments :source :low

@@ -6,8 +6,14 @@
             [afterglow.time :as time]))
 
 (def emitters (into #{:dimmer :color} (keys photometry/emitter-spectrum)))
+
 (def geometry #{:aim :direction})
+
 (def continuous (into (into emitters geometry) [:pan :tilt :zoom :focus :beat-ratio]))
+
+(def ^:private discrete-fields #{:strobe :shutter})
+
+(def ^:private reactive-fields (into continuous discrete-fields))
 
 (defn- invalid! [reason] (throw (ex-info reason {:type ::invalid-sampler})))
 
@@ -37,12 +43,12 @@
 
 (defn- only-keys? [allowed data] (and (map? data) (every? allowed (keys data))))
 
-(defn- validate-block! [hdr? {:keys [kind assignments batch] :as block}]
+(defn- validate-block! [attributes hdr? {:keys [kind assignments batch] :as block}]
   (let [target-id? #(or (keyword? %) (string? %))
         blends #{:replace :add :max}
         valid-row? (fn [{:keys [target-id attribute value blend opacity] :as row}]
                      (and (only-keys? #{:target-id :attribute :value :blend :opacity} row)
-                          (target-id? target-id) (continuous attribute) (valid-opacity? opacity)
+                          (target-id? target-id) (attributes attribute) (valid-opacity? opacity)
                           (or (nil? blend) (and (blends blend) (or (not (geometry attribute)) (= blend :replace)))) (valid-value? attribute value hdr?)))]
     (case kind
       :assignments (when-not (and (= #{:kind :assignments} (set (keys block)))
@@ -56,7 +62,7 @@
                               (or (nil? blend) (blends blend))
                               (every? (fn [[attr {:keys [components type values] :as field}]]
                                         (let [vec3? (or (= attr :color) (geometry attr))]
-                                          (and (only-keys? #{:type :values :components} field) (continuous attr) (= components (if vec3? 3 1))
+                                          (and (only-keys? #{:type :values :components} field) (attributes attr) (= components (if vec3? 3 1))
                                                (= type (if vec3? :vec3 :number)) (instance? double/1 values)
                                                (= (alength ^doubles values) (* n components))
                                                (valid-column? attr values hdr?))))
@@ -64,10 +70,15 @@
                  (invalid! "Invalid predictive endpoint")))
       (invalid! "Invalid predictive endpoint"))))
 
-(defn validate-blocks! [blocks hdr?]
-  (when-not (vector? blocks) (invalid! "Expected ordered predictive blocks"))
-  (run! (partial validate-block! hdr?) blocks)
-  blocks)
+(defn validate-blocks!
+  ([blocks hdr?] (validate-blocks! blocks hdr? continuous))
+  ([blocks hdr? attributes]
+   (when-not (vector? blocks) (invalid! "Expected ordered predictive blocks"))
+   (run! (partial validate-block! attributes hdr?) blocks)
+   blocks))
+
+(defn reactive-blocks [blocks hdr?]
+  (validate-blocks! blocks hdr? reactive-fields))
 
 (defn blocks [context result]
   (when-not (and (= (:state context) (:state result)) (= [] (:intents result))
@@ -82,48 +93,87 @@
   (let [v (+ (double a) (* (double t) (- (double b) (double a))))]
     (max lo (min hi v))))
 
-(defn- assignment [t hdr? a b]
+(defn- discrete-value [a b t]
+  (if (< t 1/2) a b))
+
+(defn- whole-number? [value]
+  (if (float? value)
+    (== (double value) (Math/rint (double value)))
+    (integer? (rationalize value))))
+
+(defn- integer-step [a b t]
+  (let [from (if (integer? a) a (bigint a))
+        to (if (integer? b) b (bigint b))
+        distance (-' to from)
+        change (bigint (* (rationalize t) distance))]
+    (if (zero? change)
+      a
+      (let [value (+' from change)]
+        (if (float? a) (double value) value)))))
+
+(defn- beat-ratio-sample [a b t]
+  (if (and (whole-number? a) (whole-number? b))
+    (integer-step a b t)
+    (scalar a b t Double/NEGATIVE_INFINITY Double/POSITIVE_INFINITY)))
+
+(defn- field-blender [attr t hdr? reactive?]
+  (let [[lo hi] (bounds attr hdr?)]
+    (cond
+      (and reactive? (discrete-fields attr)) #(discrete-value %1 %2 t)
+      (and reactive? (= :beat-ratio attr)) #(beat-ratio-sample %1 %2 t)
+      :else #(scalar %1 %2 t lo hi))))
+
+(defn- assignment [t hdr? reactive? a b]
   (when-not (= (dissoc a :value) (dissoc b :value))
     (invalid! "Predictive assignment topology changed within a keyframe"))
-  (let [[lo hi] (bounds (:attribute a) hdr?) a-value (:value a) b-value (:value b)
-        sample #(scalar %1 %2 t lo hi)]
+  (let [a-value (:value a) b-value (:value b)
+        sample (field-blender (:attribute a) t hdr? reactive?)]
     (assoc a :value (if (and (vector? a-value) (vector? b-value) (= (count a-value) (count b-value)))
                       (mapv sample a-value b-value)
                       (sample a-value b-value)))))
 
-(defn- column [attr t hdr? from to]
+(defn- column [attr t hdr? reactive? from to]
   (when-not (= (dissoc from :values) (dissoc to :values))
     (invalid! "Predictive column shape changed within a keyframe"))
   (let [^doubles a (:values from) ^doubles b (:values to) n (alength a)
-        t (double t) [lo hi] (bounds attr hdr?) lo (double lo) hi (double hi)
-        out (double-array n)]
+        [lo hi] (bounds attr hdr?) lo (double lo) hi (double hi)]
     (when-not (= n (alength b)) (invalid! "Predictive field size changed"))
-    (dotimes [i n]
-      (let [x (aget a i)]
-        (aset-double out i (max lo (min hi (+ x (* t (- (aget b i) x))))))))
-    (assoc from :values out)))
+    (if (and reactive? (discrete-fields attr))
+      (discrete-value from to t)
+      (let [out (double-array n)
+            phase (double t)
+            beat-ratio? (and reactive? (= :beat-ratio attr))]
+        (dotimes [i n]
+          (let [x (aget a i) y (aget b i)]
+            (aset-double out i
+                         (if beat-ratio?
+                           (double (beat-ratio-sample x y t))
+                           (max lo (min hi (+ x (* phase (- y x)))))))))
+        (assoc from :values out)))))
 
-(defn- blend-block [t hdr? a b]
+(defn- blend-block [t hdr? reactive? a b]
   (when-not (= (:kind a) (:kind b))
     (invalid! "Predictive output representation changed within a keyframe"))
   (case (:kind a)
     :assignments
     (let [as (:assignments a) bs (:assignments b)]
       (when-not (= (count as) (count bs)) (invalid! "Predictive assignment count changed"))
-      (assoc a :assignments (mapv (partial assignment t hdr?) as bs)))
+      (assoc a :assignments (mapv (partial assignment t hdr? reactive?) as bs)))
     :batch
     (let [left (:batch a) right (:batch b)
           as (:outputs left) bs (:outputs right)]
       (when-not (and (= (dissoc left :outputs) (dissoc right :outputs)) (= (set (keys as)) (set (keys bs))))
         (invalid! "Predictive batch topology changed within a keyframe"))
-      (assoc-in a [:batch :outputs] (reduce-kv (fn [m attr field] (assoc m attr (column attr t hdr? field (bs attr)))) {} as)))))
+      (assoc-in a [:batch :outputs] (reduce-kv (fn [m attr field] (assoc m attr (column attr t hdr? reactive? field (bs attr)))) {} as)))))
 
-(defn blend [origin target t hdr?]
-  (cond
-    (zero? t) origin
-    (== 1.0 t) target
-    :else (do (when-not (= (count origin) (count target)) (invalid! "Predictive block count changed"))
-              (mapv (partial blend-block t hdr?) origin target))))
+(defn blend
+  ([origin target t hdr?] (blend origin target t hdr? false))
+  ([origin target t hdr? reactive?]
+   (cond
+     (zero? t) origin
+     (== 1.0 t) target
+     :else (do (when-not (= (count origin) (count target)) (invalid! "Predictive block count changed"))
+               (mapv (partial blend-block t hdr? reactive?) origin target)))))
 
 (defn map-columns [f blocks]
   (mapv (fn [block]

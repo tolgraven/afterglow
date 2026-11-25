@@ -1,9 +1,14 @@
 (ns afterglow.control.views
   "Pure device-independent projections. Local focus, menus and raw protocol
   buffers belong to adapters; these views describe committed show state."
-  (:require [afterglow.control.categories :as categories]))
+  (:require [afterglow.control.categories :as categories]
+            [afterglow.control.effect-selection :as effect-selection]
+            [afterglow.control.instance-order :as instance-order]
+            [afterglow.control.pages :as pages]))
 
-(defn active-instances [model]
+(defn active-instances
+  "Priority and launch order for cue grids and latest-launch lookup."
+  [model]
   (->> (:instances model) vals (sort-by (juxt :priority :order :id)) vec))
 
 (defn cue-view
@@ -43,26 +48,32 @@
        (assoc view :color rgb)))))
 
 (defn page-view [model page-id]
-  (when-let [page (get-in model [:pages page-id])]
-    {:id page-id :name (or (:name page) (str page-id))
-     :cells (mapv (fn [[[x y] cue-id]] {:x x :y y :cue (cue-view model cue-id)})
-                  (sort-by (fn [[[x y] _]] [(- y) x]) (:cells page)))}))
+  (when-let [page (pages/page model page-id)]
+    (let [cells (:cells page)
+          instances-by-cue (when (seq cells) (group-by :cue-id (active-instances model)))]
+      (cond-> {:id page-id :name (or (:name page) (str page-id))
+               :cells (mapv (fn [[[x y] cue-id]]
+                              {:x x :y y :cue (cue-view model cue-id instances-by-cue)})
+                            (sort-by (fn [[[x y] _]] [(- y) x]) cells))}
+        (= page-id pages/recent-page-id) (merge (select-keys page [:columns :rows]))))))
 
 (defn snapshot
   "Public committed control projection. Does not expose resource handles,
   deduplication history, raw definition code or arbitrary private model fields."
   [model]
-  (merge (select-keys model [:show-id :epoch :revision :time-ms :master :blackout? :transport])
-         {:cues (mapv #(cue-view model %) (sort-by str (keys (get-in model [:registry :cues]))))
-          :pages (mapv #(page-view model %) (sort-by str (keys (:pages model))))
-          :groups (categories/group-view model)
-          :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
-                                                   :started-at-ms :release-at-ms :duration-ms
-                                                   :priority :order :phase :launch-mode])
-                                  :categories (categories/definition-categories (:definition %))
-                                  :system (merge {:opacity 1.0 :paused? false}
-                                                 (select-keys (:system %) [:opacity :paused? :attack :release])))
-                           (active-instances model))}))
+  (let [instances (instance-order/ordered model)]
+    (merge (select-keys model [:show-id :epoch :revision :time-ms :master :blackout? :transport])
+           {:cues (mapv #(cue-view model %) (sort-by str (keys (get-in model [:registry :cues]))))
+            :pages (mapv #(page-view model %) (pages/page-ids model))
+            :groups (categories/group-view model)
+            :effect-selection (effect-selection/projection model instances)
+            :instances (mapv #(assoc (select-keys % [:id :cue-id :effect-id :effect-version :params
+                                                     :started-at-ms :release-at-ms :duration-ms
+                                                     :priority :order :render-priority :render-order :phase :launch-mode])
+                                    :categories (categories/definition-categories (:definition %))
+                                    :system (merge {:opacity 1.0 :paused? false}
+                                                   (select-keys (:system %) [:opacity :paused? :attack :release])))
+                             instances)})))
 
 (defn diff-view
   "Return changed and removed top-level values. A transport adds epoch and

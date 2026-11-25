@@ -238,7 +238,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "d6c84dccebe655ce15dcb504de513c4a6b601e3f59dad8bf60205a6ee0dd82df",
+     "e5ac5a67639af5123f24b7e5a81bcddc47531a5a05d4cd1fb23829d0f6b0b8c4",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -298,7 +298,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "8f326fe0513a57a000463cbfdaca5c15268fdc252e4bc272550449d9546ef6ec",
+     "587db2128ae24891a0de084d3ac333dab60f583d863dccda792d535049179b2e",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -379,7 +379,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "d76e81f5d13026eed67d596dc8fc0059eac3ed53ac5a281a369db1ab1d02b35c",
+     "14cd6216d2e26f3c48cadd4531cfa58dff8ad84f09b43d875c69bc3273aeaa01",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -472,7 +472,7 @@
      :time-ms 0.0},
     :expected
     {:model-digest
-     "1b22f74731705f7a4bf87f3cdc2d5cd45de3bd454c9902252803f06d07b8d4d8",
+     "f1941ca7a8fae2f52eead59c643c3baeba370317f311f91371eeee4fbc57c892",
      :output-digest
      "096ea40af0395907bee18bb6a29b962d4bdab320d317db9c42f292dae60bd5f3",
      :instances
@@ -571,7 +571,7 @@
     :clock {:time-ms 0.0, :beat 0.0},
     :expected
     {:model-digest
-     "bde5877403f0d7f4c5128bd7e873f030d455275e170f353ef3b37c2367d6d5b4",
+     "2fd28c98449f0c244ca7969e2ed393d27b223412a6cdb77aa8d516ea57f9fe84",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -640,7 +640,7 @@
      :value 2.0},
     :expected
     {:model-digest
-     "bde5877403f0d7f4c5128bd7e873f030d455275e170f353ef3b37c2367d6d5b4",
+     "2fd28c98449f0c244ca7969e2ed393d27b223412a6cdb77aa8d516ea57f9fe84",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -717,7 +717,7 @@
      :value 0.4},
     :expected
     {:model-digest
-     "75bc7d5aad42ddd498a3f0aa620ab0431a724562c9615c13c2997a81e9a33302",
+     "39051143570eb33de97368d19d10d245d5551b033bf2f0082c2ecc947c47334f",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -792,7 +792,7 @@
      :value 0.4},
     :expected
     {:model-digest
-     "75bc7d5aad42ddd498a3f0aa620ab0431a724562c9615c13c2997a81e9a33302",
+     "39051143570eb33de97368d19d10d245d5551b033bf2f0082c2ecc947c47334f",
      :output-digest
      "5bc1321543acf92d709f4a549429d3c69d7186d3e0982fcad46310287a50ee10",
      :instances
@@ -856,7 +856,7 @@
     :clock {:time-ms 100.0, :beat 0.2},
     :expected
     {:model-digest
-     "a0b5c25c578b668837374d40208732e9b2ba19690f402b13c16cce54929fba7e",
+     "614f53a43b7120482e350821e7643d95ce5e52681421e8aa752bc79408b76bb6",
      :output-digest
      "3e35feaa7b6fcbffc63b7a454506c02627b25d6b444f974e756113864352a15f",
      :instances
@@ -936,7 +936,7 @@
       :release-duration-ms 50}},
     :expected
     {:model-digest
-     "03fef9d886eaa1d634f4cb320b9a9d17291055163d1cc2da320ccd8ea4c30c6b",
+     "eadf5e993c0b158dcd7f44c6be38eafb7209c5cdb13e90902aed60d69ccb39de",
      :output-digest
      "3e35feaa7b6fcbffc63b7a454506c02627b25d6b444f974e756113864352a15f",
      :instances
@@ -1006,7 +1006,7 @@
     :clock {:time-ms 200.0, :beat 0.4},
     :expected
     {:model-digest
-     "22cf9c49951435300810aa2dfc4cfb3ec17e35e565ffa26f929d2f7e244a7070",
+     "6471f578c94c09a8d2c1929bc16fee4ff6abcb5c358feb7d44183db0663d8155",
      :output-digest
      "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
      :instances
@@ -1084,7 +1084,7 @@
      :time-ms 200.0},
     :expected
     {:model-digest
-     "94e1acf6f0fb85c5947f9e9c185cf35bf2a4e9f434752e752545a4bf64df02a9",
+     "d61f4d088c24a45923475a41f24691a3029231c9464f6c564a643457cee9406a",
      :output-digest
      "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
      :instances
@@ -1152,7 +1152,7 @@
     :clock {:time-ms 225.0, :beat 0.45},
     :expected
     {:model-digest
-     "a2f63fdc07baac5de92d5072c79382d01cccec1e866e52fdb5b9e6cef58a1c68",
+     "a5d4dabe2ad25e2b238f6a69b3f527d6d248c9cd82bdf2348647ba4404424d1b",
      :output-digest
      "f637103cc1fb9cd6cf04d534aa1daa0c55f3fa0c5f5f65c10b0e6858dcd13f59",
      :instances
@@ -1219,7 +1219,7 @@
     :clock {:time-ms 250.0, :beat 0.5},
     :expected
     {:model-digest
-     "a3cab902d913797271d0bee0a9491b0b5d9040a870aea8979ec9e08898acf89b",
+     "a1c61e8747febdc5ad8be3f9a35deadf8ad341ac660b100ea93bd7141cc5ff5a",
      :output-digest
      "be2a3ee99fa65a2c4b691444bee57b6b3c2ec42f63b6b9a9d00b8dc9d33c7fd2",
      :instances
@@ -1276,7 +1276,7 @@
      :value 0.5},
     :expected
     {:model-digest
-     "67813b2f7ac9de6799e070fe6dc5b1d3ce8f850b6162b780edd68bac5477da08",
+     "9692ebbc9789ae0465483e2e33c96a099bfc44b2e05d4e042049459d073651fc",
      :output-digest
      "be2a3ee99fa65a2c4b691444bee57b6b3c2ec42f63b6b9a9d00b8dc9d33c7fd2",
      :instances
@@ -1328,7 +1328,7 @@
     :clock {:time-ms 300.0, :beat 0.6},
     :expected
     {:model-digest
-     "c3cafd8950dfae25f5c3cffbd005685ac1baddca23aea01302d773302c0ba8a0",
+     "aae11746cbda16eff1c3e5a4218936d9bf149b08a64ada6ae1163149d7051080",
      :output-digest
      "18bd7737bbd267700609ab94f507d1f2b5c0dc0e903b070daa6e5cb59c3ad8a7",
      :instances
@@ -1385,7 +1385,7 @@
      :value true},
     :expected
     {:model-digest
-     "00c3d1143dabfa601ecae4bce4d4a236f46da97800c54b0715615a2116be108e",
+     "c9bee0f8c43366a60024e3f758f35216c19ead02099a1eb8fddcab14ebd90148",
      :output-digest
      "18bd7737bbd267700609ab94f507d1f2b5c0dc0e903b070daa6e5cb59c3ad8a7",
      :instances
@@ -1437,7 +1437,7 @@
     :clock {:time-ms 350.0, :beat 0.7},
     :expected
     {:model-digest
-     "50ffd1a87ada0a2b963cabad723e15cd9e22f4435d68975b6e9a0791a9434818",
+     "f901d01798e0937b789bb590b3b5ad7fd7169e7d123fc99cdc2bb70849553c7b",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances
@@ -1494,7 +1494,7 @@
      :time-ms 400.0},
     :expected
     {:model-digest
-     "2f7e020f0c1e1ff0ee02003e6e07eaf868672b5f4e26d858bfc9ad9614751ac2",
+     "f8073d9e3b8eba55e8905eb982a072f3af280e4d1d75875c60b2825f336807d5",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances {},
@@ -1516,7 +1516,7 @@
      :time-ms 400.0},
     :expected
     {:model-digest
-     "2f7e020f0c1e1ff0ee02003e6e07eaf868672b5f4e26d858bfc9ad9614751ac2",
+     "f8073d9e3b8eba55e8905eb982a072f3af280e4d1d75875c60b2825f336807d5",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances {},
@@ -1535,7 +1535,7 @@
     :clock {:time-ms 400.0, :beat 0.8},
     :expected
     {:model-digest
-     "b9c84800e419a610682ff2fad9a2c2290a931e08fd15cea0c3e138935a435c72",
+     "afd0834579634ef4492ad120e49e39a4bf6216d560b0fc6689942f83fcf9b57f",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances {},
@@ -1550,7 +1550,7 @@
      :value false},
     :expected
     {:model-digest
-     "0911242a03ddae91e00514d6fc606d1608313bd97f4d73347711e7ba526d3d3b",
+     "2aae54888ded2062e98e7358977d6d1f9d8cbc290622622b3c376c9b26395119",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances {},
@@ -1574,7 +1574,7 @@
     :clock {:time-ms 450.0, :beat 0.9},
     :expected
     {:model-digest
-     "c7281f38fff65f0a39b8c3bd84fd91c4ee9b28f18b2862b4fd94de805b71d25e",
+     "05f6629d3f0613d9ce2335d896b3af932c81d48748e5ab6e9012c00f7e2fbf3d",
      :output-digest
      "0bb24c3df9d0a15ace270be54095ebd5007f0c148b3198c1c846f1a8b1fd5acc",
      :instances
@@ -1638,7 +1638,7 @@
     :clock {:time-ms 450.0, :beat 0.9},
     :expected
     {:model-digest
-     "f7d3eb6f4bee03b5db87ff1c23f211288a1eefa7eb5c40a4fd96a74bf8a94b3e",
+     "9551eea77b55c562b228b84f77d0ef7404936b4af790d662114c0c74ad3c5eef",
      :output-digest
      "b629de865dceb439ac0a96a9c52834c209f21268a181977cc9b3d6f5072b187c",
      :instances
@@ -1661,7 +1661,7 @@
     :clock {:time-ms 575.0, :beat 1.15},
     :expected
     {:model-digest
-     "b081cc61028f40c7c40bec11634feb6dd989f44ecfd3ca55cfc0672e886925a0",
+     "7652265798b134cc6fe9d9a7b8a9c8771100fb993ce49a10f1a0c5700344f407",
      :output-digest
      "f230021b873df8c8c04bfaee57fcb1d3a35eb6fc110e375b02c1b58d0c8ec81a",
      :instances
@@ -1689,7 +1689,7 @@
     :clock {:time-ms 600.0, :beat 1.2},
     :expected
     {:model-digest
-     "641f77e0fda1db87b73f050774053af05bb2a81cd8daa45c7fa98516434bf840",
+     "3b57dda5ccdd9bf3421aaed899b8f4fe7eef0dcb275c7a86083af943b3df503a",
      :output-digest
      "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
      :instances {},
@@ -1708,7 +1708,7 @@
      :time-ms 600.0},
     :expected
     {:model-digest
-     "79a297e84717728c6a1943ac3bbc2ca2d2cc152c2b5114d301c1e3f398d23c96",
+     "7551d76623ed803767292f403705f7743007c641fce35a0906435fc94ff5047b",
      :output-digest
      "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
      :instances
@@ -1769,7 +1769,7 @@
     :clock {:time-ms 620.0, :beat 1.24},
     :expected
     {:model-digest
-     "35f277278dbfe70152e43b0fee0716d8de5411575504f2aa69297525849fa66c",
+     "4aae0275077852a2ef7f34725c9579a61e3980636175313d70b2c9415f06a898",
      :output-digest
      "246c25fd16645af2c04d4c9d90080ff526b0c5f12a1ec4f506b710bb255be791",
      :instances
@@ -1844,7 +1844,7 @@
     :clock {:time-ms 620.0, :beat 1.24},
     :expected
     {:model-digest
-     "4053fcb32543b7e07c84477b777fd35d28e443018b690904fb26ea56e1483c5d",
+     "87e139436f282e22ca60a76c1d1714d65783fd180580c2f284f0c7f34fa02aec",
      :output-digest
      "009da97fecf99e8183e89915c20842836e080bf5e711d34d12ef1a0d6c73ea2f",
      :instances
@@ -1880,7 +1880,7 @@
     :clock {:time-ms 720.0, :beat 1.44},
     :expected
     {:model-digest
-     "6433e2a2da08de6845860ca383618692e68a49078666a707f762a1eff1ad4e16",
+     "f0c270c56cde59a531284ecdd9eec69fd2dbc19bd68d9b39f9e41d0de746ac69",
      :output-digest
      "11973271a8536af7b8d05dd283d76f592988aec751b11c674bba7a08130c4e14",
      :instances

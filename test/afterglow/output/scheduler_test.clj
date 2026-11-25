@@ -6,14 +6,70 @@
             [afterglow.output.scheduler :as scheduler]))
 
 (def fixtures [{:id :pixel :universe 0 :address 1 :channels {:red 1 :green 2 :blue 3}}])
+
 (def patch (delay (render/compile-patch fixtures)))
+
 (defn- bytes-copy [universes]
   (into {} (map (fn [[u data]] [u (mapv #(bit-and (int %) 255) data)])) universes))
+
 (defn- capture [physical sent]
   (scheduler/create {:now-ms #(deref physical)
                      :send! (fn [universes id] (swap! sent conj {:id id :bytes (bytes-copy universes)}))}))
+
 (defn- frame [r g b]
   {:universes {0 (byte-array (concat (map unchecked-byte [r g b]) (repeat 509 0)))}})
+
+(deftest buffered-tracking-cuts-keep-rejected-emission-dark-between-exact-endpoints
+  (let [floor {:id :floor :point [0 0 0] :normal [0 1 0] :size [20 20]}
+        head (fn [id x address channels]
+               {:id id :position [x 3 0] :beam-angle 20 :lens-radius-m 0.1 :universe 1
+                :address address :channels (merge {:pan [1 2] :tilt [3 4]} channels)})
+        patch (render/compile-patch
+                [(head :lead 0 1 {:red 5}) (head :first 1 12 {:red 5})
+                 (head :second 2 503 {:red {:offset 5 :presentation :hold}
+                                      :dimmer {:offset 10 :fine-offset 11 :inverted-from 0 :presentation :hold}})
+                 (head :downstream 3 34 {:amber 5})
+                 {:id :wash :universe 1 :address 100 :channels {:dimmer 1}}])
+        first-link {:leader :lead :follower :first :surface floor :along [1 0 0]}
+        second-link (assoc first-link :follower :second)
+        downstream (assoc first-link :leader :second :follower :downstream)
+        assign (fn [id attribute value] {:target-id id :attribute attribute :value value})
+        options {:mode :buffered-interpolation :period-ms 25 :latency-ms 50}
+        run (fn [rich?]
+              (let [clock (atom 0) sent (atom []) owner (capture clock sent)]
+                (try
+                  (let [frames (mapv (fn [[time red wash conflict?]]
+                                       (reset! clock time)
+                                       (let [rows [(assign :lead :aim [0 0 0])
+                                                   (assign :lead :red 1.0) (assign :first :red 1.0)
+                                                   (assign :second :aim [4.0 0 0]) (assign :second :red red)
+                                                   (assign :second :dimmer 1.0) (assign :downstream :amber 1.0)
+                                                   (assign :wash :dimmer wash)]
+                                             links (if conflict? [first-link second-link downstream] [first-link downstream])
+                                             token (scheduler/begin-frame! owner 0 patch options false)
+                                             out (render/resolve-frame patch rows {:edge-tracking links :include-values? rich?
+                                                                                   :compact-values? (not rich?)})]
+                                         (is (true? (scheduler/complete! owner token out)))
+                                         out))
+                                     [[0 1.0 0.0 false] [25 0.5 0.4 true] [50 0.25 1.0 false]])]
+                    (is (= [[nil nil] [nil :overlap :leader-suppressed] [nil nil]]
+                           (mapv #(mapv :reason (:edge-tracking %)) frames)))
+                    (doseq [at [50 62.5 75 87.5 100]]
+                      (reset! clock at)
+                      (scheduler/publish! owner))
+                    (is (= (mapv #(bytes-copy (:universes %)) frames)
+                           (mapv #(get-in @sent [% :bytes]) [0 2 4])))
+                    (mapv :bytes @sent))
+                  (finally (scheduler/close! owner)))))]
+    (let [rich (run true) compact (run false)
+          lanes (fn [universes] (mapv #(get-in universes %) [[1 506] [1 511] [2 0] [1 37] [1 99]]))]
+      (is (= rich compact))
+      (is (= [[255 0 0 255 0]
+              [128 255 255 0 51]
+              [128 255 255 0 102]
+              [128 255 255 0 179]
+              [64 0 0 255 255]]
+             (mapv lanes rich))))))
 
 (deftest deadline-fallback-is-independent-from-completion-and-preserves-original-time
   (let [physical (atom 0) sent (atom []) owner (capture physical sent)
@@ -89,6 +145,69 @@
     (is (= [[196 128] [32 0] [196 128]] @sent))
     (scheduler/close! owner)))
 
+(deftest idle-blackout-and-reopen-use-physical-emission-darkness
+  (let [patch (render/compile-patch
+                [{:id :head :universe 3 :address 503
+                  :channels {:dimmer {:offset 1 :inverted-from 0}
+                             :red {:offset 2 :inverted-from 0}
+                             :blue {:offset 3 :inverted-from 32}
+                             :pan {:offset 4 :inverted-from 0}
+                             :fan {:offset 5 :inverted-from 0}
+                             :amber {:offset 10 :fine-offset 11 :inverted-from 0}
+                             :uv {:offset 12 :fine-offset 523 :inverted-from 2.5}
+                             :white {:offset 14 :fine-offset 15 :inverted-from 0 :functions {:white [0 255]}}}}
+                 {:id :lamp :universe 5 :address 512
+                  :channels {:dimmer {:offset 1 :fine-offset 2 :inverted-from 1E-400M}
+                             :fan {:offset 3 :inverted-from 0}}}
+                 {:id :partial :universe 5 :address 8
+                  :channels {:dimmer {:offset 1 :inverted-from 32}}}])
+        emission-slots [[3 502] [3 503] [3 504] [3 511] [4 0] [4 1] [5 0] [4 3] [4 4] [5 511] [6 0] [5 7]]
+        mechanical-slots [[3 505] [3 506] [6 1]]
+        dark [255 255 0 255 255 0 0 255 0 255 255 0]
+        select-bytes (fn [packet slots] (mapv #(get-in packet %) slots))
+        physical (atom 0) sent (atom []) owner (capture physical sent)
+        begin! (fn [dark?] (scheduler/begin-frame! owner 0 patch {} dark?))
+        sent-bytes (fn [slots] (select-bytes (:bytes (peek @sent)) slots))
+        assignments [{:target-id :head :attribute :dimmer :value 1.0}
+                     {:target-id :head :attribute :red :value 1.0}
+                     {:target-id :head :attribute :pan :value 0.25}
+                     {:target-id :head :attribute :fan :value 0.5}
+                     {:target-id :lamp :attribute :fan :value 0.5}
+                     {:target-id :lamp :attribute :dimmer :value 1.0}]
+        live (render/resolve-frame patch assignments)]
+    (try
+      (let [shutdown (render/idle-universes patch)
+            bytes (bytes-copy shutdown)]
+        (is (= dark (select-bytes bytes emission-slots)))
+        (is (= [0 0 0] (select-bytes bytes mechanical-slots)))
+        (aset-byte ^bytes (shutdown 3) 502 (byte 23))
+        (is (= bytes (bytes-copy (render/idle-universes patch)))))
+      (doseq [options [{:include-values? true} {:include-values? false :compact-values? true}]]
+        (let [blackout (render/resolve-frame patch assignments (assoc options :blackout? true))
+              bytes (bytes-copy (:universes blackout))]
+          (is (= dark (select-bytes bytes emission-slots)))
+          (is (= [191 128 128] (select-bytes bytes mechanical-slots)))))
+      (let [first-token (begin! false)]
+        (is (get-in (scheduler/publish! owner) [:presentation :waiting?]))
+        (is (= dark (sent-bytes emission-slots)))
+        (is (true? (scheduler/complete! owner first-token live)))
+        (scheduler/publish! owner)
+        (is (= (bytes-copy (:universes live)) (:bytes (peek @sent))))
+        (reset! physical 25)
+        (begin! true)
+        (is (get-in (scheduler/publish! owner) [:presentation :blackout?]))
+        (is (= dark (sent-bytes emission-slots)))
+        (is (= [0 0 0] (sent-bytes mechanical-slots)))
+        (reset! physical 50)
+        (let [reopened (begin! false)]
+          (is (nil? (scheduler/complete! owner first-token live)))
+          (is (get-in (scheduler/publish! owner) [:presentation :waiting?]))
+          (is (= dark (sent-bytes emission-slots)))
+          (is (true? (scheduler/complete! owner reopened live)))
+          (scheduler/publish! owner)
+          (is (= (bytes-copy (:universes live)) (:bytes (peek @sent))))))
+      (finally (scheduler/close! owner)))))
+
 
 (deftest retired-pumps-hold-off-until-a-new-fixture-claims-the-slot
   (let [fog {:id :fog :universe 3 :address 512 :channels {:fog [1 2]}
@@ -112,6 +231,37 @@
           packet (retirement/include-retired plan (render/idle-universes claimed))]
       (is (zero? (physical packet [3 511])))
       (is (zero? (physical packet [4 0]))))))
+
+(deftest retired-inverted-light-stays-off-until-addresses-are-reused
+  (let [lamp {:id :lamp :universe 3 :address 512
+              :channels {:dimmer {:offset 1 :fine-offset 2 :inverted-from 0}}}
+        survivor {:id :survivor :universe 3 :address 7 :channels {:dimmer 1}}
+        old (render/compile-patch [lamp survivor])
+        next (render/compile-patch [survivor])
+        plan (retirement/plan nil old next)
+        raw (:universes (render/resolve-frame next [{:target-id :survivor :attribute :dimmer :value 0.25}]))
+        delivery (fn [] (retirement/include-retired plan raw))
+        lanes (fn [universes]
+                (let [bytes (bytes-copy universes)]
+                  (mapv #(get-in bytes %) [[3 6] [3 511] [4 0]])))]
+    (is (= [64 255 255] (lanes (delivery))))
+    (is (= [64 0 nil] (lanes raw)))
+    (let [packet (delivery)]
+      (aset-byte ^bytes (get packet 3) 511 (byte 23))
+      (aset-byte ^bytes (get packet 4) 0 (byte 23))
+      (is (= [64 255 255] (lanes (delivery)))))
+    (let [fixture {:id :replacement :universe 3 :address 511 :footprint 3 :channels {:pan 1}}
+          patched (render/compile-patch [survivor fixture])
+          retired (retirement/plan plan next patched)]
+      (is (= [0 0 0] (lanes (retirement/include-retired retired (render/idle-universes patched))))))
+    (let [patched (render/compile-patch [survivor (assoc lamp :id :replacement :channels {:dimmer 1})])
+          retired (retirement/plan plan next patched)
+          active (:universes (render/resolve-frame patched [{:target-id :replacement :attribute :dimmer :value 0.5}]))]
+      (is (= [0 128 255] (lanes (retirement/include-retired retired active)))))
+    (let [patched (render/compile-patch [survivor (assoc lamp :id :replacement :channels {:dimmer [1 2]})])
+          retired (retirement/plan plan next patched)
+          active (:universes (render/resolve-frame patched [{:target-id :replacement :attribute :dimmer :value 0.5}]))]
+      (is (= [0 128 0] (lanes (retirement/include-retired retired active)))))))
 
 (deftest gate-transition-waits-for-a-sending-frame-and-fences-its-completion
   (let [sending (promise) release (promise) changing (promise) output (atom [])
@@ -207,6 +357,35 @@
           (is (pos? (get-in (scheduler/status owner) [:render-timing :skipped]))))
         (finally (scheduler/close! owner))))))
 
+(deftest a-late-successful-handoff-can-send-in-the-next-unexpired-slot
+  (let [clock (atom 0.0)
+        next-call (atom nil)
+        sent (atom [])
+        owner (scheduler/create {:now-ms #(deref clock)
+                                 :send! (fn [_ _]
+                                          (swap! sent conj @clock)
+                                          (swap! clock + 1.0))})]
+    (try
+      (with-redefs [scheduler/at! (fn [_ _ due callback] (reset! next-call [due callback]))]
+        (scheduler/complete! owner (scheduler/begin-frame! owner 1 @patch {} false) (frame 90 0 0))
+        (scheduler/start! owner 25)
+        (is (== 25 (first @next-call)))
+        (reset! clock 44.0)
+        ((second @next-call))
+        (is (== 57.5 (first @next-call)))
+        (reset! clock 50.0)
+        ((second @next-call))
+        (is (= [44.0] @sent))
+        (is (== 57.5 (first @next-call)))
+        (reset! clock 57.5)
+        ((second @next-call))
+        (is (= [44.0 57.5] @sent))
+        (is (= {:slot 2 :deadline-ms 50.0 :sent-at-ms 57.5}
+               (select-keys (:output-timing (scheduler/status owner)) [:slot :deadline-ms :sent-at-ms])))
+        (is (zero? (:skipped-output-slots (scheduler/status owner))))
+        (is (== 75 (first @next-call))))
+      (finally (scheduler/close! owner)))))
+
 (deftest blocked-wire-resumes-on-a-future-slot-with-a-single-send
   (let [clock (atom 0.0) next-call (atom nil) started (atom [])
         owner (scheduler/create {:now-ms #(deref clock)
@@ -261,7 +440,7 @@
         (reset! clock 25.0)
         ((second @next-call))
         (is (== 48 (get-in (scheduler/status owner) [:output-timing :sent-at-ms])))
-        (is (== 75 (first @next-call)) "A send at 50 ms would bunch two real sink invocations"))
+        (is (== 60.5 (first @next-call)) "The spacing guard starts from the actual handoff at 48 ms"))
       (finally (scheduler/close! owner)))))
 
 (deftest packing-past-a-slot-cannot-introduce-an-expired-source
@@ -393,6 +572,44 @@
       (is (= [:first-patch :next-patch [:next-patch true]] @contexts))
       (finally (scheduler/close! owner)))))
 
+(deftest a-successful-safety-send-records-its-current-output-patch
+  (let [initial @patch
+        replacement (render/compile-patch [(assoc (first fixtures) :address 5)])
+        clock (atom 0) stall? (atom false) receipts (atom [])
+        address (fn [compiled] (get-in compiled [:fixtures 0 :address]))
+        owner (scheduler/create
+                {:now-ms #(deref clock)
+                 :send! (fn [_ _])
+                 :prepare-output (fn [buffers _]
+                                   (when @stall? (swap! clock + 26))
+                                   buffers)
+                 :prepare-safety-output
+                 (fn [buffers {:keys [output-context wire-patch generation stale-source?]}]
+                   (swap! receipts conj [(address wire-patch) (address output-context) generation stale-source?])
+                   (if (= wire-patch output-context) buffers (render/idle-universes output-context)))})
+        begin! (fn [epoch patch]
+                 (scheduler/begin-frame! owner epoch patch {} false {:output-context patch}))
+        publish! (fn [time]
+                   (reset! clock time)
+                   (scheduler/publish! owner time))]
+    (try
+      (let [token (begin! 0 initial)]
+        (is (true? (scheduler/complete! owner token (frame 180 0 0))))
+        (publish! 25)
+        (reset! stall? true)
+        (let [new-epoch (begin! 1 initial)]
+          (is (> (:generation new-epoch) (:generation token)))
+          (is (:safety-output? (publish! 50))))
+        (let [new-patch (begin! 1 replacement)]
+          (is (> (:generation new-patch) (:generation token)))
+          (is (:safety-output? (publish! 100))))
+        (is (:safety-output? (publish! 150)))
+        (is (= [[1 1 (:generation token) true]
+                [1 5 (:generation token) true]
+                [5 5 (:generation token) true]]
+               @receipts)))
+      (finally (scheduler/close! owner)))))
+
 (deftest a-buffered-sample-can-survive-packet-packing-in-an-earlier-slot
   (let [clock (atom 0) sent (atom []) owner (capture clock sent)
         pack presentation/materialize
@@ -501,7 +718,7 @@
         (reset! clock 75)
         ((second @next-call))
         (is (= [[2 90]] @sent))
-        (is (== 125 (first @next-call)) "A 100 ms callback could be only ten ms after the last entry"))
+        (is (== 102.5 (first @next-call)) "The next wake respects half a period after the successful handoff"))
       (finally (scheduler/close! owner)))))
 
 (deftest failed-handoff-spaces-the-next-send-even-after-partial-delivery

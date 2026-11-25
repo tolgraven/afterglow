@@ -3,10 +3,15 @@
             [clojure.test :refer [deftest is testing]]))
 
 (def floor {:id :floor :point [0 0 0] :normal [0 1 0]})
+
 (def source {:position [0 5 0] :direction [0 -1 0] :beam-angle 30})
+
 (defn- near? [a b] (< (abs (- a b)) 1.0e-8))
+
 (defn- dot [a b] (reduce + (map * a b)))
+
 (defn- distance [a b] (let [v (mapv - a b)] (Math/sqrt (dot v v))))
+
 (defn- at-edge? [{:keys [center major-axis minor-axis major-radius-m minor-radius-m]} p]
   (let [delta (mapv - p center)
         u (/ (dot delta major-axis) major-radius-m)
@@ -88,3 +93,17 @@
     (is (nil? (optics/edge-aim leader follower surface (:normal surface))))
     (is (nil? (optics/edge-aim (assoc leader :clipped? true) follower surface along)))
     (is (nil? (optics/edge-aim leader follower (assoc surface :size [0.1 0.1]) along)))))
+
+(deftest overlap-distinguishes-crossing-ellipses-from-touching-or-separated-spots
+  (let [spot {:surface-id :floor :center [0 0 0] :major-axis [1 0 0] :minor-axis [0 0 1]
+              :major-radius-m 5 :minor-radius-m 0.2}
+        parallel (fn [z] (assoc spot :center [0 0 z]))
+        crossed (fn [x] (assoc spot :center [x 0 0] :major-axis [0 0 1] :minor-axis [-1 0 0]))]
+    (is (optics/footprints-overlap? spot spot))
+    (is (optics/footprints-overlap? spot (parallel 0.399)))
+    (is (not (optics/footprints-overlap? spot (parallel 0.4))))
+    (is (not (optics/footprints-overlap? spot (parallel 0.401))))
+    (is (optics/footprints-overlap? spot (crossed 5.19)))
+    (is (optics/footprints-overlap? (crossed 5.19) spot))
+    (is (not (optics/footprints-overlap? spot (crossed 5.2))))
+    (is (not (optics/footprints-overlap? spot (assoc spot :surface-id :other))))))

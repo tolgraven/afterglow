@@ -5,31 +5,39 @@
             [clojure.test :refer [deftest is]]))
 
 (def floor {:id :floor :point [0 0 0] :normal [0 1 0] :size [40 40]})
+
 (def links [{:leader :one :follower :two :surface floor :along [1 0 0]}
             {:leader :two :follower :three :surface floor :along [1 0 0]}])
+
 (def heads (mapv (fn [id x address angle]
                    {:id id :position [x 3 -1] :beam-angle angle :lens-radius-m 0.1
                     :universe 1 :address address :channels {:pan [1 2] :tilt [3 4] :red 5 :green 6 :blue 7}})
                  [:one :two :three] [-2 1 4] [510 518 526] [25 22 19]))
+
 ;; Express fixture addresses within their own universe even when a coarse/fine
 ;; pair or the fixture as a whole crosses a boundary.
 (def rig (mapv (fn [f] (if (> (:address f) 512)
                          (-> f (update :address - 512) (update :universe inc)) f)) heads))
+
 (defn- assign [id key value] {:target-id id :attribute key :value value})
+
 (defn- authored [x]
   (into [(assign :one :aim [(- x 1.0) 0.0 1.0])
          (assoc (assign :one :aim [(+ x 1.0) 0.0 1.0]) :opacity 0.5)]
         (for [f rig] (assign (:id f) :color [1.0 0.4 0.2]))))
+
 (defn- spots [patch rows]
   (mapv (fn [f]
           (let [row (get rows (:id f))
                 beam (optics/fixture-beam f (assoc row :pose (frame/fixture-pose f row)))]
             (optics/beam-footprint beam floor))) (:fixtures patch)))
+
 (defn- x-extents [spot]
   (let [x (first (:center spot))
         width (Math/hypot (* (:major-radius-m spot) (first (:major-axis spot)))
                           (* (:minor-radius-m spot) (first (:minor-axis spot))))]
     [(- x width) (+ x width)]))
+
 (defn- near [a b] (< (abs (- a b)) 1.0e-8))
 
 (deftest chains-track-actual-post-blend-movement-every-frame
@@ -89,3 +97,76 @@
     (is (false? (get-in result [:values :one :aim-reachable?])))
     (is (> (abs (- 2.0 (first (:hit a)))) 1))
     (is (near (second (x-extents a)) (first (x-extents b))))))
+
+(defn- collision-head [i id]
+  {:id id :position [i 3 0] :beam-angle 20 :lens-radius-m 0.1
+   :universe 1 :address (+ 1 (* i 11)) :channels (:channels (first rig))})
+
+(def collision-rig (mapv collision-head (range) [:one :two :three :four]))
+
+(defn- collision-assignments [third-x]
+  (into [(assign :one :aim [0 0 0]) (assign :three :aim [third-x 0 0])]
+        (map #(assign (:id %) :color [1.0 0.4 0.2]))
+        collision-rig))
+
+(deftest later-followers-yield-when-their-spots-overlap
+  (let [leader (first links)
+        sibling (assoc leader :follower :three)
+        dependent (assoc leader :leader :three :follower :four)
+        parallel-plane (assoc floor :id :platform :point [0 0.5 0])]
+    (doseq [rich? [true false]]
+      (let [options {:include-values? rich? :compact-values? (not rich?)}
+            run (fn [links] (frame/resolve-frame collision-rig (collision-assignments 2)
+                                               (assoc options :edge-tracking links)))
+            conflict (run [leader sibling dependent])
+            reversed (run [sibling leader])
+            separate (run [leader (assoc sibling :surface parallel-plane)])
+            red (fn [frame] (mapv #(bit-and 255 (aget ^bytes (get-in frame [:universes 1]) %))
+                                  [4 15 26 37]))]
+        (is (= [nil :overlap :leader-suppressed] (mapv :reason (:edge-tracking conflict))))
+        (is (= [255 255 0 0] (red conflict)))
+        (is (= [nil :overlap] (mapv :reason (:edge-tracking reversed))))
+        (is (= [255 0 255 255] (red reversed)))
+        (is (every? :contact (:edge-tracking separate)))
+        (is (= [255 255 255 255] (red separate)))))))
+
+(deftest a-moving-leader-can-clear-space-for-a-suppressed-follower
+  (let [link (first links)
+        other (assoc link :leader :three :follower :four)
+        options {:edge-tracking [link other] :compact-values? true}
+        blocked (frame/resolve-frame collision-rig (collision-assignments 1.45) options)
+        clear (frame/resolve-frame collision-rig (collision-assignments 4)
+                                  (assoc options :previous-compact (:compact blocked)))]
+    (is (= [:overlap nil] (mapv :reason (:edge-tracking blocked))))
+    (is (= [0.0 0.0 0.0] (get-in blocked [:values :two :emitted-color])))
+    (is (every? :contact (:edge-tracking clear)))
+    (is (= [1.0 0.4 0.2] (get-in clear [:values :two :emitted-color])))))
+
+(deftest a-floor-follower-reserves-space-where-it-also-leads-on-a-wall
+  (let [heads (mapv #(assoc-in % [:position 2] -2)
+                    (conj collision-rig (collision-head 4 :five)))
+        patch (frame/compile-patch heads)
+        wall {:id :wall :point [0 0 0] :normal [0 0 1] :size [40 40]}
+        floor-link (first links)
+        wall-link {:leader :two :follower :three :surface wall :along [-1 0 0]}
+        independent {:leader :four :follower :five :surface wall :along [-1 0 0]}
+        red (fn [out]
+              (mapv #(bit-and 255 (aget ^bytes (get-in out [:universes 1]) (+ (:address %) 3))) heads))]
+    (doseq [rich? [true false]]
+      (let [render (fn [x tracking]
+                     (let [input (into [(assign :one :aim [0 0 3]) (assign :four :aim [x 2 0])]
+                                       (map #(assign (:id %) :red 1.0)) heads)]
+                       (frame/resolve-frame patch input {:edge-tracking tracking :include-values? rich?
+                                                        :compact-values? (not rich?)})))
+            follower-first (render 3 [floor-link independent wall-link])
+            follower-last (render 3 [independent floor-link wall-link])
+            hits-anchor (render 2 [floor-link independent wall-link])
+            cleared (render 4 [floor-link independent wall-link])]
+        (is (= [nil :overlap nil] (mapv :reason (:edge-tracking follower-first))))
+        (is (= [255 255 255 255 0] (red follower-first)))
+        (is (= [nil :overlap :leader-suppressed] (mapv :reason (:edge-tracking follower-last))))
+        (is (= [255 0 0 255 255] (red follower-last)))
+        (is (= [:overlap nil :leader-suppressed] (mapv :reason (:edge-tracking hits-anchor))))
+        (is (= [255 0 0 255 255] (red hits-anchor)))
+        (is (every? :contact (:edge-tracking cleared)))
+        (is (= [255 255 255 255 255] (red cleared)))))))

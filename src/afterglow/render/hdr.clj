@@ -6,7 +6,9 @@
             [thi.ng.color.core :as color]))
 
 (def emitters (set (keys photometry/emitter-spectrum)))
+
 (def light-attributes (conj emitters :color :dimmer))
+
 (defn- nonnegative? [n] (and (number? n) (Double/isFinite (double n)) (not (neg? n))))
 
 (defn validate!
@@ -32,7 +34,9 @@
 ;; A lane has both a storage offset and a visible RGB basis. Only the selected
 ;; native primary/white lanes receive spill. Invisible UV never radiates a halo.
 (defrecord Lane [attribute slot tint receive])
+
 (defrecord Head [id index position rgb? extract? lamp? physical virtual shutters])
+
 (defn- lanes [attrs slots rgb?]
   (mapv (fn [attribute]
           (let [rgb (second (photometry/emitter-spectrum attribute))
@@ -286,11 +290,19 @@
       :batch (update-in block [:compiled :columns]
                         #(mapv (partial scale-column (:target-ids compiled) scale? scale) %)))))
 
+(defn contribution-gains?
+  "Whether HDR may scale ordered contributions before blending, including
+  intrinsic emission gain tags that enable HDR without explicit settings."
+  [blocks {:keys [cue-gains instance-gains]}]
+  (or (not (contains? #{nil {}} cue-gains))
+      (not (contains? #{nil {}} instance-gains))
+      (boolean (some :emission-gain blocks))))
+
 (defn apply-contribution-gains
   "Scale an owner's dimmer or its emitters exactly once, ahead of composition.
   Fresh typed buffers keep retries and captures independent."
   [blocks settings emitting?]
-  (if-not (and settings (or (seq (:cue-gains settings)) (seq (:instance-gains settings)) (some :emission-gain blocks)))
+  (if-not (and settings (contribution-gains? blocks settings))
     blocks
     (let [dimmers (dimmer-targets blocks) selected (some-> (:fixture-ids settings) set)
           applies? #(and (emitting? %) (or (nil? selected) (contains? selected %)))]

@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is testing]]))
 
 (def opts (cadence/settings {:pressure-frames 2 :recovery-frames 3 :smoothing 0.5}))
+
 (def version {:a 1 :b 1 :cheap 1 :external 1})
 
 (defn- cost [ms eligible?]

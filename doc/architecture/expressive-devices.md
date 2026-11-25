@@ -73,7 +73,8 @@ All channel numbers in these APIs are **zero based**. For example:
 
 The layout supports `:pads`, `:encoder-touches`, `:encoders`, `:buttons`,
 `:touch-strip` and `:mono-pressure`. It rejects overlapping note/CC identities
-within each message family. There is no default numeric address map.
+within each message family. Capture the physical control addresses. The
+temporary encoder modifier can use the factory Accent address described below.
 
 ```clojure
 (require '[afterglow.control.devices.push-3 :as push])
@@ -85,6 +86,29 @@ within each message family. There is no default numeric address map.
      :encoder-bindings {:level {:param :level}}
      :pressure-param :level}))
 ```
+
+Tolglow enables operator gestures on dedicated Push 3 connections. A custom
+host can use `:operator-gestures? true` with trusted command dispatch. Give the
+touch note and turn CC the same logical encoder ID. Hold Accent before touching
+the encoder. A temporary edit changes the live value while the encoder is held
+and restores the original value on encoder lift, even if Accent was released
+first. Shift controls fine adjustment. If the layout has no Shift binding, the
+profile uses a captured `:shift` button or the available factory address,
+zero-based channel 0 and CC 49. Legacy `:shift` selections and selections of a
+Shift button use the Accent default. [Physical Shift mapping](https://github.com/federico-pepe/ableton-push-hack/blob/fe358111493a04062c177bc4c8647ad8b79834e1/docs/push3-button-map.md#L179)
+
+The profile prefers a captured `:accent` button or an unbound capture at the
+factory Accent address, zero-based channel 0 and CC 57. It adds that address
+only when free and outside the MPE member channels. An address already mapped
+to another control or action keeps its existing behavior. For a conflicting
+custom layout, set `:temporary-encoder-modifier` to a dedicated captured button
+ID. This explicitly assigns that button to temporary edits. [Physical Push 3 mapping](https://github.com/federico-pepe/ableton-push-hack/blob/fe358111493a04062c177bc4c8647ad8b79834e1/docs/push3-button-map.md#L151) · [Button MIDI channel](https://github.com/danielknng/push3-protocol-docs/blob/main/docs/buttons.md#performance) · [User Port routing](https://github.com/federico-pepe/push-tethered-app/blob/5bb4be81a30989a89084617e3180365dacf0be83/docs/protocol/midi-input.md#L27-L35)
+The same setup works with configured MPE when the paired touch and turn use
+channels outside the zone's member channels. Capture both on fixed channels
+before using a temporary modifier. Virtual recordings cover the software
+path. Qualification on a physical Push 3 needs MIDI input recorded from the
+actual User port, including both edges of the modifier and the encoder touch,
+turn and lift.
 
 In Poly/Mono Aftertouch mode, pad cells follow the page's cue launch mode;
 default persistent cues toggle, held cues release their exact activation, and

@@ -5,6 +5,7 @@
   (:require [afterglow.control.codecs.midi :as midi]))
 
 (def official-source "https://www.ableton.com/en/push/manual/#user-mode")
+
 (def capabilities
   {:device :ableton/push-3 :mode :user
    :semantics-source official-source :semantics-verification :official-manual
@@ -16,6 +17,7 @@
 
 (defn- require! [condition message data]
   (when-not condition (throw (ex-info message (assoc data :type ::invalid-layout)))))
+
 (defn- int-in? [value low high] (and (integer? value) (<= low value high)))
 
 (defn signed-encoder

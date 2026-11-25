@@ -7,9 +7,11 @@
            [java.nio ByteBuffer ByteOrder]))
 
 (def device {:universe 1 :uid "1234:01020304" :sub-device 0})
+
 (defn ack [request data]
   {:response-code 0 :response-type 0 :pid (:pid request) :sub-device (:sub-device request 0)
    :command-class (if (= :set (:command request)) 1 0) :data data})
+
 (deftest request-wire-layout-and-response-correlation
   (is (= [8 1 18 8 8 180 36 21 4 3 2 1 24 0 32 240 1 42 2 0 100 48 1]
          (codec/request-body "RDMCommand" (merge device {:pid 0xf0 :command :set :data [0 100]}))))

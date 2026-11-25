@@ -11,6 +11,7 @@ an intentional, tested contract changes it.
   `lein test-pure` runs the explicit hardware-free core and transport suite.
   `lein test-parity` adds the source-parity regression namespaces.
   Use owned loopback services and capture sinks when testing.
+- Leave a blank line between adjacent top-level Clojure definitions. Run `lein check-definition-spacing` to check tracked source.
 - `runtime.clj` is the pure frame kernel; `runtime/engine.clj` advances the shared
   model and `executor.clj` owns bounded workers. The new runtime must not execute
   old effect closures through a compatibility adapter. Old source exists only

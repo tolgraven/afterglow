@@ -6,24 +6,34 @@
            [java.nio.charset StandardCharsets]))
 
 (def max-message-bytes (* 1024 1024))
+
 (def pids {:supported-parameters 0x50 :device-info 0x60 :model-description 0x80
            :manufacturer-label 0x81 :device-label 0x82 :software-label 0xc0
            :personality 0xe0 :personality-description 0xe1 :address 0xf0
            :sensor-definition 0x200 :sensor-value 0x201 :identify 0x1000})
+
 (defn fail! [message data] (throw (ex-info message (assoc data :rdm/error :invalid-data))))
+
 (defn uint? [bits n] (and (integer? n) (<= 0 n (dec (bit-shift-left 1 bits)))))
+
 (defn uid [value]
   (when-not (and (string? value) (re-matches #"[0-9a-fA-F]{4}:[0-9a-fA-F]{8}" value))
     (fail! "RDM UID must be 1234:12345678" {:uid value}))
   (str/lower-case value))
+
 (defn bytes-vector [value]
   (when-not (and (vector? value) (<= (count value) 231) (every? #(uint? 8 %) value))
     (fail! "RDM parameter data must contain 0..231 unsigned bytes" {})) value)
+
 (defn u16 [data offset]
   (+ (bit-shift-left (nth data offset) 8) (nth data (inc offset))))
+
 (defn uint16-bytes [n] [(bit-and 255 (bit-shift-right n 8)) (bit-and 255 n)])
+
 (defn- sint16 [data offset] (let [v (u16 data offset)] (if (> v 32767) (- v 65536) v)))
+
 (defn- text-bytes [s] (mapv #(bit-and 255 %) (.getBytes ^String s StandardCharsets/UTF_8)))
+
 (defn- bytes-text [data] (String. (byte-array (map unchecked-byte data)) StandardCharsets/UTF_8))
 
 (defn- varint! [^ByteArrayOutputStream out n]
@@ -68,9 +78,11 @@
           (recur k (update fields field (fnil conj []) value)))))))
 
 (defn field [fields n] (first (get fields n)))
+
 (defn- uid-fields [value]
   (let [[manufacturer device] (str/split (uid value) #":")]
     [[1 0 (Long/parseLong manufacturer 16)] [2 5 (Long/parseLong device 16)]]))
+
 (defn decode-uid [data]
   (let [m (parse-protobuf data) manufacturer (field m 1) device (field m 2)]
     (when-not (and (uint? 16 manufacturer) (uint? 32 device)) (fail! "Invalid OLA UID" {}))

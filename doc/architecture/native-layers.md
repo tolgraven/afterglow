@@ -2,7 +2,7 @@
 
 A compound cue can launch several effects into one layer by attaching
 `:native-layer` to each launch source. One run owns one layer ID. Each slot
-supplies its zero-based `:member`. The ordinary priority and launch ordering
+supplies its zero-based `:member`. The effective instance ordering
 place the complete layer at its last contributing member. Within the layer,
 members run in slot order. Multiple blocks from one member keep their original
 order, including duplicate target rows. A later overlapping sequence instance
@@ -79,6 +79,30 @@ member that only transforms an earlier result. If launched separately, the
 effect gets a layer at its ordinary priority. With `:targets :previous` and no
 explicit fixture IDs, that standalone effect applies to heads with prior
 writes in the current frame.
+
+### Reordering active instances
+
+Submit `{:op :instance/move-after :instance-id source-id :after-instance-id
+target-id :expected-revision captured-revision}` through the show owner. Use the
+instance IDs and revision captured from the committed view. The owner rejects
+stale captures and endpoints that have stopped or entered release. The accepted
+receipt contains `:instance-ids` in the new render input order. Read
+`afterglow.control.views/snapshot` or `afterglow.control.instance-order/ordered`
+to project that order in a dedicated active-cue view.
+
+A standalone instance moved across tiers takes its destination's effective
+priority. Its original priority and launch order are retained. Compound moves
+carry every member together within one tier, including any releasing members.
+The owner rejects a target compound with interleaved members because its render
+position can change as individual members contribute or finish. The optional
+`{:op :instances/shuffle :seed 42}` command shuffles running standalone slots
+inside each effective tier while keeping compound and releasing slots in place.
+
+Saved instances can carry `:render-order` and `:render-priority`. A save reader
+can use `afterglow.control.instance-order/valid-render-position?` to check that
+the rank is a nonnegative integer and that a tier override is finite and has
+an explicit rank. Retain these fields when rekeying instances into a new show
+epoch. Missing fields use the original priority and launch order.
 
 ### Overwritten packed columns
 

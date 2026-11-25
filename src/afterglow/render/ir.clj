@@ -7,6 +7,14 @@
   bar and phrase nodes use explicit captured musical transport and meter."
   (:require [clojure.string :as str]))
 
+(defrecord ^:private PartialMaxBlend [op args])
+
+(defn partial-max-blend
+  "Lower a chain blend with one reference to the previous expression.
+  Authored numeric expressions cannot construct this internal node."
+  [previous incoming amount]
+  (->PartialMaxBlend ::partial-max-blend [previous incoming amount]))
+
 (defn- invalid! [path message & [data]]
   (throw (ex-info message (merge {:type ::invalid-expression :path path :message message} data))))
 
@@ -85,7 +93,7 @@
   (let [op (:op node)
         unary? (#{:sin :cos :abs :floor :fract :sqrt :exp} op)
         arities (cond unary? #{1}
-                      (#{:clamp :mix} op) #{3}
+                      (#{:clamp :mix ::partial-max-blend} op) #{3}
                       (= :vec2 op) #{2}
                       (= :vec3 op) #{3}
                       (= :vec4 op) #{4}
@@ -98,7 +106,7 @@
                (do (when-not (every? #{:number} types)
                      (invalid! path "Vector constructors require scalar arguments")) op)
                (common-type types path))
-        _ (when (and (= :mix op) (not= :number (last types)))
+        _ (when (and (#{:mix ::partial-max-blend} op) (not= :number (last types)))
             (invalid! path "The mix fraction must be scalar"))
         exprs (mapv #(cast-expression % type) children)
         numeric-fn (case op
@@ -120,10 +128,17 @@
                               (when (> lo hi) (invalid! path "Clamp lower bound exceeds upper bound"))
                               (min hi (max lo x)))
                      :mix (fn [a b amount] (+ (* (- 1.0 amount) a) (* amount b)))
+                     ::partial-max-blend (fn [prior highest amount] (+ prior (* amount (- highest prior))))
                      nil)
-        eval-fn (fn [env]
-                  (let [values (mapv #((:evaluate %) env) children)]
-                    (checked (if numeric-fn (componentwise numeric-fn values) values) type path)))
+        eval-fn (if (= ::partial-max-blend op)
+                  (let [[previous incoming amount] (mapv :evaluate children)]
+                    (fn [env]
+                      (let [prior (previous env)
+                            highest (componentwise max [prior (incoming env)])]
+                        (checked (componentwise numeric-fn [prior highest (amount env)]) type path))))
+                  (fn [env]
+                    (let [values (mapv #((:evaluate %) env) children)]
+                      (checked (if numeric-fn (componentwise numeric-fn values) values) type path))))
         expression (case op
                      :add (fold-glsl "+" exprs false)
                      :multiply (fold-glsl "*" exprs false)
@@ -135,6 +150,8 @@
                      (:vec2 :vec3 :vec4)
                      (str (name op) "(" (str/join ", " (map :glsl children)) ")")
                      :mix (str "mix(" (first exprs) ", " (second exprs) ", " (:glsl (last children)) ")")
+                     ::partial-max-blend
+                     (str "afterglow_max_blend(" (first exprs) ", " (second exprs) ", " (:glsl (last children)) ")")
                      (str (name op) "(" (str/join ", " exprs) ")"))]
     {:type type :evaluate eval-fn :glsl expression :params (collected children)}))
 
@@ -200,6 +217,10 @@
     (:add :subtract :multiply :divide :min :max :sin :cos :abs :floor :fract
      :sqrt :exp :pow :clamp :mix :vec2 :vec3 :vec4)
     (operation node path depth)
+    ::partial-max-blend
+    (if (instance? PartialMaxBlend node)
+      (operation node path depth)
+      (invalid! (conj path :op) "Unknown expression operation" {:operation (:op node)}))
     (invalid! (conj path :op) "Unknown expression operation" {:operation (:op node)})))
 
 (defn- compile-node [expression]
@@ -334,7 +355,12 @@
               :mix (reify ScalarExpression
                      (evalDouble [_ inputs]
                        (let [x (.evalDouble a inputs), y (.evalDouble b inputs), amount (.evalDouble c inputs)]
-                         (+ (* (- 1.0 amount) x) (* amount y))))))]
+                         (+ (* (- 1.0 amount) x) (* amount y)))))
+              ::partial-max-blend
+              (reify ScalarExpression
+                (evalDouble [_ inputs]
+                  (let [x (.evalDouble a inputs), highest (max x (.evalDouble b inputs)), amount (.evalDouble c inputs)]
+                    (+ x (* amount (- highest x)))))))]
         (reify ScalarExpression
           (evalDouble [_ inputs] (finite-result (.evalDouble ^ScalarExpression operation inputs) path)))))))
 
@@ -507,6 +533,7 @@
        :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))}))))
 
 (def ^:private time-inputs {:time-ms "u_time_ms" :elapsed-ms "u_elapsed_ms"})
+
 (def ^:private numeric-contract
   {:cpu :float64 :gpu :float32 :requirements [:finite-float32-inputs :valid-operator-domains]})
 
@@ -528,6 +555,7 @@
            (= op :phrase) (assoc :bars-per-phrase "u_bars_per_phrase"))
          :surface-uv (assoc inputs :surface-uv "v_uv")
          :position (assoc inputs :position "v_position")
+         ::partial-max-blend (assoc inputs ::partial-max-blend true)
          inputs)))
    (sorted-map)
    (mapcat #(tree-seq (comp vector? :args) :args %) expressions)))
@@ -548,6 +576,12 @@
        (apply str (for [[_ {:keys [name type]}] params]
                     (str "uniform " (glsl-type type) " " name ";\n")))))
 
+(defn- shader-helpers [used]
+  (when (::partial-max-blend used)
+    (apply str (for [type ["float" "vec2" "vec3" "vec4"]]
+                 (str type " afterglow_max_blend(" type " prior, " type " incoming, float amount) {\n"
+                      "  return prior + amount * (max(prior, incoming) - prior);\n}\n")))))
+
 (defn emit-glsl
   "Generate a complete GLSL ES 3 fragment shader and binding metadata.
   CPU doubles are the reference. Inputs and valid operator domains must also
@@ -563,7 +597,8 @@
                             (str "in vec3 v_position;\n" (when mapped? "in vec2 v_uv;\n")))
         node (compile-node expression)
         uniforms (shader-uniforms [node])
-        inputs (assoc (merge used time-inputs) :position (if uv-only? "v_uv" "v_position"))
+        inputs (assoc (merge (dissoc used ::partial-max-blend) time-inputs)
+                      :position (if uv-only? "v_uv" "v_position"))
         source-expression (bind-expression node uniforms)
         result-type (:type node)
         result (case result-type
@@ -576,7 +611,8 @@
      :source (str "#version 300 es\nprecision highp float;\n"
                   "uniform float u_time_ms;\nuniform float u_elapsed_ms;\n" input-declaration
                   (uniform-declarations (dissoc inputs :position :surface-uv :elapsed-ms :time-ms) uniforms)
-                  "out vec4 fragColor;\nvoid main() {\n  " (glsl-type result-type)
+                  "out vec4 fragColor;\n" (shader-helpers used)
+                  "void main() {\n  " (glsl-type result-type)
                   " value = " source-expression ";\n  fragColor = " result ";\n}\n")})))
 
 (defn emit-glsl-batch
@@ -594,9 +630,8 @@
         used (shader-inputs (map val ordered))
         mapped? (contains? used :surface-uv)
         chart? (and mapped? surface-uv?)
-        inputs (if (and mapped? (not chart?))
-                 (-> used (dissoc :surface-uv) (assoc :position "v_position"))
-                 used)
+        inputs (cond-> (dissoc used ::partial-max-blend)
+                 (and mapped? (not chart?)) (-> (dissoc :surface-uv) (assoc :position "v_position")))
         uniforms (shader-uniforms nodes)
         fields (mapv (fn [index [attribute _] {:keys [type]}]
                        {:attribute attribute :type type :components (width type)
@@ -614,5 +649,5 @@
                   "layout(location = 0) in vec3 v_position;\n"
                   (when mapped? (if chart? "layout(location = 1) in vec2 v_uv;\n" "#define v_uv v_position.xy\n"))
                   (uniform-declarations (dissoc inputs :position :surface-uv) uniforms)
-                  (apply str declarations) "void main() {\n" (apply str assignments)
+                  (apply str declarations) (shader-helpers used) "void main() {\n" (apply str assignments)
                   "  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n")})))

@@ -17,9 +17,10 @@
   Optional prepare-output receives those arrays and the source metadata and
   returns the final universe map before deadline admission. Optional
   prepare-safety-output receives a private copy of the last successfully sent
-  arrays, or current idle arrays if the initial send threw. Its metadata adds
-  :stale-source? and :uncertain? (a handoff may have sent some universes before
-  throwing). Return nil or the corrected buffers.
+  arrays, or current idle arrays if the initial send threw. Its metadata includes
+  :wire-patch from the last complete send, :stale-source? for an older source
+  generation, and :uncertain? for a possible partial send. Return nil or corrected
+  buffers using the current gate's patch.
 
   For time-bounded safety state, optional output-valid-until-ms receives the
   preparation metadata and monotonic time immediately before preparation. It
@@ -157,7 +158,7 @@
   (update-vals universes (fn [^bytes buffer] (aclone buffer))))
 
 (defn- wire-snapshot [packet output]
-  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms :generation :safety-state])
+  (assoc (select-keys packet [:frame-id :time-ms :inputs-at-ms :generation :safety-state :wire-patch])
          :universes (copy-buffers output)))
 
 (defn- handoff! [owner packet output snapshot started]
@@ -194,20 +195,22 @@
 (defn- send-safety-output! [owner gate]
   (let [{:keys [last-sent uncertain?]} (some-> (:wire owner) deref)]
     (when (or last-sent uncertain?)
-      (let [source (if last-sent (dissoc last-sent :universes)
+      (let [source (if last-sent (dissoc last-sent :universes :wire-patch)
                        {:frame-id 0 :generation (:generation gate)})
-            context (preparation-context gate (assoc source :uncertain? (boolean uncertain?)
+            context (preparation-context gate (assoc source :wire-patch (:wire-patch last-sent)
+                                                           :uncertain? (boolean uncertain?)
                                                            :stale-source? (not= (:generation gate) (:generation source))))
+            output-source (assoc source :wire-patch (get-in gate [:key 1]))
             prepare! (fn []
                        (let [buffers (if last-sent (copy-buffers (:universes last-sent))
                                          (:universes (policy/materialize {:universes (get-in gate [:plan :idle-universes])})))]
                          ((:prepare-safety-output owner) buffers context)))]
-        (when-let [sent (prepare-and-handoff! owner source source context prepare! nil)]
+        (when-let [sent (prepare-and-handoff! owner source output-source context prepare! nil)]
           (assoc sent :safety-output? true))))))
 
 (defn- send-packet! [owner gate packet expires-at]
   (if (:send! owner)
-    (let [source (assoc packet :generation (:generation gate))
+    (let [source (assoc packet :generation (:generation gate) :wire-patch (get-in gate [:key 1]))
           context (preparation-context gate (select-keys packet [:frame-id :safety-state]))
           prepare! (fn []
                      (let [{:keys [universes]} (policy/materialize packet)]
@@ -333,25 +336,32 @@
     timing))
 
 (defn- start-publications! [owner executor grid]
-  (let [now (:now-ms owner)]
-    (letfn [(queue-slot [wanted previous]
-              (at! owner executor (timeline/deadline grid wanted) #(wake wanted previous)))
-            (wake [wanted previous]
+  (let [now (:now-ms owner)
+        half-period (/ (:period-ms grid) 2.0)]
+    (letfn [(queue-slot [wanted previous earliest]
+              (at! owner executor (max (timeline/deadline grid wanted) earliest)
+                   #(wake wanted previous earliest)))
+            (wake [wanted previous earliest]
               ;; Repatch and blackout share this gate. Select the eligible slot
               ;; after any wait for them, so a stalled wake cannot send old work.
               (locking (:lock owner)
                 (let [started (now) slot (timeline/slot-at grid started)]
-                  (if (< slot wanted)
-                    (queue-slot wanted previous)
+                  (if (or (< slot wanted) (< started earliest))
+                    (queue-slot wanted previous earliest)
                     (let [timing (send-slot! owner grid slot previous started)
-                          ;; A thread can be preempted between checking the clock and
-                          ;; entering the sink. It can also send part of a frame
-                          ;; before throwing. Space from either completion.
                           handed-off (or (:sent-by-ms timing)
                                          (when (:failed? timing) (:finished-at-ms timing))
-                                         started)]
-                      (queue-slot (timeline/next-output-slot grid slot handed-off (now)) slot))))))]
-      (queue-slot 1 0))))
+                                         started)
+                          finished (now)
+                          complete? (and (:sent-by-ms timing) (not (:expired-before-send? timing)))
+                          ;; A completed handoff may recover the next nominal
+                          ;; slot after the spacing guard opens. Retain the
+                          ;; conservative grid wake for failed or expired sends.
+                          next-slot (if complete?
+                                      (max (inc slot) (inc (timeline/slot-at grid finished)))
+                                      (timeline/next-output-slot grid slot handed-off finished))]
+                      (queue-slot next-slot slot (+ handed-off half-period)))))))]
+      (queue-slot 1 0 (timeline/deadline grid 1)))))
 
 (defn- render-slot! [owner render! ticket started]
   (try (render! (assoc ticket :started-at-ms started))

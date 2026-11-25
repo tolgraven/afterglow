@@ -10,12 +10,19 @@
 (deftype PackedChannel [^long coarseUniverse ^long coarseIndex ^long fineUniverse ^long fineIndex ^boolean inverted ^boolean fade])
 
 (def ^:private emitters (set (keys photometry/emitter-spectrum)))
-(def ^:private continuous (into emitters #{:dimmer :pan :tilt :focus :zoom}))
+
+(def ^:private emission-attributes (conj emitters :dimmer))
+
+(def ^:private continuous (into emission-attributes #{:pan :tilt :focus :zoom}))
 
 (defn- fail! [message data] (throw (ex-info message (assoc data :type ::invalid-presentation))))
+
 (defn- finite? [x] (and (number? x) (Double/isFinite (double x))))
+
 (defn- natural? [x] (and (integer? x) (<= 0 x Long/MAX_VALUE)))
+
 (defn- nonnegative? [x] (and (finite? x) (<= 0 x)))
+
 (defn- unit [x] (max 0.0 (min 1.0 (double x))))
 
 (defn- linear-channel? [attribute channel]
@@ -52,9 +59,10 @@
            (:fixtures patch)))
           indices (zipmap (:universes patch) (range))]
       {:type ::plan :universes (:universes patch) :channels channels
+       ::fixtures (:by-id patch) ::universe-indices indices
        :idle-universes (reduce-kv (fn [buffers address value] (assoc-in buffers address value))
                                   (zipmap (:universes patch) (repeat (vec (repeat 512 0))))
-                                  (:fog-off-bytes patch))
+                                  (frame/physical-off-bytes patch))
        ::packed (mapv (fn [{:keys [coarse fine inverted? fade?]}]
                         (PackedChannel. (long (get indices (first coarse))) (long (second coarse))
                                         (long (if fine (get indices (first fine)) -1))
@@ -101,9 +109,14 @@
   metadata has nonnegative integer :epoch/:frame-id, monotonic physical
   :time-ms (sample/scheduled time) and :completed-at-ms. Completion cannot
   precede the render start. An explicit :started-at-ms permits a physical
-  deadline sample to finish early. Input buffer ownership must remain exclusive during copy."
+  deadline sample to finish early. Rejected :edge-tracking followers retain
+  their emission cuts for buffered presentation. Input buffer ownership must
+  remain exclusive during copy."
   [metadata rendered]
-  (let [{:keys [epoch frame-id time-ms completed-at-ms started-at-ms]} metadata]
+  (let [{:keys [epoch frame-id time-ms completed-at-ms started-at-ms]} metadata
+        cuts (or (::tracking-cuts rendered)
+                 (when-let [reports (:edge-tracking rendered)]
+                   (into #{} (keep (fn [{:keys [follower reason]}] (when reason follower))) reports)))]
     (when-not (and (natural? epoch) (natural? frame-id) (nonnegative? time-ms)
                    (nonnegative? completed-at-ms)
                    (if (some? started-at-ms)
@@ -113,7 +126,8 @@
       (fail! "Invalid completed frame identity or timestamps" {:metadata metadata}))
     (cond-> {:epoch epoch :frame-id frame-id :time-ms time-ms :completed-at-ms completed-at-ms
              :universes (immutable-universes (:universes rendered))}
-      (some? started-at-ms) (assoc :started-at-ms started-at-ms))))
+      (some? started-at-ms) (assoc :started-at-ms started-at-ms)
+      (seq cuts) (assoc ::tracking-cuts (set cuts)))))
 
 (defn- transport-bytes [values]
   (let [result (byte-array 512)]
@@ -207,6 +221,16 @@
         (let [^clojure.lang.ITransientVector fine (aget universes fine-universe)]
           (aset universes fine-universe (.assocN fine (int (.-fineIndex channel)) fraction)))))))
 
+(defn- copy-tracking-emission! [plan ^objects source ^objects result followers]
+  (doseq [id followers
+          [attribute channel] (:compiled-channels (get (::fixtures plan) id))
+          :when (contains? emission-attributes attribute)
+          [universe index] (keep channel [:coarse :fine])]
+    (let [i (int (get (::universe-indices plan) universe))
+          ^clojure.lang.IPersistentVector from (aget source i)
+          ^clojure.lang.ITransientVector to (aget result i)]
+      (aset result i (.assocN to (int index) (.nth from (int index)))))))
+
 (defn- interpolate [plan left right weight]
   (cond
     (<= weight 0) (:universes left)
@@ -214,10 +238,17 @@
     :else
     (let [^objects a (indexed plan (:universes left))
           ^objects b (indexed plan (:universes right))
-          result (scratch a) weight (double weight)]
+          result (scratch a) weight (double weight)
+          left-cuts (::tracking-cuts left #{})]
       (doseq [channel (::packed plan)]
         (let [av (read-word a channel) bv (read-word b channel)]
           (write-word! result channel (+ av (* weight (- bv av))))))
+      ;; For an interior sample, use the rejected endpoint's actual bytes.
+      ;; This also handles inverted, held and cross-universe emission lanes.
+      (when-let [right-cuts (::tracking-cuts right)]
+        (copy-tracking-emission! plan b result (remove left-cuts right-cuts)))
+      (when (seq left-cuts)
+        (copy-tracking-emission! plan a result left-cuts))
       (immutable plan result))))
 
 (defn- fade [plan universes gain]
@@ -234,7 +265,8 @@
   identify its lower source frame, not the present wall time. :presentation
   records target/presentation time, both source timestamps, interpolation weight
   and fallback gain. Discrete bytes hold the lower sample until the upper sample
-  is due. Before a buffered stream's first sample is due, packet is nil.
+  is due. Between endpoints, tracking cuts hold the follower's emission bytes
+  at the rejected sample. Before a buffered stream's first sample is due, packet is nil.
   A backwards physical clock throws; callers must create a new policy for a new
   epoch/clock domain. Repeated calls at the same timestamp are deterministic."
   [state now-ms]
@@ -254,7 +286,7 @@
                                (if right (interpolate (:plan state) left right weight) (:universes left)) gain))]
     {:state (assoc state :last-presented-at-ms now-ms)
      :packet (when left
-               (assoc left :universes bytes
+               (assoc (dissoc left ::tracking-cuts) :universes bytes
                       :presentation {:mode mode :presented-at-ms now-ms :target-time-ms target
                                      :source-times [(:time-ms left) (when right (:time-ms right))]
                                      :weight weight :gain gain :fallback? (and (not= mode :direct) (nil? right)

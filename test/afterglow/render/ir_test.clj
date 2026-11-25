@@ -4,6 +4,7 @@
             [afterglow.render.ir :as ir]))
 
 (defn- c [value] {:op :const :value value})
+
 (defn- near? [a b] (< (Math/abs (double (- a b))) 1.0e-9))
 
 (deftest explicit-inputs-and-reusable-compiled-functions
@@ -31,6 +32,31 @@
   (is (near? 1.0 (ir/evaluate {:op :sin :args [(c (/ Math/PI 2))]} {})))
   (is (= 0.75 (ir/evaluate {:op :fract :args [(c -0.25)]} {})))
   (is (= [0.5 1.0] (ir/evaluate {:op :sqrt :args [(c [0.25 1.0])]} {}))))
+
+(deftest partial-maximum-blend-uses-the-same-arithmetic-for-scalar-and-packed-results
+  (doseq [[prior incoming] [[(c 0.75) (c 0.25)]
+                            [(c [0.75 0.25]) (c 0.5)]
+                            [(c 0.5) (c [0.75 0.25 0.5])]
+                            [(c [0.75 0.25 0.5 0.5]) (c [0.25 0.75 0.5 0.5])]]
+          amount [0.0 0.25 1.0]]
+    (let [fraction (c amount)
+          expression (ir/partial-max-blend prior incoming fraction)
+          delta {:op :subtract :args [{:op :max :args [prior incoming]} prior]}
+          reference {:op :add :args [prior {:op :multiply :args [fraction delta]}]}
+          result (ir/evaluate reference {})
+          expected (if (vector? result) result [result])
+          outputs {:test expression}
+          shader (ir/emit-glsl-batch outputs)
+          values (get-in (ir/evaluate-batch (ir/compile-batch outputs) {} [[0 0 0] [1 1 1]])
+                         [:outputs :test :values])]
+      (is (= result (ir/evaluate expression {})))
+      (is (= (into expected expected) (vec values)))
+      (is (empty? (:inputs shader)))
+      (is (= (count expected) (:stride shader)))
+      (is (str/includes? (:source shader) "return prior + amount * (max(prior, incoming) - prior);"))
+      (is (str/includes? (:source (ir/emit-glsl expression)) "afterglow_max_blend("))
+      (is (seq (ir/validate-expression (into {} expression))))
+      (is (not (str/includes? (:source (ir/emit-glsl-batch {:test reference})) "afterglow_max_blend"))))))
 
 (deftest rejects-invalid-schemas-and-numerical-domains
   (doseq [bad [{:op :unknown}

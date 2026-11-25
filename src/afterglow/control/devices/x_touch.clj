@@ -16,9 +16,13 @@
    :native-pwm :unverified :compact-and-mini :different-protocol-unverified})
 
 (defn- fail! [message] (throw (ex-info message {:x-touch/error :invalid-profile})))
+
 (defn- initial [bank] {:bank bank :touches {} :holds {} :hold-keys {} :sent {} :flip? false :selected nil})
+
 (defn- latest-instance [model cue-id]
-  (last (sort-by :order (filter #(= cue-id (:cue-id %)) (vals (:instances model))))))
+  (when cue-id
+    (last (sort-by :order (filter #(= cue-id (:cue-id %)) (vals (:instances model)))))))
+
 (defn- control-binding [channel kind]
   (let [entry (get channel kind :level)] (if (keyword? entry) {:param entry} entry)))
 
@@ -41,6 +45,7 @@
     (hydrate model (merge {:instance-id (:id instance)} (control-binding channel kind)))))
 
 (defn- bounds [schema] (or (:bounds schema) [0 1]))
+
 (defn- normalized [target]
   (let [{:keys [schema value]} target [low high] (bounds schema)]
     (case (:type schema)
@@ -65,10 +70,33 @@
     {:op :param/set :instance-id (:instance-id target) :param (:param target)
      :value (if-let [component (:component target)] (assoc (:whole-value target) component value) value)}))
 
-(defn- channel-at [options state strip]
-  (get (:channels options) (+ (:bank state) (:channel-offset options) strip)))
+(defn- channels-for [{:keys [channels group-channels]} model]
+  (if group-channels (into (vec (group-channels model)) channels) channels))
+
+(defn- channel-at [options state channels strip]
+  (get channels (+ (:bank state) (:channel-offset options) strip)))
+
+(defn- step-bank [channels bank delta]
+  (let [maximum (* 8 (quot (max 0 (dec (count channels))) 8))]
+    (max 0 (min maximum (+ bank delta)))))
+
 (defn- control-kind [state physical]
   (if (:flip? state) ({:fader :encoder :encoder :fader} physical) physical))
+
+(defn- group-target [{:keys [group-id level]}]
+  {:group-id group-id :value level :schema {:type :number :bounds [0 1]}})
+
+(defn- fader-target [options state model channel strip]
+  (cond
+    (= strip 8) (when-not (:extender? options) {:master? true})
+    (:group-id channel) (group-target channel)
+    :else (target model channel (control-kind state :fader))))
+
+(defn- hydrate-fader [model channels captured]
+  (when captured
+    (if-let [id (:group-id captured)]
+      (some #(when (= id (:group-id %)) (group-target %)) channels)
+      (hydrate model captured))))
 
 (defn- release-hold [state strip envelope]
   (if-let [gesture (get-in state [:hold-keys strip])]
@@ -78,25 +106,39 @@
 
 (defn input
   "Pure interaction -> local state and shared domain command templates. Fader
-  touch captures its instance/parameter, so banking cannot steal an active touch."
+  touch captures its instance/parameter or group ID across bank changes."
   [options state event model envelope]
   (let [{:keys [type strip pressed? note]} event
-        channel (when (and (integer? strip) (< strip 8)) (channel-at options state strip))
+        channels (channels-for options model)
+        at (partial channel-at options state channels)
+        channel (when (and (integer? strip) (<= 0 strip 7)) (at strip))
+        touched? (contains? (:touches state) strip)
         changed (fn [next-state & commands] {:state next-state :commands (vec commands)})]
     (case type
       :bank/set (do (when-not (and (integer? (:bank event)) (<= 0 (:bank event))) (fail! "Bank must be nonnegative"))
                     (changed (assoc state :bank (:bank event))))
-      :touch (let [captured (if (and (= strip 8) (not (:extender? options))) {:master? true}
-                               (target model channel (control-kind state :fader)))]
-               (changed (if pressed? (assoc-in state [:touches strip] captured) (update state :touches dissoc strip))))
-      :fader (let [touched? (contains? (:touches state) strip)
-                   selected (if touched? (get-in state [:touches strip])
-                              (when-not (:require-touch? options)
-                                (if (and (= strip 8) (not (:extender? options))) {:master? true}
-                                  (target model channel (control-kind state :fader)))))
-                   selected (when selected (hydrate model selected))]
-               (if (and selected (or touched? (not (:require-touch? options))))
-                 (changed state (write-command selected (value-at selected (:value event)))) (changed state)))
+      :touch (cond
+               (and pressed? (not touched?))
+               ;; An external reconfiguration can arrive before its scribble strip.
+               (changed (assoc-in state [:touches strip]
+                                  (when (or (not (:group-channels options))
+                                            (= (or (:group-id channel) (:cue-id channel))
+                                               (get (:shown-channel-ids state) strip)))
+                                    (fader-target options state model channel strip))))
+               (and (not pressed?) touched?)
+               (changed (-> state (update :touches dissoc strip) (update :sent dissoc [:fader strip])))
+               :else (changed state))
+      :fader (let [captured (if touched? (get-in state [:touches strip])
+                               (when-not (or (:require-touch? options) (:group-channels options))
+                                 (fader-target options state model channel strip)))
+                   selected (hydrate-fader model channels captured)]
+               (if selected
+                 (let [value (value-at selected (:value event))]
+                   (changed state
+                            (if-let [id (:group-id selected)]
+                              (merge ((:group-level-command options) id value) (select-keys envelope [:show-id :epoch]))
+                              (write-command selected value))))
+                 (changed state)))
       :encoder (let [selected (target model channel (control-kind state :encoder)) value (when selected (normalized selected))]
                  (if (and (some? value) (not (zero? (:delta event))))
                    (let [schema (:schema selected)
@@ -112,29 +154,28 @@
         (<= 0 note 7)
         (if pressed?
           (if (get-in state [:hold-keys note]) (changed state)
-            (if-let [cue (:cue-id (channel-at options state note))]
+            (if-let [cue (:cue-id (at note))]
               (let [result (bindings/begin-hold (:holds state) cue envelope)]
                 {:state (-> state (assoc :holds (:state result)) (assoc-in [:hold-keys note] (:gesture-id result)))
                  :commands (:commands result)}) (changed state)))
           (release-hold state note envelope))
         (not pressed?) (changed state)
         (<= 24 note 31)
-        (let [cue (:cue-id (channel-at options state (- note 24))) instance (latest-instance model cue)]
+        (let [cue (:cue-id (at (- note 24))) instance (latest-instance model cue)]
           (cond instance (changed state {:op :instance/end :instance-id (:id instance) :force? (= :releasing (:phase instance))})
                 cue (changed state {:op :cue/launch :cue-id cue :launch {:mode :persistent}})
                 :else (changed state)))
         (<= 16 note 23)
-        (if-let [instance (latest-instance model (:cue-id (channel-at options state (- note 16))))]
+        (if-let [instance (latest-instance model (:cue-id (at (- note 16))))]
           (changed state {:op :instance/end :instance-id (:id instance)}) (changed state))
-        (<= 8 note 15) (changed (assoc state :selected (:cue-id (channel-at options state (- note 8)))))
+        (<= 8 note 15) (changed (assoc state :selected (:cue-id (at (- note 8)))))
         (<= 32 note 39)
-        (if-let [selected (target model (channel-at options state (- note 32)) (control-kind state :encoder))]
+        (if-let [selected (target model (at (- note 32)) (control-kind state :encoder))]
           (if (some? (get-in selected [:schema :default]))
             (changed state (write-command selected (get-in selected [:schema :default]))) (changed state)) (changed state))
         (and (not (:extender? options)) (#{46 47 48 49} note))
-        (let [delta ({46 (- (:bank-step options)) 47 (:bank-step options) 48 -1 49 1} note)
-              maximum (max 0 (* 8 (quot (dec (max 1 (count (:channels options)))) 8)))]
-          (changed (update state :bank #(max 0 (min maximum (+ % delta))))))
+        (let [delta ({46 (- (:bank-step options)) 47 (:bank-step options) 48 -1 49 1} note)]
+          (changed (update state :bank #(step-bank channels % delta))))
         (and (not (:extender? options)) (= 50 note)) (changed (update state :flip? not))
         (and (not (:extender? options)) (#{93 94} note)) (changed state {:op :transport/set :transport {:playing? (= note 94)}})
         :else (changed state))
@@ -142,6 +183,7 @@
 
 (defn- slot-text [value]
   (let [value (str (or value ""))] (str (subs value 0 (min 6 (count value))) (apply str (repeat (max 0 (- 7 (min 6 (count value)))) " ")))))
+
 (defn- display-value [target]
   (let [value (:value target)] (cond (nil? value) "" (number? value) (format "%.3f" (double value)) :else (str value))))
 
@@ -149,16 +191,22 @@
   "Pure strip projection. Categories can supply :color in channel metadata;
   transport encoding and IO do not belong to the shared show model."
   [options state model]
-  (mapv (fn [strip]
-          (let [channel (channel-at options state strip) cue (get-in model [:registry :cues (:cue-id channel)])
-                instance (latest-instance model (:cue-id channel))
-                fader (target model channel (control-kind state :fader)) encoder (target model channel (control-kind state :encoder))]
-            {:label (or (:label channel) (:name cue) (some-> (:cue-id channel) name) "")
-             :color (if channel (codec/palette-index (or (:color channel) [1 1 1])) 0)
-             :active? (boolean instance) :held? (contains? (:hold-keys state) strip)
-             :selected? (and channel (= (:selected state) (:cue-id channel)))
-             :fader (when fader (normalized fader)) :encoder (when encoder (normalized encoder))
-             :value-label (display-value fader)})) (range 8)))
+  (let [channels (channels-for options model)]
+    (mapv (fn [strip]
+            (let [{:keys [cue-id group-id] :as channel} (channel-at options state channels strip)
+                  cue (get-in model [:registry :cues cue-id])
+                  instance (when cue-id (latest-instance model cue-id))
+                  fader (fader-target options state model channel strip)
+                  encoder (when cue-id (target model channel (control-kind state :encoder)))]
+              (cond-> {:label (or (:label channel) (:name cue) (some-> cue-id name) "")
+                       :color (if channel (codec/palette-index (or (:color channel) [1 1 1])) 0)
+                       :active? (if group-id (boolean (:active? channel)) (boolean instance))
+                       :held? (contains? (:hold-keys state) strip)
+                       :selected? (and cue-id (= (:selected state) cue-id))
+                       :fader (when fader (normalized fader)) :encoder (when encoder (normalized encoder))
+                       :value-label (display-value fader)}
+                group-id (assoc :group-id group-id)
+                cue-id (assoc :cue-id cue-id)))) (range 8))))
 
 (defn feedback [options state model _envelope]
   (let [view (project options state model) extender? (:extender? options)
@@ -179,13 +227,18 @@
                   (and (not extender?) (not (contains? (:touches state) 8))) (assoc [:fader 8] (codec/fader 8 (:master model)))
                   (not extender?) (assoc [:led 94] (codec/button-led 94 (if (get-in model [:transport :playing?]) :on :off))))
         messages (mapv val (filter (fn [[key message]] (not= message (get-in state [:sent key]))) (sort-by (comp pr-str key) desired)))]
-    {:state (update state :sent merge desired) :commands [] :midi messages}))
+    {:state (cond-> (update state :sent merge desired)
+              (:group-channels options) (assoc :shown-channel-ids (mapv #(or (:group-id %) (:cue-id %)) view)))
+     :commands [] :midi messages}))
 
 (defn profile
   "Options :channels [{:cue-id :label :color [r g b] :fader binding :encoder binding}],
   where binding is a parameter keyword or {:param :component?}. Main/XT strips
-  use :channel-offset plus a bank. Touch-gated faders are the default; no motor
-  echo is interpreted as an intentional parameter edit. No global mutable state."
+  use :channel-offset plus a bank. A host can prepend stable group strips via
+  pure :group-channels (model -> [{:group-id :label :color :level :active?}])
+  and :group-level-command (group-id, value -> host command template).
+  Profiles with group strips require touch for all faders. Flip and encoders
+  apply to cue strips."
   [options]
   (let [options (merge {:channels [] :extender? false :channel-offset 0 :bank 0 :bank-step 8
                         :encoder-step 0.01 :require-touch? true} options)]
@@ -193,6 +246,8 @@
                    (every? #(and (integer? %) (<= 0 %)) ((juxt :channel-offset :bank) options))
                    (and (integer? (:bank-step options)) (pos? (:bank-step options)))
                    (boolean? (:extender? options)) (boolean? (:require-touch? options))
+                   (or (every? nil? ((juxt :group-channels :group-level-command) options))
+                       (every? ifn? ((juxt :group-channels :group-level-command) options)))
                    (number? (:encoder-step options)) (< 0 (:encoder-step options) 1))
       (fail! "Invalid X-Touch profile options"))
     (doseq [channel (:channels options)]
@@ -206,6 +261,8 @@
           (fail! "Controls need a parameter key and optional nonnegative component"))))
     {:id (if (:extender? options) :x-touch-xt :x-touch)
      :capabilities (assoc capabilities :extender? (:extender? options))
+     :unique-command-prefix? (boolean (:group-channels options))
+     :fence-captured-commands? (boolean (:group-channels options))
      :initial-state (initial (:bank options))
      :decode #(if (map? %) % (codec/decode %))
      :start (partial feedback options)
@@ -230,9 +287,15 @@
   :schedule! owns feedback cadence; set nil to refresh manually in tests/hosts."
   [options]
   (let [options (if (contains? options :schedule!) options
-                 (assoc options :schedule! (transports/scheduler (get options :refresh-ms 40))))]
+                 (assoc options :schedule! (transports/scheduler (get options :refresh-ms 40))))
+        current-bank (::current-bank options)
+        base-profile (profile options)
+        profile (cond-> base-profile
+                  current-bank (assoc :start (fn [state model envelope]
+                                               ((:start base-profile) (assoc state :bank (current-bank)) model envelope))
+                                      :reset-model #(initial (:bank %))))]
     (session/open!
-     (session/create (assoc options :profile (profile options)
+     (session/create (assoc options :profile profile
                             :midi (or (:transport options) (transports/midi-transport options)))))))
 
 (defn set-bank!
@@ -268,6 +331,29 @@
     (doseq [device (reverse sessions)] (session/close! device))
     (group-status group)))
 
+(defn- group-transport [group unit-session options]
+  (let [{:keys [extender? bank-step model!]} options
+        transport (or (:transport options) (transports/midi-transport options))
+        current-open (volatile! nil)]
+    (assoc transport
+           :open! (fn [receive!]
+                    (let [opened (vreset! current-open (Object.))]
+                      ((:open! transport)
+                       (fn [raw]
+                         (locking (:lock group)
+                           (when (and (identical? opened @current-open) (not (:closed? @(:state group))))
+                             (let [{:keys [type pressed? note]} (if (map? raw) raw
+                                                                  (try (codec/decode raw) (catch Exception _ nil)))
+                                   delta ({46 (- bank-step) 47 bank-step 48 -1 49 1} note)]
+                               (if (and (not extender?) (= :button type) pressed? delta)
+                                 (when (some-> @unit-session session/snapshot :status (= :active))
+                                   (bank-group! group (step-bank (channels-for options (model!))
+                                                                (:bank @(:state group)) delta)))
+                                 (receive! raw)))))))))
+           :close! (fn [handle]
+                     (vreset! current-open nil)
+                     ((:close! transport) handle)))))
+
 (defn connect-group!
   "Open an explicitly ordered vector of :units, exactly one main and any
   extenders. Each unit has its own :session-id, selected ports/:transport and
@@ -282,28 +368,16 @@
                  (vector? channels))
     (fail! "An ordered group needs unique session IDs and exactly one main unit"))
   (let [width (* 8 (count units))
-        group {:lock (Object.) :state (atom {:bank (get options :bank 0) :closed? false :sessions []})}
-        maximum (max 0 (* 8 (quot (dec (max 1 (count channels))) 8)))]
+        group {:lock (Object.) :state (atom {:bank (get options :bank 0) :closed? false :sessions []})}]
     (try
       (doseq [[index unit] (map-indexed vector units)]
         (let [settings (merge (dissoc options :units) unit
-                              {:channel-offset (* 8 index) :bank-step width :bank (:bank @(:state group))})
-              transport (or (:transport settings) (transports/midi-transport settings))
-              wrapped (assoc transport :open!
-                             (fn [receive!]
-                               ((:open! transport)
-                                (fn [raw]
-                                  (locking (:lock group)
-                                    (when-not (:closed? @(:state group))
-                                      (let [event (if (map? raw) raw
-                                                    (try (codec/decode raw) (catch Exception _ nil)))]
-                                        (if (and (not (:extender? settings)) (= :button (:type event))
-                                                 (:pressed? event) (#{46 47 48 49} (:note event)))
-                                          (let [delta ({46 (- width) 47 width 48 -1 49 1} (:note event))]
-                                            (bank-group! group (max 0 (min maximum (+ (:bank @(:state group)) delta)))))
-                                          (receive! raw)))))))))
-              device (connect! (assoc settings :transport wrapped))]
+                              {:channel-offset (* 8 index) :bank-step width :bank (:bank @(:state group))
+                               ::current-bank #(:bank @(:state group))})
+              unit-session (volatile! nil)
+              device (connect! (assoc settings :transport (group-transport group unit-session settings)))]
           (locking (:lock group)
+            (vreset! unit-session device)
             (swap! (:state group) update :sessions conj device)
             (session/receive! device {:type :bank/set :bank (:bank @(:state group))}))))
       group

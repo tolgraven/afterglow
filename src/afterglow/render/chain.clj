@@ -10,13 +10,19 @@
   [] (atom {}))
 
 (def ^:private eligible-attributes #{:color :dimmer :focus :zoom :pan :tilt :aim :direction :red :green :blue :white})
+
 (def ^:private spatial-ops #{:position :surface-uv})
+
 (def ^:private capture-ops #{:param :time :beat :bar :phrase})
 
 (defn- unit? [n] (and (number? n) (<= 0 n 1)))
+
 (defn- only? [allowed item] (every? allowed (keys item)))
+
 (defn- request [block] (get-in block [:batch :field-request]))
+
 (defn- group [block] (:group (request block)))
+
 (defn- expressions [group] (or (:expressions group) (get-in group [:shader :outputs])))
 
 (defn- candidate? [{:keys [kind batch] :as block}]
@@ -45,6 +51,7 @@
      (set (keys (:scales (request block)))) (:target-ids batch)]))
 
 (defn- param [key] {:op :param :key key})
+
 (defn- op [operation & args] {:op operation :args (vec args)})
 
 (defn- lower-field
@@ -76,8 +83,9 @@
       (case blend
         :replace (op :mix previous incoming (param alpha))
         :add (op :add previous (if alpha (op :multiply incoming (param alpha)) incoming))
-        :max (let [highest (op :max previous incoming)]
-               (if alpha (op :mix previous highest (param alpha)) highest))))))
+        :max (if alpha
+               (ir/partial-max-blend previous incoming (param alpha))
+               (op :max previous incoming))))))
 
 (defn- fold-stage [previous {:keys [fields blend alpha]}]
   (reduce-kv (fn [acc attr field]
@@ -95,6 +103,45 @@
 
 (defn- hull [ranges] [(reduce min (map first ranges)) (reduce max (map second ranges))])
 
+(defn- weighted-mix-range [prior incoming [lo hi]]
+  (when (<= 0 lo hi 1)
+    (let [dry (endpoints * prior [(- 1.0 hi) (- 1.0 lo)])
+          wet (endpoints * incoming [lo hi])]
+      (when (and dry wet) (endpoints + dry wet)))))
+
+(defn- partial-mixed-range [blend [lo hi :as prior] [incoming-lo :as incoming]
+                            [blended-lo blended-hi] amount]
+  (let [frame-lo (+ lo (* amount (- blended-lo hi)))
+        frame-hi (+ hi (* amount (- blended-hi lo)))
+        ;; A nonnegative add cannot lower the prior, and a replacement
+        ;; between nonnegative inputs cannot produce a negative result.
+        frame-lo (case blend
+                   :add (max lo frame-lo)
+                   :replace (if (and (<= 0 lo) (<= 0 incoming-lo)) (max 0.0 frame-lo) frame-lo))
+        amounts [amount amount]
+        lowered (case blend
+                  :replace (weighted-mix-range prior incoming amounts)
+                  :add (when-let [wet (endpoints * incoming amounts)] (endpoints + prior wet)))]
+    ;; The frame computes prior + alpha * (blended - prior). GLSL mix
+    ;; and the simplified add round differently. Both must stay valid.
+    (when lowered (range-of [(min frame-lo (first lowered)) (max frame-hi (second lowered))]))))
+
+(defn- partial-max-range [[lo hi :as prior] [incoming-lo incoming-hi] [alpha-lo alpha-hi]]
+  (when (<= 0 alpha-lo alpha-hi 1)
+    (if (<= incoming-hi lo)
+      prior
+      ;; Rounded subtraction breaks monotonicity in the prior when it appears
+      ;; in both the sum and the difference. Bound those operations separately.
+      (let [delta-lo (max 0.0 (- incoming-lo hi))
+            delta-hi (max 0.0 (- incoming-hi lo))
+            upper (+ hi (* alpha-hi delta-hi))
+            ;; With nonnegative inputs, subtraction can round up by at most
+            ;; one ULP at the input ceiling. Scaling cannot increase the delta.
+            upper (if (and (<= 0 lo) (<= 0 incoming-lo))
+                    (min upper (Math/nextUp (double (max hi incoming-hi))))
+                    upper)]
+        (range-of [(+ lo (* alpha-lo delta-lo)) upper])))))
+
 (defn- operation-range [operation ranges]
   (let [[[al ah] [bl bh] [cl ch]] ranges]
     (case operation
@@ -108,7 +155,8 @@
       :min [(reduce min (map first ranges)) (reduce min (map second ranges))]
       :max [(reduce max (map first ranges)) (reduce max (map second ranges))]
       :clamp (when (<= bh cl) [(min cl (max bl al)) (min ch (max bh ah))])
-      :mix (when (<= 0 cl ch 1) (hull (take 2 ranges)))
+      :mix (apply weighted-mix-range ranges)
+      ::ir/partial-max-blend (apply partial-max-range ranges)
       :subtract (if bl (endpoints - (first ranges) (second ranges)) [(- ah) (- al)])
       :divide (when-not (<= bl 0 bh) (endpoints / (first ranges) (second ranges)))
       (:add :multiply) (reduce (fn [a b] (or (endpoints (if (= operation :add) + *) a b) (reduced nil))) ranges)
@@ -160,8 +208,8 @@
                amount (if alpha (get env alpha) 1)
                final (cond (nil? blended) nil
                            (== 1 amount) blended
-                           prior (range-of [(+ (* (- 1.0 amount) (first prior)) (* amount (first blended)))
-                                            (+ (* (- 1.0 amount) (second prior)) (* amount (second blended)))]))]
+                           (= :max blend) (partial-max-range prior incoming [amount amount])
+                           prior (partial-mixed-range blend prior incoming blended amount))]
            (if (valid-output? attr final) (assoc ranges attr final) (reduced nil))))))
    previous fields))
 
@@ -239,6 +287,33 @@
     ;; requests so the show can attribute any failure to the right running effect.
     (catch RuntimeException _ nil)))
 
+(defn- partial-blend [{:keys [batch]}]
+  (when-not (== 1 (:opacity batch 1))
+    (:blend batch :replace)))
+
+(defn- partial-maximum? [block]
+  (= :max (partial-blend block)))
+
+(defn- disjoint-write? [targets {:keys [kind batch assignments native-layer]}]
+  (and (nil? native-layer)
+       (case kind
+         :batch (let [ids (:target-ids batch)]
+                  (and (vector? ids) (not-any? #(contains? targets %) ids)))
+         :assignments (and (vector? assignments)
+                           (every? #(and (map? %) (contains? % :target-id)
+                                         (not (contains? targets (:target-id %))))
+                                   assignments))
+         false)))
+
+(defn- safe-maximum-run? [ids run following]
+  ;; A partial add or replacement can already change the rounded result on
+  ;; the CPU. A later write can also observe a backdrop rounded by the GPU.
+  (or (not-any? partial-maximum? run)
+      (and (not-any? #{:add :replace} (map partial-blend run))
+           (or (empty? following)
+               (let [targets (set ids)]
+                 (every? #(disjoint-write? targets %) following))))))
+
 (defn- append-runs
   "Try the entire aligned interval first. Split only at semantic, range or IR
   complexity limits. A failed trial never generates an exponential-size shader:
@@ -247,9 +322,14 @@
   (if (= 1 (count blocks)) (conj! out (first blocks))
     (if-let [fused (fuse-run cache prepare-group blocks false)]
       (conj! out fused)
-      (let [i (quot (count blocks) 2)
-            left (append-runs cache prepare-group out (subvec blocks 0 i))]
-        (append-runs cache prepare-group left (subvec blocks i))))))
+      (if (and (some partial-maximum? blocks)
+               (some #(= :add (get-in % [:batch :blend])) blocks))
+        ;; A fused prefix could round its backdrop differently and hide
+        ;; an invalid stage when the remaining requests run on the frame.
+        (reduce conj! out blocks)
+        (let [i (quot (count blocks) 2)
+              left (append-runs cache prepare-group out (subvec blocks 0 i))]
+          (append-runs cache prepare-group left (subvec blocks i)))))))
 
 (defn- fuse-adjacent
   "Replace adjacent compatible requests over identical ordered target IDs with
@@ -272,8 +352,9 @@
               (if (= (inc start) end)
                 (recur end consumed result)
                 (let [run (subvec ordered start end)
-                      lowered (persistent! (append-runs cache prepare-group (transient []) run))]
-                  (if (= (count run) (count lowered))
+                      lowered (when (safe-maximum-run? ids run (subvec ordered end))
+                                (persistent! (append-runs cache prepare-group (transient []) run)))]
+                  (if (or (nil? lowered) (= (count run) (count lowered)))
                     (recur end consumed result)
                     (recur end end (into (into (or result []) (subvec ordered consumed start)) lowered))))))))))))
 

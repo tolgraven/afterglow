@@ -10,13 +10,18 @@
                                (rgb-head :far 7 [0 0.9 0]) (rgb-head :outside 10 [0 0 2])
                                {:id :lamp :address 13 :universe 1 :position [10 0 0] :channels {:dimmer 1}}
                                {:id :utility :address 14 :universe 1 :position [0 0 0] :channels {:fog 1 :dimmer 2}}]))
+
 (defn row [id field v] {:target-id id :attribute field :value v})
+
 (defn block [& rows] {:kind :assignments :assignments (vec rows)})
+
 (defn bytes-of [f] (mapv #(bit-and 255 %) (take 15 (get-in f [:universes 1]))))
+
 (defn batch [id field values]
   (let [w (if (= field :color) 3 1)]
     {:kind :batch :batch {:target-ids [id] :outputs {field {:type (if (= w 3) :vec3 :number)
                                                         :components w :values (double-array values)}}}}))
+
 (defn native-and-rich [blocks opts]
   (let [render #(frame/resolve-contributions rig blocks (merge opts %))
         rich (render {}) compact (render {:include-values? false :compact-values? true})

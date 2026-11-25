@@ -72,9 +72,15 @@ incidence. The calculation repeats every frame. A chain on one surface using
 the same `:along` direction produces disjoint neighboring footprints. Put links
 in dependency order and place each follower once.
 
+On a receiver used by several links, independently aimed leaders reserve space
+first. Each successful follower then reserves space in link order on the
+receiver where it was placed and on shared receivers where it leads another
+link. A common tangent is allowed. A follower whose footprint overlaps an
+existing reservation yields and darkens, along with followers that depend on it.
+
 A link is reported under the published frame's `:edge-tracking` vector with
 `:aim` and `:contact` on success. A missed receiver, clipped ellipse, unavailable
-fixture, unreachable calibrated aim or upstream failure gives a `:reason` and
+fixture, unreachable calibrated aim, overlap or upstream failure gives a `:reason` and
 sets the affected follower's dimmer to zero for that frame. Tracking resumes
 when the next frame has a solution. Original effect definitions, user parameters,
 and channel patching stay intact. The geometry uses nominal commands. Physical

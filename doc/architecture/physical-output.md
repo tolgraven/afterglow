@@ -14,6 +14,13 @@ Both DMX sinks accept a map of universe ID to channel bytes via `(:send! sink)`,
 
 The scheduler hands completed, detached channel buffers to a physical publication clock. Its fallback and interpolation policies come from `afterglow.render.presentation`. A host supplies epoch changes, blackout intent and fixture/channel semantics via `begin-frame!` before painting. It hands the result to `complete!`, starts the clock with `start!` or drives it explicitly with `publish!`, then releases the publisher via `close!`.
 
+Waiting, scheduler blackout and host shutdown packets use the patch's physical
+off bytes for fully inverted dimmer and emitter channels and configured fog
+endpoints. Coarse/fine off bytes can span universes. Partially inverted
+emission and other idle channels start at zero. Retirement preserves the
+off bytes at withdrawn addresses until a new channel or reserved fixture
+footprint claims the slot.
+
 ## Sample time and physical publication
 
 At 40 Hz the wire has a nominal slot every 25 ms. Pass a render callback to
@@ -44,10 +51,20 @@ scheduled deadline. A held source may still drive the configured fallback.
 latency and blends continuous channels using the delayed timeline. A fractional
 latency can put that target between physical slots. A valid sample remains
 available through the first slot that can present it as a lower endpoint. Function
-channels retain the lower sample. A patch, blackout or epoch change fences
+channels retain the lower sample. If either endpoint rejected an edge-tracking
+follower, strictly intermediate samples copy that fixture's dimmer and emitter
+bytes from the rejected endpoint. If both rejected the fixture, the lower sample
+supplies the bytes. This preserves the cut through the transition and keeps the
+ordinary interpolation of movement and unrelated fixtures. Exact endpoints retain
+their original bytes. A patch, blackout or epoch change fences
 previously prepared packets. Supply a stable `:timeline-id` in the ticket and
 change it on transport seeks or playback changes to retire old buffered output. High refresh-rate local UI animation keeps its
 own presentation clock.
+
+After a successful handoff, the publisher waits at least half a period before
+the next handoff. If that guard opens during the next nominal slot, the
+publisher can use the rest of that slot. An elapsed slot still expires, and
+a failed handoff keeps the conservative grid recovery.
 
 Inspect `(scheduler/status owner)` for the following measurements.
 
@@ -96,8 +113,10 @@ sent channel values when a normal packet expires. It receives detached
 buffers and source metadata, including any immutable `:safety-state` from
 the completed source. A failed handoff marks the wire uncertain until a
 complete send succeeds. If the first handoff failed, the safety hook receives
-the current idle values. It also receives whether the last source predates
-the current publication gate. Return `nil` when no cutoff is needed.
+the current idle values. It also receives whether the source predates the
+current publication gate and the DMX patch used for the last successful
+handoff, including any successful safety handoff. Corrected buffers use
+the current gate's patch. Return `nil` when no cutoff is needed.
 The safety send leaves the expired frame pending for its usual admission
 rules and reports `:safety-output?` and `:safety-publications`.
 The next slot can still consume a newer completion that arrived during

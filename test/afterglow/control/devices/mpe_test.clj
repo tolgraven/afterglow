@@ -13,6 +13,7 @@
    :step {:type :integer :default 3 :bounds [1 5] :control/axis :slide}
    :enabled {:type :boolean :default false :control/axis :strike}
    :mode {:type :enum :default :low :values [:low :mid :high] :control/axis :lift}})
+
 (def options {:zone {:manager-channel 0 :member-channels [1 2 3]} :cue-id :expressive
               :axes #{:strike :pressure :glide :slide :lift}})
 

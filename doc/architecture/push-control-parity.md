@@ -1,5 +1,27 @@
 # Push 2 control parity
 
+## Select and reorder active cues
+
+Set `:active-cue-grid? true` in the Push 2 connection options. Press **Select**
+to open the active edit grid or **Duplicate** to open the reorder grid. The
+active mode's button lights up. Press it again to return to the cue launch grid.
+Page Left and Right navigate banks of 64 running launches.
+
+The bottom-left pad is the first running launch in compositing order, followed
+by the remaining pads from left to right and bottom to top. Two running copies
+of the same cue occupy separate pads. In Select mode, tap a pad to edit that
+launch's parameters. In Duplicate mode, tap the launch to move, then tap the
+launch it should follow. Duplicate gets brighter when a source is selected.
+Tap the source a second time to clear it. The pads update to the committed order
+after the show accepts the move.
+
+Pad input waits for acknowledgement of the visible LED layout. A running
+launch that ends between feedback and a press cannot redirect the press to its
+replacement. The two modes use the shared
+[instance reorder operation](native-layers.md#reordering-active-instances).
+The virtual MIDI tests qualify the controller profile and reducer. Physical
+Push 2 verification remains open.
+
 The composable profile now edits all supported shared parameter types through
 the real command reducer. These are source-derived protocol behaviors with
 capture-sink tests; physical Push hardware has not been verified.
@@ -28,8 +50,34 @@ touch. Changing banks or active instances clears the old touch binding. If an
 instance disappears, a delayed strip input cannot edit the replacement instance.
 
 `afterglow.control.parameter-edit` supplies the pure typed editing operations;
-the Push profile supplies only MIDI addresses and local interaction state.
-Every write is a normal `:param/set` command carrying the exact instance ID.
+the Push profile supplies MIDI addresses and local interaction state. Each
+command carries the exact instance ID.
+
+## Temporary parameter edits
+
+Tolglow enables operator gestures on dedicated Push 2 connections. A custom
+host can enable them with `:operator-gestures? true` and trusted command
+dispatch. Accent is the default temporary modifier. Set
+`:temporary-encoder-modifier` to another button's MIDI CC if desired. That CC
+takes precedence over the button's usual action. Shift controls encoder step
+size, and old `:shift` and CC 49 settings now select Accent. [Push 2 MIDI reference](https://github.com/Ableton/push-interface/blob/5eb352fe3da9d07891efb7447191c03a66d9fbdd/doc/AbletonPush2MIDIDisplayInterface.asc#L2061)
+
+Hold Accent as you touch an authored parameter encoder. Turns, strip
+changes and the touched parameter's checkbox or picker apply live. Numeric,
+integer, boolean, enum, color, vector and range parameters are supported. The
+encoder remembers its mode until lift, even if you let go of the modifier first. On lift or disconnect, the show owner
+restores the pre-touch value if the gesture still owns it. A newer edit to the
+same parameter takes precedence. Temporary gestures leave no undo entry, and
+an unadmitted temporary gesture ignores turns for that touch. This includes
+empty slots and targets that have stopped running. Each encoder tracks its own
+touch. Ordinary scalar touches still record an undo entry.
+
+Push 3 supports temporary numeric edits through its captured User Mode touch,
+turn and modifier mappings. The same gesture works with Poly/Mono Aftertouch
+and MPE. See the [Push 3 setup](expressive-devices.md#push-3-user-mode).
+
+If a live effect reload makes the starting value invalid, release closes the
+gesture and keeps the current value accepted by the new definition.
 
 ## Physical strip, master and tempo
 

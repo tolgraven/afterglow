@@ -11,12 +11,19 @@
             [afterglow.control.devices.transports :as transports]))
 
 (def ports transports/midi-ports)
+
 (def status session/snapshot)
+
 (def close! session/close!)
+
 (def suspend! session/suspend!)
+
 (def resume! session/resume!)
+
 (def reconnect! session/reconnect!)
+
 (def refresh! session/refresh!)
+
 (def input! session/receive!)
 
 (defn- with-feedback [options]
