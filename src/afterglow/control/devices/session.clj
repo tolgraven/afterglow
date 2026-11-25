@@ -13,6 +13,8 @@
   gesture carries its final :completion promise. Profiles
   reconcile receipts before input and feedback. A reconciliation that observes
   a newer owner commit can request a fresh snapshot with :refresh-model? true.
+  Optional :stale-input [local event envelope] can retain physical input state
+  when reconciliation changes the show identity. It returns local state only.
   Optional :midi transport {:open! (fn [receive!] handle), :send! (fn [handle
   messages]), :close! (fn [handle])}; :display uses :open! [] and :render! [handle
   view]. Optional :schedule! takes a refresh callback and returns cancellation.
@@ -21,7 +23,8 @@
   the committed model. Its handle belongs to the active session. A profile's
   optional :advance [local model envelope] handles logical refresh deadlines
   before projection and may emit commands.
-  Hosts should durably queue operator gesture ends, including teardown ends.
+  Hosts should durably queue operator gesture ends and cancels, including those
+  dispatched during teardown.
   A host without durable admission can retain the session and call refresh!
   until :pending-gesture-ends is empty, even after the transports close.
   Call open! explicitly; without schedule! the host owns the refresh cadence."
@@ -82,7 +85,7 @@
         scheduled-launch? (grid-launch? template)
         timed-cue? (or scheduled-launch? (= :cue/cancel-launch op))
         gesture? (and (:operator-gestures? profile)
-                      (#{:gesture/begin :gesture/sample :gesture/end} op))
+                      (#{:gesture/begin :gesture/sample :gesture/end :gesture/cancel} op))
         detached (when (and gesture? (= :gesture/begin op))
                    (get-in @(:gesture-ends session) [(:control-id template) :command]))
         exact-identity? (or gesture? (= :instance/move-after op))
@@ -98,7 +101,7 @@
                    stale? {:status :rejected :reason :stale-epoch}
                    detached {:status :rejected :code :gesture-end-pending
                              :detached-gesture (select-keys detached [:show-id :epoch :control-id :gesture-id :instance-id :param])}
-                   (and gesture? (= :gesture/end (:op command)))
+                   (and gesture? (#{:gesture/end :gesture/cancel} op))
                    ;; Preserve feedback and continue releasing other controls.
                    (try (dispatch! command)
                         (catch Exception error
@@ -276,9 +279,11 @@
                        model (model!)]
                    (adopt-epoch! session model)
                    (let [reconciled (reconcile! session model event)]
-                     (when (= (show-identity model) (show-identity reconciled))
+                     (if (= (show-identity model) (show-identity reconciled))
                        (enact! session ((:input profile) (:local @(:state session)) event
-                                        reconciled (envelope! session reconciled)))))
+                                        reconciled (envelope! session reconciled)))
+                       (when-let [stale-input (:stale-input profile)]
+                         (update-state! session update :local stale-input event (envelope! session reconciled)))))
                    (refresh-session! session false)))))
            (catch Exception error
              (record-error! session error)
