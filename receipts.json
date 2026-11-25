@@ -1,0 +1,1708 @@
+{
+  "transport": "Virtual Push 3 User Mode with injected MIDI input and injected USB transfers",
+  "held-pad": [
+    7,
+    0
+  ],
+  "frames": [
+    {
+      "show-revision": 1,
+      "payload": "frames/01-live.bgr565",
+      "operation": "launch",
+      "params": {
+        "level": 0.7,
+        "period": "1"
+      },
+      "phase": "running",
+      "source": "frames/01-live-chromium.png",
+      "header": "frames/01-live.header",
+      "capture-ms": 0,
+      "overlay": null,
+      "label": "01-live",
+      "display-mode": "parameters",
+      "ack": {
+        "status": "accepted",
+        "command-id": "6e357ab6-466e-4037-a101-ab61024260a7:1:4",
+        "instance-id": "0:1",
+        "revision": 1
+      },
+      "dimmer-byte": 179,
+      "decoded": "frames/01-live-transferred.png",
+      "payload_sha256": "3ebb003e51ea6c53ef03475b32cc7bfb878d900f928c4f352bf1e4882cfd880c",
+      "visible_pixels_verified": 153600
+    },
+    {
+      "show-revision": 1,
+      "payload": "frames/02-open.bgr565",
+      "operation": "open-after-transfer",
+      "params": {
+        "level": 0.7,
+        "period": "1"
+      },
+      "phase": "running",
+      "source": "frames/02-open-chromium.png",
+      "header": "frames/02-open.header",
+      "capture-ms": 1423,
+      "overlay": {
+        "layout": "full",
+        "ratio-mode": "preferred",
+        "rows": [],
+        "row-page": 0,
+        "row-pages": 1,
+        "title": "Full cue variations",
+        "cells": [
+          {
+            "position": [
+              0,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              7
+            ],
+            "kind": "generated"
+          }
+        ]
+      },
+      "label": "02-open",
+      "display-mode": "parameters",
+      "ack": null,
+      "dimmer-byte": 179,
+      "decoded": "frames/02-open-transferred.png",
+      "payload_sha256": "a90e46b84a0cd99e530ec21e29dafd77a8e353eeb02773833a061119d9eedeab",
+      "visible_pixels_verified": 153600
+    },
+    {
+      "show-revision": 2,
+      "payload": "frames/03-saved.bgr565",
+      "operation": "append",
+      "params": {
+        "level": 0.7,
+        "period": "1"
+      },
+      "phase": "running",
+      "source": "frames/03-saved-chromium.png",
+      "header": "frames/03-saved.header",
+      "capture-ms": 2243,
+      "overlay": {
+        "layout": "full",
+        "ratio-mode": "preferred",
+        "rows": [],
+        "row-page": 0,
+        "row-pages": 1,
+        "title": "Full cue variations",
+        "cells": [
+          {
+            "position": [
+              0,
+              0
+            ],
+            "kind": "saved"
+          },
+          {
+            "position": [
+              0,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              7
+            ],
+            "kind": "generated"
+          }
+        ]
+      },
+      "label": "03-saved",
+      "display-mode": "parameters",
+      "ack": {
+        "status": "accepted",
+        "command-id": "6e357ab6-466e-4037-a101-ab61024260a7:1:21",
+        "instance-id": "0:1",
+        "revision": 2,
+        "slot": 0
+      },
+      "dimmer-byte": 179,
+      "decoded": "frames/03-saved-transferred.png",
+      "payload_sha256": "9ff787860ec4aa578c15a7357acdd1a7a908ae5ae9a7f08f289e3cc40689a324",
+      "visible_pixels_verified": 153600
+    },
+    {
+      "show-revision": 3,
+      "payload": "frames/04-applied.bgr565",
+      "operation": "apply",
+      "params": {
+        "level": 0.15,
+        "period": "1/2"
+      },
+      "phase": "running",
+      "source": "frames/04-applied-chromium.png",
+      "header": "frames/04-applied.header",
+      "capture-ms": 3096,
+      "overlay": {
+        "layout": "full",
+        "ratio-mode": "preferred",
+        "rows": [],
+        "row-page": 0,
+        "row-pages": 1,
+        "title": "Full cue variations",
+        "cells": [
+          {
+            "position": [
+              0,
+              0
+            ],
+            "kind": "saved"
+          },
+          {
+            "position": [
+              0,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              3
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              4
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              5
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              6
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              7
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              7
+            ],
+            "kind": "generated"
+          }
+        ]
+      },
+      "label": "04-applied",
+      "display-mode": "parameters",
+      "ack": {
+        "status": "accepted",
+        "command-id": "6e357ab6-466e-4037-a101-ab61024260a7:1:30",
+        "instance-id": "0:1",
+        "revision": 3
+      },
+      "dimmer-byte": 38,
+      "decoded": "frames/04-applied-transferred.png",
+      "payload_sha256": "155bfcd6dd9bc96b8e6e7dda5bbe99aefeede82e74ca7708d006c0c39568254b",
+      "visible_pixels_verified": 153600
+    },
+    {
+      "show-revision": 3,
+      "payload": "frames/05-rows.bgr565",
+      "operation": "open-rows",
+      "params": {
+        "level": 0.15,
+        "period": "1/2"
+      },
+      "phase": "running",
+      "source": "frames/05-rows-chromium.png",
+      "header": "frames/05-rows.header",
+      "capture-ms": 4087,
+      "overlay": {
+        "layout": "rows",
+        "ratio-mode": "preferred",
+        "rows": [
+          {
+            "y": 1,
+            "param": "period"
+          },
+          {
+            "y": 2,
+            "param": "level"
+          }
+        ],
+        "row-page": 0,
+        "row-pages": 1,
+        "title": "Cue parameter rows",
+        "cells": [
+          {
+            "position": [
+              0,
+              0
+            ],
+            "kind": "saved"
+          },
+          {
+            "position": [
+              0,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              2
+            ],
+            "kind": "generated"
+          }
+        ]
+      },
+      "label": "05-rows",
+      "display-mode": "parameters",
+      "ack": null,
+      "dimmer-byte": 38,
+      "decoded": "frames/05-rows-transferred.png",
+      "payload_sha256": "3119ad2461de61baf5527d5560ded27ad5a666a6487c7f3fd13ea98137cdf6dd",
+      "visible_pixels_verified": 153600
+    },
+    {
+      "show-revision": 4,
+      "payload": "frames/06-recalled.bgr565",
+      "operation": "apply",
+      "params": {
+        "level": 0.7,
+        "period": "1"
+      },
+      "phase": "running",
+      "source": "frames/06-recalled-chromium.png",
+      "header": "frames/06-recalled.header",
+      "capture-ms": 4937,
+      "overlay": {
+        "layout": "rows",
+        "ratio-mode": "preferred",
+        "rows": [
+          {
+            "y": 1,
+            "param": "period"
+          },
+          {
+            "y": 2,
+            "param": "level"
+          }
+        ],
+        "row-page": 0,
+        "row-pages": 1,
+        "title": "Cue parameter rows",
+        "cells": [
+          {
+            "position": [
+              0,
+              0
+            ],
+            "kind": "saved"
+          },
+          {
+            "position": [
+              0,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              1
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              0,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              1,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              2,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              3,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              4,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              5,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              6,
+              2
+            ],
+            "kind": "generated"
+          },
+          {
+            "position": [
+              7,
+              2
+            ],
+            "kind": "generated"
+          }
+        ]
+      },
+      "label": "06-recalled",
+      "display-mode": "parameters",
+      "ack": {
+        "status": "accepted",
+        "command-id": "6e357ab6-466e-4037-a101-ab61024260a7:1:43",
+        "instance-id": "0:1",
+        "revision": 4
+      },
+      "dimmer-byte": 179,
+      "decoded": "frames/06-recalled-transferred.png",
+      "payload_sha256": "87d33b3111096aea3c48f82171a55757b48840ac70ced40ce388ab1964445209",
+      "visible_pixels_verified": 153600
+    },
+    {
+      "show-revision": 5,
+      "payload": "frames/07-released.bgr565",
+      "operation": "end",
+      "params": {
+        "level": 0.7,
+        "period": "1"
+      },
+      "phase": "releasing",
+      "source": "frames/07-released-chromium.png",
+      "header": "frames/07-released.header",
+      "capture-ms": 6562,
+      "overlay": null,
+      "label": "07-released",
+      "display-mode": "parameters",
+      "ack": {
+        "status": "accepted",
+        "command-id": "6e357ab6-466e-4037-a101-ab61024260a7:1:50",
+        "instance-id": "0:1",
+        "revision": 5
+      },
+      "dimmer-byte": 179,
+      "decoded": "frames/07-released-transferred.png",
+      "payload_sha256": "4fb2884df4a766023bc6f088095f30f69d2a8205a48aae6cb75a30610bdb3d79",
+      "visible_pixels_verified": 153600
+    }
+  ],
+  "injected": true,
+  "afterglow": "4207bc12c2f2ca8c061732935794bf2598728d3d",
+  "size": [
+    960,
+    160
+  ],
+  "wire-format": "BGR565 little-endian",
+  "blocked-before-transfer": {
+    "position": [
+      3,
+      7
+    ],
+    "unchanged-receipt": "6e357ab6-466e-4037-a101-ab61024260a7:1:4",
+    "unchanged-params": true
+  },
+  "packed-stride": 2048,
+  "generated-pad": [
+    3,
+    7
+  ],
+  "tolglow": "ac31f60439a5edbd8a855fffacb72c5e3cb13714",
+  "video": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "width": 1280,
+        "height": 520
+      }
+    ],
+    "format": {
+      "duration": "8.000000"
+    }
+  }
+}

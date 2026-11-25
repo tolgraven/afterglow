@@ -1,0 +1,3 @@
+9dce1ae79adbb4e620a4b3a9af53ce783d97ec9a0a4f56789eb31899c3d6e3bf  resources/studio/js/manifest.edn
+4ba02963a6fd1b8882f828190d0217c9e5272a3f55e5fca3e6a9eca22ed6b037  resources/studio/js/main.js
+a73eaf23f8d33a986291efb717e64a7a2fa588af33ea596f0603a45f3a590d13  resources/studio/compute/runtime/manifest.edn
