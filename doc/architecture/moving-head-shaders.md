@@ -133,7 +133,7 @@ float32 step at 1.0, about 1.19e-7 of a normalized axis.
 
 | Row | `GL_RENDERER` | Margin | Largest scaled axis error measured |
 | --- | --- | ---: | --- |
-| `:apple-m-series` | `Apple M<n>`, optionally ` Pro`, ` Max` or ` Ultra` | 8 ulp, 9.54e-7 | 1.83e-7 on an M4 Pro with `4.1 Metal - 91.7`, 1.5 million samples |
+| `:apple-m-series` | `Apple M<n>`, optionally ` Pro`, ` Max` or ` Ultra` | 8 ulp, 9.54e-7 | 1.66e-7 on an M4 Pro with `4.1 Metal - 91.7`, 1.5 million samples |
 | `:mesa-llvmpipe` | `llvmpipe (LLVM …)` | 128 ulp, 1.53e-5 | 1.91e-6 on Mesa 26.0.8 with `llvmpipe (LLVM 21.1.8, 256 bits)`, 105,000 samples |
 | `:apple-software` | `Apple Software Renderer` | 512 ulp, 6.10e-5 | 6.61e-6 unscaled with `4.1 APPLE-21.1.1`, 2,560 samples |
 | `:unqualified` | anything else | 512 ulp, 6.10e-5 | none |
@@ -183,18 +183,21 @@ frame in float32 and takes the pan angle from the two components that lie
 across the pan axis. As the beam nears that axis those components shrink, and
 the same rounding error becomes a larger angle. The error grows with the
 secant of the requested elevation. Over 256,000 heads on the M4 Pro the
-largest unguarded pan error was 1.2e-7 beyond 30° from the pan axis and
-1.15e-6 within 0.3° of it. That is 1.2 times the Apple margin.
+largest unguarded pan error was 1.07e-6, 1.1 times the Apple margin. A
+directed sweep of 38,400 directions between 0.002° and 12° from the pan axis
+of tilted mounts reached 355 times the margin. Without the widening below,
+6,766 of its 16-bit pan words and 71 of its 8-bit pan words differed from
+the reference; with it, none did.
 
 `native-gpu/pan-margin` therefore widens the pan margin in proportion once the
 secant exceeds 8, about 7.2° from the pan axis. On Apple hardware a 16-bit pan
 within about 0.9° of the axis always resolves on the reference. The tilt
 margin is the row margin everywhere. The errors in the table are scaled the
 same way: the tilt error, and the pan error divided by the factor that widens
-its margin. With that scaling the M4 Pro maximum was 1.55e-7, 1.70e-7 and
-1.83e-7 in three sweeps of 512,000 samples, against 1.5e-7 over 51,200. All
+its margin. With that scaling the M4 Pro maximum was 1.51e-7, 1.51e-7 and
+1.66e-7 in three sweeps of 512,000 samples, against 1.5e-7 over 51,200. All
 12,000 frames packed the reference bytes. The scaling moved 2 of 1,280 heads
-in the 32-head sweep to the reference (1,026 stay native).
+in the 32-head sweep to the reference (1,028 stay native).
 
 The table is static. A measurement at `open!` would be a small sample of
 targets that the show may never use, and its largest raw error depends on how
@@ -211,9 +214,9 @@ version here.
 
 The rows were measured with pan ranges of 270° and 540° and tilt ranges of
 100° and about 306°. A narrower calibrated range turns the same angular error
-into a larger normalized error. A 60° pan range with a 40° tilt range reached
-a scaled error of 4.6e-7 on the M4 Pro, about half the Apple margin. Narrower
-ranges have not been measured.
+into a larger normalized error. With the same range on both axes, 25,600
+heads each of 60°, 30° and 10° reached 0.21, 0.30 and 0.60 times the Apple
+margin on the M4 Pro. Narrower ranges have not been measured.
 
 The host can pass `:deadline-nanos` from its frame clock (`System/nanoTime`).
 The GPU stage honors the earlier of that deadline and the owner's frame budget.
