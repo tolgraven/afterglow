@@ -89,5 +89,13 @@
       (is (= "#extension GL_ARB_shading_language_packing : enable" (second lines)))
       (is (< 1 (.indexOf lines "uniform float u_a;")))
       (is (= ["" "void main() {}"] (subvec (body-lines text) 0 2)))))
+  (testing "CRLF and CR line endings are handled like LF"
+    (doseq [eol ["\r\n" "\r"]]
+      (let [text (frames/fragment-source {:source (str "#version 300 es" eol "#extension GL_X : enable" eol "void main() {}" eol)})
+            lines (str/split-lines text)]
+        (is (= ["#version 330 core" "#extension GL_X : enable"] (subvec lines 0 2)) (pr-str eol))
+        (is (= ["" "" "void main() {}"] (subvec (body-lines text) 0 3)))
+        (is (not (str/includes? text "\r")))))
+    (is (= [[:source]] (map :path (frames/shader-errors {:source "void main(){}\r\n#version 330 core"})))))
   (is (= [[:source]] (map :path (frames/shader-errors {:source "void main(){}\n#version 330 core"}))))
   (is (= [[:source]] (map :path (frames/shader-errors {:source "#version 330 core\n#version 330 core\nvoid main(){}"})))))

@@ -56,10 +56,14 @@
         (let [late (try (renderer/await! (renderer/compile! r {:source "\n#version 300 es\n#extension GL_ARB_shading_language_packing : enable\nvoid main() {\n  fragColor = vec4(oops);\n}"}) 5000)
                         (catch clojure.lang.ExceptionInfo e (ex-data e)))]
           (is (re-find #"0:5:" (:log late)) (:log late))))
+      (testing "with CRLF line endings"
+        (let [crlf (try (renderer/await! (renderer/compile! r {:source "#version 300 es\r\n#extension GL_ARB_shading_language_packing : enable\r\nvoid main() {\r\n  fragColor = vec4(oops);\r\n}\r\n"}) 5000)
+                        (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+          (is (re-find #"0:4:" (:log crlf)) (:log crlf))))
       (is (= (vec (:pixels good))
              (vec (:pixels (render r gradient {:width 2 :height 2 :uniforms {"u_blue" 1.0}}))))
           "The resident program still renders")
-      (is (= [1 2 1] ((juxt :programs :compile-failures :compiles) (renderer/status r)))))))
+      (is (= [1 3 1] ((juxt :programs :compile-failures :compiles) (renderer/status r)))))))
 
 (deftest frames-own-their-pixels-and-caches-are-bounded
   (with-open [r (renderer/open! {:max-programs 2 :max-targets 2})]

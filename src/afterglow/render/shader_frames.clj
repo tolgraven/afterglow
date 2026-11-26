@@ -55,6 +55,12 @@
 
 (defn- error [path message] {:path path :message message})
 
+(defn- normalize-newlines
+  "CRLF and lone CR become LF, so directive handling and line numbers see the
+  same lines a driver does."
+  [source]
+  (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n")))
+
 (defn shader-errors
   "Path/message errors for a shader map; [] when valid. The GPU compiler
   reports GLSL errors separately, with its log."
@@ -69,7 +75,7 @@
         (when (and (string? source) (> (count source) max-source-chars))
           [(error [:source] (str "Shader source is limited to " max-source-chars " characters"))])
         (when (and (string? source)
-                   (let [lines (str/split-lines source)
+                   (let [lines (str/split (normalize-newlines source) #"\n")
                          versions (keep-indexed (fn [i l] (when (re-matches #"\s*#\s*version\b.*" l) i)) lines)]
                      (or (> (count versions) 1)
                          (and (seq versions) (not (every? str/blank? (take (first versions) lines)))))))
@@ -112,7 +118,7 @@
   before it, or an #extension) stays as an empty line, so `#line 1` numbers
   the body exactly as the author's text."
   [source]
-  (let [lines (str/split source #"\n" -1)
+  (let [lines (str/split (normalize-newlines source) #"\n" -1)
         version (version-line lines)]
     (reduce (fn [{:keys [extensions body]} [i line]]
               (cond
