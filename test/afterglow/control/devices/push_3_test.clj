@@ -941,7 +941,7 @@
       (let [id (:instance-id (view))]
         (testing "a touch reports the host control and opens no parameter gesture"
           (@receive [0x92 10 127])
-          (is (= {:target :host :control {:knob-id :look} :editable? true} (:touched-control (view))))
+          (is (= {:knob-id :look} (:touched-control (view))) "the host's control is the touched control")
           (is (= [] (:touched-parameters (view))))
           (is (empty? (:encoder-gestures (:local (session/snapshot device))))))
         (testing "turns go to the host with their detents, and Shift marks them fine"
@@ -960,11 +960,12 @@
 
 (deftest host-encoder-bindings-are-validated
   (let [host {:host-encoder (fn [& _] [])}]
-    (doseq [[binding extra] [[{:target :host} host] [{:target :host :control :a} {}]
-                             [{:target :host :control :a :param :level} host]
-                             [{:target :host :control :a :step 1} host]
-                             [{:target :master :control :a} host] [{:param :level :control :a} host]]]
+    (doseq [[binding extra] [[{:target :host} host] [{:target :host :control {:a 1}} {}]
+                             [{:target :host :control :a} host]
+                             [{:target :host :control {:a 1} :param :level} host]
+                             [{:target :host :control {:a 1} :step 1} host]
+                             [{:target :master :control {:a 1}} host] [{:param :level :control {:a 1}} host]]]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Encoder bindings"
                             (push/profile (merge options extra {:encoder-bindings {:level binding}})))
           (pr-str binding)))
-    (is (map? (push/profile (merge options host {:encoder-bindings {:level {:target :host :control nil}}}))))))
+    (is (map? (push/profile (merge options host {:encoder-bindings {:level {:target :host :control {}}}}))))))

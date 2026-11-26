@@ -524,18 +524,17 @@
   [options touches]
   (some (fn [id]
           (let [{:keys [target control]} (get-in options [:encoder-bindings id])]
-            (when (= :host target) {:target :host :control control :editable? true})))
+            (when (= :host target) control)))
         touches))
 
 (defn- user-profile
   "Construct a pure profile from a captured :layout. Explicit :user-mode? true
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
-  :step n}, {:target :master} or {:target :host :control c}. A host target
-  calls the :host-encoder option with c, the detents, fine? (Shift) and the
-  model, and dispatches the commands it returns; its touch starts no parameter
-  gesture and is reported as the view's :touched-control {:target :host
-  :control c}. :button-bindings maps IDs to semantic actions.
+  :step n}, {:target :master} or {:target :host :control c}, where c is a map
+  the host chooses. A host target calls the :host-encoder option with c, the
+  detents, fine? (Shift) and the model, and dispatches the commands it returns;
+  its touch starts no parameter gesture and c is the view's :touched-control. :button-bindings maps IDs to semantic actions.
   :pressure-param and :touch-strip-param opt into expression parameter control."
   [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings temporary-encoder-modifier]
     :or {page-id :main encoder-bindings {} button-bindings {}} :as options}]
@@ -551,7 +550,7 @@
                    (or (and (keyword? (:param binding)) (nil? (:target binding)) (not (contains? binding :control)))
                        (and (= :master (:target binding)) (nil? (:param binding)) (not (contains? binding :control)))
                        (and (= :host (:target binding)) (nil? (:param binding)) (nil? (:step binding))
-                            (contains? binding :control) (ifn? (:host-encoder options))))
+                            (map? (:control binding)) (ifn? (:host-encoder options))))
                    (or (nil? (:step binding)) (and (params/finite-number? (:step binding)) (pos? (:step binding)))))
               "Encoder bindings need a captured ID, numeric parameter/master/host target and positive step" {:id id}))
     (doseq [[id action] button-bindings]
