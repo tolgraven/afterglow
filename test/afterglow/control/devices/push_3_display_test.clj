@@ -210,5 +210,24 @@
                   (is (= :reused (get-in receipt [:usb :context])))
                   (is (= (:frames receipt) (nth (counts) 6) (nth (counts) 7)))
                   (is (< 20 (:frames receipt) 40) (pr-str receipt))))
+              (testing "release refuses while a handle is open, so no handle outlives its context"
+                (reset-mode! 0)
+                (let [handle (usb/open! options)]
+                  (try (is (thrown-with-msg? Exception #"Close every" (usb/release-contexts!)))
+                       (is (zero? (nth (counts) 1)) "libusb_exit was not called under a live handle")
+                       (finally (usb/close! handle)))
+                  (usb/close! handle)
+                  (is (= 1 (nth (counts) 3)) "a second close! does not close the device again"))
+                (is (= 1 (usb/release-contexts!)))
+                (is (= 1 (nth (counts) 1))))
+              (testing "concurrent first callers share one scan; background preparation never throws"
+                (reset-mode! 0)
+                (let [pending (doall (repeatedly 4 #(usb/prepare-in-background! options)))
+                      results (mapv #(deref % 5000 ::timeout) pending)]
+                  (is (= 1 (first (counts))))
+                  (is (= [false true true true] (sort (map :reused? results))) (pr-str results)))
+                (let [missing @(usb/prepare-in-background! {:library "/nonexistent/push3-libusb.dylib"})]
+                  (is (true? (:failed? missing)))
+                  (is (string? (:error missing)))))
               (finally (usb/release-contexts!)))))
         (finally (io/delete-file file true))))))
