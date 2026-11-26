@@ -61,14 +61,26 @@
         flags (if (contains? selected (:id instance)) (conj flags control) (disj flags control))]
     (if (seq flags) (assoc instance ::selected flags) (dissoc instance ::selected))))
 
-(defn- toggle [model {:keys [control selector additive?] :or {additive? false}}]
+(defn- action-mode
+  "The mode for one toggle: an explicit :mode, the :additive? shorthand, or
+  the configured mode for the control."
+  [model {:keys [control additive? mode] :as command}]
+  (when (and (contains? command :additive?) (not (boolean? additive?)))
+    (reject! :invalid-value "The additive modifier must be boolean"))
+  (when (and (contains? command :mode) (not (#{:exclusive :additive} mode)))
+    (reject! :invalid-value "A toggle mode is :exclusive or :additive" {:mode mode}))
+  ;; :additive? false only means "no additive modifier", so it agrees with either mode.
+  (when (and (true? additive?) (= :exclusive mode))
+    (reject! :invalid-value "The additive modifier contradicts the toggle mode"
+             {:mode mode :additive? additive?}))
+  (cond mode mode additive? :additive :else (get (modes model) control)))
+
+(defn- toggle [model {:keys [control selector] :as command}]
   (when-not (contains? default-modes control)
     (reject! :invalid-control "Effect selection controls are Solo and Mute"))
-  (when-not (boolean? additive?)
-    (reject! :invalid-value "The additive modifier must be boolean"))
-  (let [instances (instance-order/ordered model)
+  (let [mode (action-mode model command)
+        instances (instance-order/ordered model)
         targets (select-targets model selector instances)
-        mode (if additive? :additive (get (modes model) control))
         current (into #{} (comp (filter #(selected? % control)) (map :id)) instances)
         selected (select-ids current targets mode)
         ordered (mapv :id instances)
@@ -93,8 +105,10 @@
 
 (defn apply-operation
   "Apply a selection operation within the shared command reducer. Selectors use
-  the category selector dimensions and optionally a native :layer-id. :additive?
-  applies to the current toggle. Invalid operations throw a :control/error."
+  the category selector dimensions and optionally a native :layer-id. A toggle's
+  :mode (:exclusive or :additive) overrides the configured mode for that action
+  only; :additive? true is shorthand for :mode :additive and contradicts
+  :mode :exclusive. Invalid operations throw a :control/error."
   [model {:keys [op modes] :as command}]
   (case op
     :effect-selection/toggle (toggle model command)

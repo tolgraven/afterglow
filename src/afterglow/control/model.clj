@@ -728,8 +728,15 @@
   :expected-revision when the operation depends on a previously displayed order.
 
   :effect-selection/toggle takes :control (:solo or :mute), a :selector,
-  and optional :additive? for a single action. :effect-selection/configure
-  takes :modes with either control set to :exclusive or :additive.
+  and an optional :mode (:exclusive or :additive) that overrides the
+  configured mode for that action alone. An exclusive toggle replaces the
+  control's whole selection with its targets in one commit, or clears it when
+  exactly those targets are selected. A toggle whose selector matches no
+  instance is an accepted no-op: the selection stays and no event is emitted.
+  :additive? true is the older shorthand for :mode :additive, and
+  :additive? true with :mode :exclusive is rejected; :additive? false means no
+  modifier and agrees with either mode. :effect-selection/configure takes :modes
+  with either control set to :exclusive or :additive.
 
   Gesture and history operations require an :operator-id from a trusted caller
   in the separate authority argument. This is a public actor identifier for
