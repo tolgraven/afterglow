@@ -984,8 +984,7 @@
     (is (= [115 0 204 128 0 179 77 0 153] (apply bytes-at actual 1 (range 1 10))))
     (doseq [barrier [(assoc-in upper [:batch :opacity] 0.5)
                      (assoc-in upper [:batch :blend] :add)
-                     (assoc-in upper [:batch :blend] :max)
-                     (assoc-in upper [:batch :target-ids] [:b :a])]]
+                     (assoc-in upper [:batch :blend] :max)]]
       (let [scene [lower barrier]]
         (is (= (buffer-values (with-redefs [coverage/plan identity] (draw scene)))
                (buffer-values (sample scene))))
@@ -1002,6 +1001,50 @@
     ;; Removing/reordering the cover exposes the lower contribution immediately.
     (is (= [26 51 77] (bytes-at (sample [upper lower]) 1 1 4 7)))
     (is (= [26 51 77] (bytes-at (sample [lower]) 1 1 4 7)))))
+
+(deftest covered-indexed-columns-preserve-live-targets-and-original-faults
+  (let [fixtures (mapv #(assoc rgb :id %1 :address %2) [:a :b :c :d] [1 4 7 10])
+        typed (fn [source ids fields]
+                {:kind :batch :source source
+                 :batch {:target-ids ids :outputs (update-vals fields #(field :number 1 %))}})
+        lower (typed source-a [:b :c :b :d] {:red [0.3 0.2 0.6 0.5] :blue [0.2 0.3 0.4 0.5]})
+        upper (typed source-b [:d :b :b] {:red [0.8 0.1 0.75]})
+        prefix (typed source-b [:a :b] {:red [0.3 0.7]})
+        exact {:kind :assignments :assignments [(assignment :c :blue 1/3)]}
+        draw (fn [patch blocks] (frame/resolve-contributions patch blocks {:include-values? false :compact-values? true}))
+        plan coverage/plan
+        planned (atom nil)
+        observed (fn [patch blocks]
+                   (with-redefs [coverage/plan #(reset! planned (plan %))] (draw patch blocks)))
+        masks (fn [] (into {} (map (juxt :attribute ::coverage/validate-targets)) (get-in @planned [0 :compiled :columns])))
+        parity (fn [rig blocks]
+                 (let [reference (with-redefs [coverage/plan identity] (draw rig blocks))
+                       candidate (observed rig blocks)]
+                   (is (= (buffer-values reference) (buffer-values candidate)))
+                   (is (= (frame/project-compact (:compact reference)) (frame/project-compact (:compact candidate))))
+                   candidate))]
+    (let [frame (parity fixtures [lower upper])]
+      (is (= [0 191 51 204] (bytes-at frame 1 1 4 7 10)))
+      (is (= "{1, 3}" (str (:red (masks)))))
+      (is (nil? (:blue (masks)))))
+    (doseq [rig [fixtures (vec (rseq fixtures))]
+            blocks [[lower upper prefix] [exact lower upper prefix] [upper lower]
+                    [lower (assoc-in upper [:batch :opacity] 0.0) prefix]
+                    [lower (assoc-in upper [:batch :opacity] 0.5) prefix]
+                    [lower (assoc-in upper [:batch :blend] :max) prefix]]]
+      (parity rig blocks))
+    (doseq [levels [[2.0 3.0 0.1 0.2] [0.5 3.0 2.0 0.2]]]
+      (let [blocks [(assoc-in lower [:batch :outputs :red] (field :number 1 levels)) upper]
+            error #(some-> (caught-exception %) ex-data)
+            expected (with-redefs [coverage/plan identity] (error #(draw fixtures blocks)))
+            actual (error #(observed fixtures blocks))]
+        (is (= expected actual))
+        (is (= source-a (:effect-source actual)))
+        (is (= (if (= 2.0 (first levels)) 0 1) (:row actual)))))
+    (let [add (assoc-in (typed source-b [:b] {:red [0.6]}) [:batch :blend] :add)
+          error (caught-exception #(observed fixtures [lower add upper]))]
+      (is (= source-b (:effect-source (ex-data error))))
+      (is (nil? (:red (masks)))))))
 
 (deftest uniform-native-tuples-and-expanded-arrays-paint-identical-fixtures
   (let [ids [:left 42 "right"]
