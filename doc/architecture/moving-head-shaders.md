@@ -112,6 +112,9 @@ retain the CPU renderer’s behavior. The output adds a `:movement` map with
 `:backend`, `:gpu-heads` and `:cpu-heads`. If a small float32 margin around a native axis
 straddles a physical rounding boundary, the reference solver resolves that
 head. The margin depends on the driver, as the next section describes.
+The solver subtracts an aim from its mount in float64 and draws the
+difference as a direction. A float32 difference of two nearby points could
+move an axis further than the driver error that the margin covers.
 The check uses the packed channel format, including 8-bit, fine, and
 inverted channels. Exact coordinates, unstable float32 subtraction, and
 ambiguous wrap, clamp or pole decisions also go through the reference solver.

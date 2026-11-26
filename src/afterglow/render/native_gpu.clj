@@ -107,9 +107,13 @@
                   target (if (map? assignment) (or (:aim assignment) (:direction assignment)) assignment)]]
       (when-not (and (vector? target) (= 3 (count target)))
         (throw (ex-info "Expected a world-space aim or direction vector" {:fixture-id id :target target})))
-      (doseq [coord target] (.put data (context/finite-float coord)))
+      ;; Subtract an aim from its mount in float64, as the reference does, and
+      ;; draw the difference as a direction. A float32 difference of nearby
+      ;; points can move an axis further than the rounding guard measures.
+      (doseq [[coord origin] (map vector target (if direction? [0 0 0] (get-in patch [:by-id id :position])))]
+        (.put data (context/finite-float (if direction? coord (- (double coord) (double origin))))))
       (.put data (float (or (get pans id) -1)))
-      (.put data (float (if direction? 1 0))))
+      (.put data (float 1)))
     (.flip data)))
 
 (defn- dispatch! [^GL3 gl solver ^FloatBuffer targets]

@@ -167,6 +167,28 @@
         (is (= (if fine? #{:clear} #{}) (set (keys (gpu/solve-selected! solver targets {})))))
         (is (= #{:near :clear} (set (keys (gpu/solve-selected! unguarded targets {})))))))))
 
+(deftest an-aim-near-its-mount-packs-the-reference-bytes
+  ;; Every component of this aim passes movement's float32 subtraction check.
+  ;; Subtracted in float32, its pan was 1.13 times its guard margin off on an
+  ;; Apple M4 Pro and packed one 16-bit code above the reference.
+  (let [position [2.7790385965192548 2.4569145810083777 3.104342354608092]
+        aim [2.55913148710616 2.660773155197291 3.2690111407200733]
+        patch (frame/compile-patch
+               [{:id :near :position position :rotation-deg [-48.70789975821497 134.36556034807018 6.9888084391654814]
+                 :universe 0 :address 1 :channels {:pan [1 2] :tilt [3 4]}
+                 :calibration {:pan {:min-deg -180.0 :max-deg 180.0} :tilt {:min-deg -135.0 :max-deg 135.0}}}])
+        blocks [{:kind :assignments :assignments [{:target-id :near :attribute :aim :value aim}]}]
+        expected (frame/resolve-contributions patch blocks)]
+    (with-open [solver (gpu/open! patch)
+                owner (movement/open! {:budget-ms 10000})]
+      (let [unguarded (assoc-in solver [:resources :rounding :margin] 0.0)]
+        (is (= (gpu/solve-selected! unguarded {:near {:direction (mapv - aim position)}} {})
+               (gpu/solve-selected! unguarded {:near {:aim aim}} {}))
+            "An aim draws as the float64 direction from its mount"))
+      (let [actual (movement/resolve-contributions! owner patch blocks)]
+        (is (= 46321 (motor-word expected (get-in patch [:by-id :near]) :pan)))
+        (is (= (update-vals (:universes expected) vec) (update-vals (:universes actual) vec)))))))
+
 (defn- sweep-patch [heads channels]
   (frame/compile-patch
    (mapv (fn [i]
