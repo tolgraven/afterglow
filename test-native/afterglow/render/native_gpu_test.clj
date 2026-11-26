@@ -274,8 +274,9 @@
         ;; An axis stays native while its guard window sits inside one code
         ;; step, so both axes of a head do for about the square of that share.
         (is (<= (* 0.9 clear clear accepted) retained accepted total))
-        (when (<= 2.0 window)
-          (is (zero? retained) "A window of two code steps always straddles a rounding boundary"))
+        ;; A margin above half a step reaches a boundary even from a clamped end.
+        (when (< 1.0 window)
+          (is (zero? retained) "A window wider than one code step always straddles a rounding boundary"))
         (when (and apple-floor (= :apple-m-series (:row rounding)))
           (is (<= apple-floor retained)))))))
 
