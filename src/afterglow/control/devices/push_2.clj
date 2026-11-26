@@ -86,14 +86,8 @@
        (sort-by :encoder)
        push-view/touched-parameters))
 
-(defn- control-touch
-  "The most recent touch when it addresses a control rather than a parameter."
-  [state]
-  (let [touch (get (:touches state) (peek (:touch-order state)))]
-    (when (:target touch) touch)))
-
 (defn- system-touch [state]
-  (#{:master :tempo} (:target (control-touch state))))
+  (:target (get (:touches state) (peek (:touch-order state)))))
 
 (defn- manual-clock? [model]
   (contains? #{nil :manual} (get-in model [:transport :source])))
@@ -418,17 +412,13 @@
 
 (defn- indexed-display [state model index]
   (let [state (selected-state state model)
-        {:keys [target knob-id]} (control-touch state)]
-    (cond-> (push-view/view state model index
-                            {:status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
-                             :touched-parameter (touched state model)
-                             :touched-parameters (all-touched state model)
-                             :touched-control (case target
-                                                :knob {:target :knob :knob-id knob-id :editable? true}
-                                                (:master :tempo) {:target target
-                                                                  :editable? (or (= :master target) (manual-clock? model))}
-                                                nil)})
-      (:knob-page state) (assoc :knob-page {:knob-ids (:knob-page state)}))))
+        target (system-touch state)]
+    (push-view/view state model index
+                    {:status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
+                     :touched-parameter (touched state model)
+                     :touched-parameters (all-touched state model)
+                     :touched-control (when target
+                                        {:target target :editable? (or (= :master target) (manual-clock? model))})})))
 
 (defn display-view
   "Device-independent labels/values. A display transport draws this map."
@@ -547,7 +537,19 @@
                         (and overlay-state (nil? next-overlay)) (assoc :pad-overlay-clearing? true))
                :commands (:commands change)})))))))
 
-(defn- feedback [device-id timeout-ms batch-size pad-overlay state model envelope]
+(defn- encoder-overlay-input
+  "Offer a decoded event to the host's encoder overlay. A nil result leaves the
+  event to Push; otherwise the result's :state and :commands are the outcome."
+  [overlay state event model]
+  (when (and overlay (:ready? state))
+    (when-let [change ((:input overlay) (:encoder-overlay state) event model
+                       {:shift? (boolean (:shift? state))
+                        :touched (into (sorted-set) (filter #(<= 0 % 7))
+                                       (concat (keys (:touches state)) (keys (:encoder-touch-modes state))))})]
+      {:state (assoc state :encoder-overlay (:state change (:encoder-overlay state)))
+       :commands (vec (:commands change))})))
+
+(defn- feedback [device-id timeout-ms batch-size pad-overlay encoder-overlay state model envelope]
   (let [time (:time-ms envelope)
         state (encoder-gesture/observe-temporary-tails (selected-state state model) time)
         alive (set (keys (:instances model)))
@@ -574,6 +576,7 @@
                 (-> (dissoc :pad-overlay :pad-overlay-projection :pad-overlay-presented)
                     (assoc :pad-overlay-clearing? true)))
         display (cond-> (indexed-display state model index)
+                  encoder-overlay (merge ((:project encoder-overlay) (:encoder-overlay state) model))
                   grid (assoc :active-cue-grid (:view grid))
                   overlay (assoc :pad-overlay (:display overlay (:view overlay)))
                   (get-in overlay [:display :title]) (assoc :title (get-in overlay [:display :title])))
@@ -678,47 +681,13 @@
                             (seq commands) (update :commands #(into commands %))
                             resolved? (assoc :refresh-model? true)))))))
 
-(def ^:private reserved-ccs
-  "Buttons and encoders this profile already interprets."
-  (into #{15 31 48 49 51 57 59 62 63 85 86 88 110 111 112 113}
-        (concat (range 20 28) (range 44 48) (range 71 80))))
-
-(defn- valid-knob-page? [{:keys [button knob-ids step] :as page} modifier-cc]
-  (and (map? page) (every? #{:button :knob-ids :step} (keys page))
-       (integer? button) (<= 0 button 127) (not (reserved-ccs button)) (not= button modifier-cc)
-       (vector? knob-ids) (<= 1 (count knob-ids) 8)
-       (every? #(or (keyword? %) (and (string? %) (seq %))) knob-ids)
-       (or (nil? step) (and (params/finite-number? step) (pos? step)))))
-
-(defn- track-touch-held?
-  "A track encoder is physically touched. A touch on a slot without a parameter
-  records only its touch mode, which its lift must still clear."
-  [state]
-  (some #(<= 0 % 7) (concat (keys (:touches state)) (keys (:encoder-touch-modes state)))))
-
-(defn- knob-page-event? [{:keys [type note controller]}]
-  (or (and (#{:note-on :note-off} type) (<= 0 note 7))
-      (and (= :control-change type) (<= 71 controller 78))))
-
-(defn- knob-page-input
-  "Track encoders and their touches while the knob page is shown. A turn sends
-  the host's :knob/nudge; a touch is reported as the view's :touched-control."
-  [{:keys [knob-ids step]} state {:keys [type note controller raw-value]}]
-  (let [release #(-> % (update :touches dissoc note) (update :touch-order (fn [order] (vec (remove #{note} order)))))]
-    (case type
-      :note-on {:state (if-let [id (get knob-ids note)]
-                         (-> (release state)
-                             (assoc-in [:touches note] {:target :knob :knob-id id :encoder note})
-                             (update :touch-order conj note))
-                         state)}
-      :note-off {:state (release state)}
-      (let [id (get knob-ids (- controller 71))
-            delta (codec/signed-encoder raw-value)
-            increment (or step 1/100)]
-        {:state state
-         :commands (if (and id (not (zero? delta)))
-                     [{:op :knob/nudge :knob-id id :delta (* delta (if (:shift? state) (/ increment 10) increment))}]
-                     [])}))))
+(defn- with-encoder-overlay-reset [profile reset]
+  (let [{:keys [stop reset-model]} profile
+        reset-overlay #(cond-> % (contains? % :encoder-overlay) (update :encoder-overlay reset))]
+    (assoc profile
+           :stop (fn [state model envelope disconnected?]
+                   (update (stop state model envelope disconnected?) :state reset-overlay))
+           :reset-model (fn [state] (reset-overlay (reset-model state))))))
 
 (defn profile
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
@@ -742,19 +711,23 @@
   Optional :parameter-editor takes model, instance, parameter, input and edit
   options. Return {:value v} to use a host-specific exact representation through
   the normal parameter and gesture dispatch, or nil to use Afterglow typed editing.
-  Optional :knob-page {:button cc :knob-ids [id ...] :step n} toggles the eight
-  track encoders between parameters and up to eight host knobs with a free
-  button CC. While it is shown a turn sends the host's :knob/nudge with step
-  (default 1/100) per detent, a tenth with Shift; a touch is the view's
-  :touched-control, and the view carries :knob-page {:knob-ids ids}. The page
-  does not change while a track encoder is touched."
+  Optional :encoder-overlay {:input f :project f :reset f} lets a host take
+  encoders, touches and buttons. :input takes the overlay state, a decoded event,
+  the committed model and {:shift? :touched}, where :touched is the set of track
+  encoders (0-7) Push holds a touch or touch mode for. Return {:state s :commands
+  [...]} to consume the event, or nil to leave it to Push. :project takes the
+  overlay state and model and returns a map merged into the display view.
+  Optional :reset takes the overlay state when Push resets or stops."
   [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt
            operator-gestures? temporary-encoder-modifier active-cue-grid? pad-overlay parameter-editor
-           knob-page]
+           encoder-overlay]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
   (when (and pad-overlay (not (every? ifn? ((juxt :input :project) pad-overlay))))
     (throw (ex-info "Pad overlay requires input and projection functions" {})))
+  (when (and encoder-overlay (not (and (every? ifn? ((juxt :input :project) encoder-overlay))
+                                       (or (nil? (:reset encoder-overlay)) (ifn? (:reset encoder-overlay))))))
+    (throw (ex-info "Encoder overlay requires input and projection functions" {})))
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
@@ -768,9 +741,6 @@
                       (if (contains? #{nil :accent :shift 49} temporary-encoder-modifier)
                         accent-cc temporary-encoder-modifier))
         modifier-key (when (some? modifier-cc) :temporary-encoder-modifier-down?)
-        _ (when (and (some? knob-page) (not (valid-knob-page? knob-page modifier-cc)))
-            (throw (ex-info "Knob page needs a free button CC, one to eight knob IDs and a positive step"
-                            {:knob-page knob-page})))
         grid (launch/grid options)
         {:keys [modes actions] :as display-capabilities} (:display-capabilities display)
         _ (when-not (and (or (nil? modes) (and (set? modes) (seq modes) (every? display/modes modes)))
@@ -795,17 +765,14 @@
                     down? (and control (pos? (:raw-value event)))
                     cc (when down? control)
                     modifier-input? (and control (= modifier-cc control))
-                    overlay-input (when (and pad-overlay (not modifier-input?))
+                    encoder-input (when-not modifier-input?
+                                    (encoder-overlay-input encoder-overlay state event model))
+                    overlay-input (when (and pad-overlay (not modifier-input?) (not encoder-input))
                                     (pad-overlay-input pad-overlay (selected-state state model) event model))
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
                 (cond
                   modifier-input? {:state (assoc state modifier-key down?)}
-                  (and knob-page control (= control (:button knob-page)))
-                  {:state (cond-> state
-                            (and down? (not (track-touch-held? state)))
-                            (assoc :knob-page (when-not (:knob-page state) (:knob-ids knob-page))))}
-                  (and knob-page (:knob-page state) (:ready? state) (knob-page-event? event))
-                  (knob-page-input knob-page state event)
+                  encoder-input encoder-input
                   overlay-input overlay-input
                   (and target-search (= 111 cc))
                   {:state (targets/toggle (cond-> state (:active-grid state) (set-active-grid-mode nil))
@@ -819,7 +786,7 @@
                               {:state (targets/pad state (:note event) [x y])}
                               (targets/launch state (input device-id grid (true? operator-gestures?)
                                                            modifier-key parameter-editor state event model envelope)))))))
-     :feedback (partial feedback device-id timeout-ms led-batch-size pad-overlay)
+     :feedback (partial feedback device-id timeout-ms led-batch-size pad-overlay encoder-overlay)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
      :reset-model (fn [state]
@@ -851,6 +818,7 @@
                  :commands (:commands hold)})))}
       grid launch-receipt)
       modifier-key (assoc :stale-input (partial retain-stale-encoder-input modifier-cc modifier-key))
+      (:reset encoder-overlay) (with-encoder-overlay-reset (:reset encoder-overlay))
       (true? operator-gestures?) with-encoder-gestures)))
 
 (defn connect!

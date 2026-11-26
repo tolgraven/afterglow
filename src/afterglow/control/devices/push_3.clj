@@ -195,7 +195,7 @@
     {:state state}))
 
 (defn- encoder [options state {:keys [control-id delta]} model envelope]
-  (let [{:keys [target param step knob-id]} (get-in options [:encoder-bindings control-id])
+  (let [{:keys [target param step control]} (get-in options [:encoder-bindings control-id])
         fine? (boolean (shift-held? options state))
         active (encoder-gesture/active state control-id)
         mode (get-in state [:encoder-touch-modes control-id])]
@@ -204,10 +204,8 @@
       (= target :master)
       (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
         {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
-      (= target :knob)
-      (let [increment (or step 1/100)]
-        {:state state :commands [{:op :knob/nudge :knob-id knob-id
-                                  :delta (* delta (if fine? (/ increment 10) increment))}]})
+      (= target :host)
+      {:state state :commands (vec ((:host-encoder options) control delta fine? model))}
       active (encoder-gesture/edit state active
                #(turn-parameter options state model (:instance-id active) (:param active) step delta fine?))
       (or (= :temporary mode)
@@ -521,25 +519,23 @@
     (set-held-button options state control-id pressed?)
     :else state))
 
-(defn- knob-id? [id]
-  (or (keyword? id) (and (string? id) (seq id))))
-
-(defn- touched-knob
-  "The first touched encoder bound to a host knob, in the touch list's stable order."
+(defn- touched-host-control
+  "The first touched encoder bound to a host control, in the touch list's stable order."
   [options touches]
   (some (fn [id]
-          (let [{:keys [target knob-id]} (get-in options [:encoder-bindings id])]
-            (when (= :knob target) {:target :knob :knob-id knob-id :editable? true})))
+          (let [{:keys [target control]} (get-in options [:encoder-bindings id])]
+            (when (= :host target) {:target :host :control control :editable? true})))
         touches))
 
 (defn- user-profile
   "Construct a pure profile from a captured :layout. Explicit :user-mode? true
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
-  :step n}, {:target :master} or {:target :knob :knob-id id :step n}. A knob
-  target sends the host's :knob/nudge with step (default 1/100) per detent, a
-  tenth with Shift, and its touch is reported as the view's :touched-control.
-  :button-bindings maps IDs to semantic actions.
+  :step n}, {:target :master} or {:target :host :control c}. A host target
+  calls the :host-encoder option with c, the detents, fine? (Shift) and the
+  model, and dispatches the commands it returns; its touch starts no parameter
+  gesture and is reported as the view's :touched-control {:target :host
+  :control c}. :button-bindings maps IDs to semantic actions.
   :pressure-param and :touch-strip-param opt into expression parameter control."
   [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings temporary-encoder-modifier]
     :or {page-id :main encoder-bindings {} button-bindings {}} :as options}]
@@ -551,12 +547,13 @@
     (valid! (and (map? encoder-bindings) (map? button-bindings)) "Control bindings must be maps" {})
     (doseq [[id binding] encoder-bindings]
       (valid! (and (contains? (:encoders layout) id) (map? binding)
-                   (every? #{:param :target :step :knob-id} (keys binding))
-                   (or (and (keyword? (:param binding)) (nil? (:target binding)) (nil? (:knob-id binding)))
-                       (and (= :master (:target binding)) (nil? (:param binding)) (nil? (:knob-id binding)))
-                       (and (= :knob (:target binding)) (nil? (:param binding)) (knob-id? (:knob-id binding))))
+                   (every? #{:param :target :step :control} (keys binding))
+                   (or (and (keyword? (:param binding)) (nil? (:target binding)) (not (contains? binding :control)))
+                       (and (= :master (:target binding)) (nil? (:param binding)) (not (contains? binding :control)))
+                       (and (= :host (:target binding)) (nil? (:param binding)) (nil? (:step binding))
+                            (contains? binding :control) (ifn? (:host-encoder options))))
                    (or (nil? (:step binding)) (and (params/finite-number? (:step binding)) (pos? (:step binding)))))
-              "Encoder bindings need a captured ID, numeric parameter/master/knob target and positive step" {:id id}))
+              "Encoder bindings need a captured ID, numeric parameter/master/host target and positive step" {:id id}))
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
@@ -741,7 +738,7 @@
                  :projection (:view projection) :display overlay-display})
         view (cond-> (assoc (push-view/view selected model index {:status :ready :touched-parameter touch
                                                                  :touched-parameters touches
-                                                                 :touched-control (touched-knob options touched-ids)})
+                                                                 :touched-control (touched-host-control options touched-ids)})
                              :fine? (boolean (shift-held? options controls)))
                overlay-display (assoc :display-mode :parameters :pad-overlay overlay-display)
                frame (vary-meta assoc ::overlay-frame frame))

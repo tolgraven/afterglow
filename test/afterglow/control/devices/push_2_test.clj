@@ -1709,100 +1709,88 @@
               (receive! h [0x80 36 0])))
           (finally (finish! h)))))))
 
-(defn- knob-harness [knob-page]
-  (let [h (fixture/harness {:profile (push/profile {:knob-page knob-page :operator-gestures? true})})
-        knobs (atom [])
+(defn- test-overlay
+  "A host overlay for the tests: CC 52 toggles it, and while it is shown the
+  track encoders and their touches are the host's."
+  [contexts]
+  {:input (fn [overlay {:keys [type note controller raw-value]} _model context]
+            (swap! contexts conj context)
+            (cond
+              (and (= :control-change type) (= 52 controller))
+              {:state (cond-> overlay (and (pos? raw-value) (empty? (:touched context))) (update :on? not))}
+              (and (:on? overlay) (= :control-change type) (<= 71 controller 78))
+              {:state overlay :commands [{:op :test/turn :slot (- controller 71)
+                                          :detents (codec/signed-encoder raw-value) :shift? (:shift? context)}]}
+              (and (:on? overlay) (#{:note-on :note-off} type) (<= 0 note 7))
+              {:state (if (= :note-on type) (assoc-in overlay [:touches note] true) (update overlay :touches dissoc note))}))
+   :project (fn [overlay _model] (when (:on? overlay) {:host-overlay (select-keys overlay [:on? :touches])}))
+   :reset (fn [overlay] (dissoc overlay :touches))})
+
+(defn- overlay-harness [overlay]
+  (let [h (fixture/harness {:profile (push/profile {:encoder-overlay overlay :operator-gestures? true})})
+        host (atom [])
         apply! (get-in h [:options :dispatch!])
         h (assoc h :session (session/create
                               (assoc (:options h) :dispatch!
                                      (fn [command]
-                                       (if (= "knob" (namespace (:op command)))
-                                         (do (swap! knobs conj (select-keys command [:op :knob-id :delta]))
+                                       (if (= "test" (namespace (:op command)))
+                                         (do (swap! host conj (select-keys command [:op :slot :detents :shift?]))
                                              {:status :accepted})
                                          (apply! command))))))]
     (swap! (:show h) assoc-in [:registry :effects :wash :params] schemas)
     (swap! (:show h) assoc-in [:registry :effects :wash :param-order] order)
-    (assoc (fixture/ready! h) :knobs knobs)))
+    (assoc (fixture/ready! h) :host host)))
 
-(deftest knob-page-turns-host-knobs-and-reports-the-touch
-  (let [h (knob-harness {:button 52 :knob-ids [:look "warmth"]})
+(defn- rendered [h]
+  (some (fn [[kind view]] (when (= :display/render kind) view)) (rseq @(:log h))))
+
+(deftest an-encoder-overlay-takes-encoders-touches-and-buttons-it-claims
+  (let [contexts (atom [])
+        h (overlay-harness (test-overlay contexts))
         id (launch! h 36)
         level #(get (values h id) :level)]
     (try
-      (testing "the page is off until its button is pressed; encoders edit parameters"
+      (testing "unclaimed events reach Push"
         (receive! h [0xb0 72 1])
         (is (= 0.51 (level)))
-        (is (nil? (:knob-page (view h))))
-        (is (= [] @(:knobs h))))
-      (testing "the button toggles the page on press only"
-        (receive! h [0xb0 52 127])
-        (receive! h [0xb0 52 0])
-        (is (= {:knob-ids [:look "warmth"]} (:knob-page (view h)))))
-      (testing "a touch is reported as a knob control and starts no parameter gesture"
+        (is (nil? (:host-overlay (rendered h)))))
+      (testing "the host sees the track encoders Push holds a touch for"
         (receive! h [0x90 1 127])
-        (is (= {:target :knob :knob-id "warmth" :editable? true} (:touched-control (view h))))
-        (is (= [] (:touched-parameters (view h))))
-        (is (empty? (:encoder-gestures (local h)))))
-      (testing "turns nudge the knob at that slot, a tenth with Shift, and leave parameters alone"
+        (receive! h [0xb0 52 127])
+        (is (= #{1} (:touched (peek @contexts))))
+        (is (nil? (:host-overlay (rendered h))) "this overlay will not open under a held touch")
+        (receive! h [0xb0 52 0])
+        (receive! h [0x80 1 0]))
+      (testing "a claimed button, touch and turn are the host's"
+        (receive! h [0xb0 52 127])
+        (receive! h [0x90 1 127])
+        (is (= {:on? true :touches {1 true}} (:host-overlay (rendered h))))
+        (is (empty? (:touches (local h))))
+        (is (empty? (:encoder-gestures (local h))))
         (receive! h [0xb0 72 2])
         (receive! h [0xb0 49 127])
         (receive! h [0xb0 72 127])
         (receive! h [0xb0 49 0])
-        (receive! h [0xb0 71 1])
-        (is (= [{:op :knob/nudge :knob-id "warmth" :delta 1/50}
-                {:op :knob/nudge :knob-id "warmth" :delta -1/1000}
-                {:op :knob/nudge :knob-id :look :delta 1/100}]
-               @(:knobs h)))
+        (is (= [{:op :test/turn :slot 1 :detents 2 :shift? false}
+                {:op :test/turn :slot 1 :detents -1 :shift? true}] @(:host h)))
         (is (= 0.51 (level))))
-      (testing "an empty slot and the touch strip do nothing to knobs or parameters"
-        (receive! h [0xb0 75 1])
-        (receive! h [0xe0 127 127])
-        (is (= 3 (count @(:knobs h))))
-        (is (= 0.51 (level))))
-      (testing "the page cannot change while a track encoder is touched"
-        (receive! h [0xb0 52 127])
-        (receive! h [0xb0 52 0])
-        (is (some? (:knob-page (view h))))
-        (receive! h [0x80 1 0])
-        (is (nil? (:touched-control (view h))))
-        (receive! h [0xb0 52 127])
-        (is (nil? (:knob-page (view h)))))
-      (testing "with the page off, the same encoder edits its parameter again"
-        (receive! h [0xb0 72 1])
-        (is (= 0.52 (level)))
-        (is (= 3 (count @(:knobs h)))))
-      (testing "master and tempo touches keep their own display"
+      (testing "master stays with Push"
         (receive! h [0x90 8 127])
         (is (= {:target :master :editable? true} (:touched-control (view h))))
         (receive! h [0x80 8 0]))
       (finally (finish! h)))))
 
-(deftest knob-page-options-are-validated
-  (doseq [page [{:button 49 :knob-ids [:a]} {:button 75 :knob-ids [:a]} {:button 57 :knob-ids [:a]}
-                {:button 52 :knob-ids []} {:button 52 :knob-ids (vec (range 9))}
-                {:button 52 :knob-ids [:a] :step 0} {:button 52 :knob-ids [""]}
-                {:button 128 :knob-ids [:a]} {:button 52 :knob-ids [:a] :extra 1}]]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Knob page"
-                          (push/profile {:knob-page page :operator-gestures? true})) (pr-str page)))
-  (is (map? (push/profile {:knob-page {:button 52 :knob-ids [:a "b"] :step 1/20}}))))
+(deftest the-hosts-reset-runs-when-push-resets-or-stops
+  (let [profile (push/profile {:encoder-overlay (test-overlay (atom []))})
+        state (assoc (:initial-state profile) :encoder-overlay {:on? true :touches {1 true}})]
+    (is (= {:on? true} (:encoder-overlay ((:reset-model profile) state))))
+    (is (= {:on? true} (get-in ((:stop profile) state (fixture/initial-model) {:time-ms 0} false)
+                               [:state :encoder-overlay]))))
+  (is (not (contains? ((:reset-model (push/profile {:encoder-overlay (test-overlay (atom []))}))
+                       (:initial-state (push/profile {})))
+                      :encoder-overlay))
+      "no overlay state is invented"))
 
-(deftest the-knob-page-waits-for-a-touch-on-an-empty-slot-to-lift
-  ;; A touch on a slot with no parameter records only its touch mode. Switching
-  ;; the page under it would leave that mode behind and swallow the next
-  ;; parameter touch on the slot.
-  (let [h (knob-harness {:button 52 :knob-ids [:look]})]
-    (try
-      (receive! h [0xb0 57 127])
-      (receive! h [0x90 1 127])
-      (receive! h [0xb0 57 0])
-      (receive! h [0xb0 52 127])
-      (receive! h [0xb0 52 0])
-      (is (nil? (:knob-page (view h))) "the page stays while the empty slot is held")
-      (receive! h [0x80 1 0])
-      (is (empty? (:encoder-touch-modes (local h))))
-      (let [id (launch! h 36)]
-        (receive! h [0x90 1 127])
-        (receive! h [0xb0 72 1])
-        (receive! h [0x80 1 0])
-        (is (= 0.51 (get (values h id) :level)) "the next parameter touch edits"))
-      (finally (finish! h)))))
+(deftest an-encoder-overlay-needs-input-and-projection
+  (doseq [overlay [{:input identity} {:project identity} {:input identity :project identity :reset 7}]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Encoder overlay" (push/profile {:encoder-overlay overlay})))))
