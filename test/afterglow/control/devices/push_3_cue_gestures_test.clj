@@ -1,6 +1,8 @@
 (ns afterglow.control.devices.push-3-cue-gestures-test
   (:require [afterglow.control.devices.push-3 :as push]
+            [afterglow.control.devices.repl :as repl]
             [afterglow.control.devices.session :as session]
+            [afterglow.control.devices.transports :as transports]
             [afterglow.control.model :as model]
             [afterglow.control.quantization :as quantization]
             [clojure.test :refer [deftest is]]))
@@ -203,6 +205,46 @@
       (is (empty? (:errors (session/snapshot device))))
       (finally (session/close! device)))
     (is (= :closed (:status (session/snapshot device))))))
+
+(deftest midi-only-repl-session-reaches-its-hold-deadline-without-a-host-schedule
+  ;; tolgraven/tolglow#694: no :display and no :schedule!, on the wall clock.
+  (let [{:keys [options show log receive]} (harness {})
+        held (promise)
+        started (System/nanoTime)
+        now-ms #(quot (- (System/nanoTime) started) 1000000)
+        dispatch! (:dispatch! options)
+        options (-> options
+                    (dissoc :schedule!)
+                    (assoc :now-ms! now-ms
+                           :dispatch! (fn [cmd]
+                                        (let [result (dispatch! cmd)]
+                                          (when (= :held (get-in cmd [:launch :mode])) (deliver held cmd))
+                                          result))))
+        device (repl/open-push-3! options)]
+    (try
+      (is (:schedule (deref (:resources device))) "the session owns a refresh cadence")
+      (let [pressed (now-ms)]
+        (@receive [0x93 12 96])
+        (let [launched (deref held 2000 ::timeout)]
+          (is (map? launched) "a held pad becomes a hold without further input")
+          (when (map? launched)
+            (is (<= (+ pressed 100) (:time-ms launched) (+ pressed 1000)))
+            (is (= [:held] (mapv :launch-mode (vals (:instances @show))))))))
+      (@receive [0x83 12 0])
+      (is (= [:cue/launch :instance/end] (mapv :op @log)))
+      (is (empty? (:errors (session/snapshot device))))
+      (finally (session/close! device)))
+    (is (nil? (:schedule (deref (:resources device)))))))
+
+(deftest repl-sessions-own-a-cadence-matching-their-display
+  ;; MIDI-only gesture sessions poll deadlines every 10 ms; a display keeps 40 ms.
+  (let [intervals (atom [])
+        surface {:device :push-3 :input :view :open! (constantly :display) :render! (fn [_ _]) :close! (fn [_])}]
+    (with-redefs [transports/scheduler (fn [ms] (swap! intervals conj ms) (fn [_] (fn [])))]
+      (doseq [overrides [{} {:display surface} {:cue-gestures? false :button-bindings {:right :page-right}}]]
+        (let [{:keys [options]} (harness overrides)]
+          (session/close! (repl/open-push-3! (dissoc options :schedule!))))))
+    (is (= [10 40] @intervals))))
 
 (deftest deadlines-use-committed-model-before-display-projection
   (let [overrides {:display {:device :push-3 :input :view :open! (constantly :display)

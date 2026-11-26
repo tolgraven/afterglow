@@ -87,7 +87,10 @@
 
 (defn open-push-3!
   "Open the distinct Push 3 User Mode profile, including configured MPE axes.
-  Requires the captured layout/expression settings documented by its profile."
+  Requires the captured layout/expression settings documented by its profile.
+  Without :schedule!, a display session refreshes every :refresh-ms (40) and a
+  MIDI-only session with cue or operator gestures owns a 10 ms cadence from
+  push-3/connect!, so hold deadlines fire without host polling."
   [options]
   (push-3/connect! (cond-> options
                     (:display options) with-feedback

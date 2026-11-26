@@ -214,3 +214,37 @@
       (let [result (deref task 3000 ::timeout)]
         (is (= [] (if (= result :midi/discovery-pending) (transports/midi-ports) result))))
       (finally (deliver release true)))))
+
+(deftest deadline-grid-skips-missed-deadlines-instead-of-bursting
+  (is (= 110 (transports/next-deadline-ns 100 10 105)))
+  (is (= 120 (transports/next-deadline-ns 100 10 110)))
+  (is (= 140 (transports/next-deadline-ns 100 10 137)))
+  (is (thrown? clojure.lang.ExceptionInfo (transports/deadline-scheduler 0)))
+  (is (thrown? clojure.lang.ExceptionInfo (transports/deadline-scheduler 241))))
+
+(deftest deadline-scheduler-stops-on-cancel
+  (let [runs (atom 0) started (promise)
+        cancel ((transports/deadline-scheduler 200) #(when (= 3 (swap! runs inc)) (deliver started true)))]
+    (is (true? (deref started 2000 false)))
+    (cancel)
+    (let [stopped @runs]
+      (Thread/sleep 50)
+      (is (<= (- @runs stopped) 1)))))
+
+(deftest deadline-scheduler-never-starts-a-run-after-cancel-returns
+  ;; A run re-arming as cancel ran could leave one more run queued a period
+  ;; later. Cancel right after a run, when the worker is re-arming, many times.
+  (let [period-ns (long (/ 1e9 240))
+        runs (vec (for [_ (range 500)]
+                    (let [starts (atom []) give-up (+ (System/nanoTime) 2000000000)
+                          cancel ((transports/deadline-scheduler 240)
+                                  #(swap! starts conj (System/nanoTime)))]
+                      ;; Spin, then sweep a few microseconds, so cancel lands while the worker re-arms.
+                      (while (and (empty? @starts) (< (System/nanoTime) give-up)))
+                      (let [until (+ (System/nanoTime) (rand-int 30000))] (while (< (System/nanoTime) until)))
+                      (cancel)
+                      [starts (System/nanoTime)])))]
+    (Thread/sleep 20)
+    ;; A run already in progress may finish; a queued one starts about a period later.
+    (is (zero? (count (filter (fn [[starts cancelled]] (some #(> % (+ cancelled (quot period-ns 2))) @starts))
+                              runs))))))

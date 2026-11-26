@@ -1,18 +1,24 @@
 (ns afterglow.control.devices.push-3.usb
   "Explicit, tethered display access through the platform's libusb 1.0.
   Enumeration reads cached USB device descriptors. Opening checks only the selected
-  Push 3's active configuration and name, then claims only its display interface."
+  Push 3's active configuration and name, then claims only its display interface.
+  One libusb context per library is created on first use and kept for the
+  process, because libusb_init scans every attached device. On macOS that scan
+  cannot be skipped (LIBUSB_OPTION_NO_DEVICE_DISCOVERY is Linux-only) and can
+  stall on unrelated devices, so later list, inspect and open calls reuse it."
   (:require [afterglow.control.devices.push-3.screen :as screen]
             [clojure.java.io :as io])
   (:import [com.sun.jna Function Memory Native NativeLibrary Pointer]
            [com.sun.jna.ptr IntByReference PointerByReference]
            [java.nio.charset StandardCharsets]))
 
+(defn- library-name [library]
+  (or library (some #(when (.isFile (io/file %)) %)
+                    ["/opt/homebrew/lib/libusb-1.0.dylib" "/usr/local/lib/libusb-1.0.dylib"])
+      "usb-1.0"))
+
 (defn- api [library]
-  (let [library (or library (some #(when (.isFile (io/file %)) %)
-                                  ["/opt/homebrew/lib/libusb-1.0.dylib" "/usr/local/lib/libusb-1.0.dylib"])
-                    "usb-1.0")
-        native (NativeLibrary/getInstance ^String library)]
+  (let [native (NativeLibrary/getInstance ^String library)]
     (into {} (map (fn [op] [op (.getFunction native (str "libusb_" (name op)))]))
           [:init :exit :get_device_list :free_device_list :get_device_descriptor
            :get_bus_number :get_device_address :open :close :get_configuration
@@ -28,10 +34,67 @@
     (throw (ex-info (str "Push 3 USB " (name op) " failed (" result ")") {:operation op :libusb-code result})))
   result)
 
-(defn- context [usb]
-  (let [out (PointerByReference.)]
-    (check :init (int-call usb :init out))
-    (.getValue out)))
+(defn- elapsed-ms [start-ns] (/ (- (System/nanoTime) start-ns) 1e6))
+
+(defonce ^:private contexts (atom {}))
+
+(def ^:private context-lock (Object.))
+
+(defn- shared-context
+  "Return {:usb :ctx :library :init-ms :reused?}. Initialisation runs once per
+  library under a lock, so concurrent first callers wait for the same scan.
+  With lease?, also count one open handle; release-contexts! refuses to exit a
+  context that still has one."
+  ([library] (shared-context library false))
+  ([library lease?]
+   (let [library (library-name library)]
+     (locking context-lock
+       (let [existing (get @contexts library)
+             shared (or existing
+                        (let [usb (api library) start (System/nanoTime) out (PointerByReference.)]
+                          (check :init (int-call usb :init out))
+                          {:usb usb :ctx (.getValue out) :library library :init-ms (elapsed-ms start) :handles 0}))]
+         (swap! contexts assoc library (cond-> shared lease? (update :handles inc)))
+         (assoc shared :reused? (some? existing)))))))
+
+(defn- return-lease! [library]
+  (locking context-lock
+    (when (get @contexts library) (swap! contexts update-in [library :handles] dec))))
+
+(defn prepare!
+  "Create the shared libusb context now, for example on a background thread at
+  host startup, so the first display open does not pay for the device scan.
+  Returns {:library :init-ms :reused?}. Nothing is opened or claimed."
+  ([] (prepare! {}))
+  ([{:keys [library]}] (select-keys (shared-context library) [:library :init-ms :reused?])))
+
+(defn prepare-in-background!
+  "Run prepare! on a daemon thread and return a promise of its receipt, or of
+  {:library :failed? true :error} when libusb cannot be loaded or initialised.
+  Never throws and never keeps the JVM alive; calling it again is cheap. A
+  display open that starts during the scan waits for it instead of scanning twice."
+  ([] (prepare-in-background! {}))
+  ([options]
+   (let [result (promise)
+         run #(deliver result (try (prepare! options)
+                                   (catch Throwable e
+                                     {:library (library-name (:library options)) :failed? true
+                                      :error (or (.getMessage e) (.getName (class e)))})))]
+     (doto (Thread. ^Runnable run "afterglow-push-3-libusb-prepare") (.setDaemon true) (.start))
+     result)))
+
+(defn release-contexts!
+  "Exit every shared context and return how many were exited. Refuses, exiting
+  none, while any handle is open: libusb would free the context under it. The
+  next call creates a new context and scans again."
+  []
+  (locking context-lock
+    (when-let [busy (seq (filter (comp pos? :handles) (vals @contexts)))]
+      (throw (ex-info "Close every Push 3 USB handle before releasing libusb"
+                      {:open-handles (into {} (map (juxt :library :handles)) busy)})))
+    (let [[old] (reset-vals! contexts {})]
+      (doseq [{:keys [usb ctx]} (vals old)] (void-call usb :exit ctx))
+      (count old))))
 
 (defn- device-info [usb device ^Memory descriptor]
   (check :descriptor (int-call usb :get_device_descriptor device descriptor))
@@ -58,8 +121,8 @@
   "Read locations of tethered Push 3 devices. No device or USB interface is claimed."
   ([] (locations {}))
   ([{:keys [library]}]
-   (let [usb (api library) ctx (context usb)]
-     (try (with-devices usb ctx #(mapv first %)) (finally (void-call usb :exit ctx))))))
+   (let [{:keys [usb ctx]} (shared-context library)]
+     (with-devices usb ctx #(mapv first %)))))
 
 (defn- config-bytes [usb handle]
   ;; Standard GET_DESCRIPTOR(CONFIGURATION, index 0). The known device has
@@ -101,22 +164,35 @@
         (check :open (int-call usb :open device out))
         [info (.getValue out)]))))
 
-(defn- acquire [options claim?]
-  (let [{:keys [bus address library]} options]
+(defn- acquire
+  "The handle's :timing records the context (:created or :reused) and its
+  libusb_init time, the open, verify and claim time and their total."
+  [options claim?]
+  (let [{:keys [bus address library]} options
+        start (System/nanoTime)]
     (when-not (and (integer? bus) (<= 0 bus 255) (integer? address) (<= 1 address 127))
       (throw (ex-info "Choose a Push 3 bus and address from locations" {})))
-    (let [usb (api library) ctx (context usb)]
+    (let [{:keys [usb ctx library init-ms reused?]} (shared-context library true)
+          opening (System/nanoTime)]
       (try
         (let [[info handle] (open-device usb ctx bus address)]
           (try (let [descriptor (verify! usb handle info)]
                  (when claim? (check :claim (int-call usb :claim_interface handle (int screen/interface-number))))
-                 {:usb usb :ctx ctx :device handle :descriptor descriptor :claimed? claim?})
+                 {:usb usb :ctx ctx :library library :lease (atom true) :device handle :descriptor descriptor
+                  :claimed? claim?
+                  :timing {:context (if reused? :reused :created) :init-ms (if reused? 0.0 init-ms)
+                           :context-init-ms init-ms
+                           :open-ms (elapsed-ms opening) :total-ms (elapsed-ms start)}})
                (catch Throwable e (void-call usb :close handle) (throw e))))
-        (catch Throwable e (void-call usb :exit ctx) (throw e))))))
+        (catch Throwable e (return-lease! library) (throw e))))))
 
-(defn close! [{:keys [usb ctx device claimed?]}]
-  (try (when claimed? (check :release (int-call usb :release_interface device (int screen/interface-number))))
-       (finally (try (void-call usb :close device) (finally (void-call usb :exit ctx))))))
+(defn close!
+  "Release the interface and close the device once; later calls do nothing.
+  The shared context stays."
+  [{:keys [usb device claimed? library lease]}]
+  (when (compare-and-set! lease true false)
+    (try (when claimed? (check :release (int-call usb :release_interface device (int screen/interface-number))))
+         (finally (try (void-call usb :close device) (finally (return-lease! library)))))))
 
 (defn inspect
   "Read the selected unit's standard descriptors without claiming the display."

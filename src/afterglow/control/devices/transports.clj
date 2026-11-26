@@ -27,6 +27,45 @@
                  (long interval-ms) (long interval-ms) TimeUnit/MILLISECONDS)]
       (fn [] (.cancel task false) (.shutdown executor)))))
 
+(defn next-deadline-ns
+  "The first deadline after now-ns on the grid deadline-ns + k × period-ns.
+  A late run skips the deadlines it missed instead of running back to back."
+  [deadline-ns period-ns now-ns]
+  (let [next (+ deadline-ns period-ns)]
+    (if (> next now-ns)
+      next
+      (+ deadline-ns (* period-ns (inc (quot (- now-ns deadline-ns) period-ns)))))))
+
+(defn deadline-scheduler
+  "Like scheduler, but each run starts on a fixed grid of rate-hz deadlines, so
+  the time a run takes does not lower the rate. A run that overruns its period
+  skips the missed deadlines. Each acquisition owns one daemon worker."
+  [rate-hz]
+  (when-not (and (number? rate-hz) (<= 1 rate-hz 240))
+    (throw (ex-info "Deadline refresh rate must be between 1 and 240 Hz" {:rate-hz rate-hz})))
+  (fn [refresh!]
+    (let [period (long (Math/round (/ 1e9 (double rate-hz))))
+          executor (Executors/newSingleThreadScheduledExecutor
+                    (reify ThreadFactory
+                      (newThread [_ task] (doto (Thread. task "afterglow-device-deadline") (.setDaemon true)))))
+          running (atom true) pending (atom nil)
+          arm! (fn arm! [deadline]
+                 (when @running
+                   (reset! pending
+                           (.schedule executor
+                                      ;; Cancel can land between schedule and reset!, missing
+                                      ;; this run in pending, so each run checks again.
+                                      ^Runnable (fn []
+                                                  (when @running
+                                                    (try (refresh!) (catch Exception _))
+                                                    (arm! (next-deadline-ns deadline period (System/nanoTime)))))
+                                      (max 0 (- deadline (System/nanoTime))) TimeUnit/NANOSECONDS))))]
+      (arm! (+ (System/nanoTime) period))
+      ;; A run already in progress finishes; it cannot re-arm after this.
+      (fn [] (reset! running false)
+        (some-> ^java.util.concurrent.Future @pending (.cancel false))
+        (.shutdown executor)))))
+
 (defn- enumerate-midi-ports
   []
   (mapv (fn [index info]
