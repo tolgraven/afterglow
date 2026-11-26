@@ -907,3 +907,58 @@
       (@receive [0x82 30 0])
       (is (= (subvec params 1 9) (mapv :param (:touched-parameters (last @views)))))
       (finally (session/close! device)))))
+
+(deftest knob-encoder-bindings-nudge-host-knobs-and-report-the-touch
+  (let [config {:layout (-> layout
+                            (assoc-in [:encoders :look] {:channel 2 :controller 21})
+                            (assoc-in [:encoder-touches :look] {:channel 2 :note 10}))
+                :encoder-bindings (assoc (:encoder-bindings options)
+                                         :look {:target :knob :knob-id :look}
+                                         :fine-look {:target :knob :knob-id "warmth" :step 1/20})
+                :operator-gestures? true}
+        config (assoc-in config [:layout :encoders :fine-look] {:channel 2 :controller 24})
+        knobs (atom [])
+        show (atom (initial-model)) receive (atom nil) views (atom [])
+        device (push/connect!
+                 (merge options config
+                        {:display {:device :push-3 :input :view :open! (constantly :usb)
+                                   :render! (fn [_ view] (swap! views conj view)) :close! (fn [_])}
+                         :session-id "push3-knobs" :now-ms! (constantly 0) :model! #(deref show)
+                         :schedule! nil
+                         :dispatch! (fn [command]
+                                      (if (= :knob/nudge (:op command))
+                                        (do (swap! knobs conj (select-keys command [:knob-id :delta]))
+                                            {:status :accepted})
+                                        (let [ack (model/apply-command @show command)]
+                                          (reset! show (:model ack)) ack)))
+                         :transport {:open! #(do (reset! receive %) :midi)
+                                     :send! (fn [_ _] (throw (ex-info "Unexpected MIDI output" {})))
+                                     :close! (fn [_])}}))
+        view #(last @views)]
+    (try
+      (@receive [0x93 12 100])
+      (let [id (:instance-id (view))]
+        (testing "a touch reports the knob and opens no parameter gesture"
+          (@receive [0x92 10 127])
+          (is (= {:target :knob :knob-id :look :editable? true} (:touched-control (view))))
+          (is (= [] (:touched-parameters (view))))
+          (is (empty? (:encoder-gestures (:local (session/snapshot device))))))
+        (testing "turns send 1/100 per detent or the binding's step"
+          (@receive [0xb2 21 3])
+          (@receive [0xb2 21 127])
+          (@receive [0xb2 24 1])
+          (is (= [{:knob-id :look :delta 3/100} {:knob-id :look :delta -1/100} {:knob-id "warmth" :delta 1/20}]
+                 @knobs)))
+        (testing "parameters stay untouched and the lift clears the control"
+          (is (= 0.5 (get-in @show [:instances id :params :level])))
+          (@receive [0x82 10 0])
+          (is (nil? (:touched-control (view)))))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(deftest knob-encoder-bindings-are-validated
+  (doseq [binding [{:target :knob} {:target :knob :knob-id ""} {:target :knob :knob-id :a :param :level}
+                   {:target :master :knob-id :a} {:param :level :knob-id :a} {:target :knob :knob-id :a :step -1}]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Encoder bindings"
+                          (push/profile (assoc options :encoder-bindings {:level binding})))
+        (pr-str binding))))

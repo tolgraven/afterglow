@@ -86,8 +86,14 @@
        (sort-by :encoder)
        push-view/touched-parameters))
 
+(defn- control-touch
+  "The most recent touch when it addresses a control rather than a parameter."
+  [state]
+  (let [touch (get (:touches state) (peek (:touch-order state)))]
+    (when (:target touch) touch)))
+
 (defn- system-touch [state]
-  (:target (get (:touches state) (peek (:touch-order state)))))
+  (#{:master :tempo} (:target (control-touch state))))
 
 (defn- manual-clock? [model]
   (contains? #{nil :manual} (get-in model [:transport :source])))
@@ -412,13 +418,17 @@
 
 (defn- indexed-display [state model index]
   (let [state (selected-state state model)
-        target (system-touch state)]
-    (push-view/view state model index
-                    {:status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
-                     :touched-parameter (touched state model)
-                     :touched-parameters (all-touched state model)
-                     :touched-control (when target
-                                        {:target target :editable? (or (= :master target) (manual-clock? model))})})))
+        {:keys [target knob-id]} (control-touch state)]
+    (cond-> (push-view/view state model index
+                            {:status (or (:fault state) (if (:ready? state) :ready :loading-palettes))
+                             :touched-parameter (touched state model)
+                             :touched-parameters (all-touched state model)
+                             :touched-control (case target
+                                                :knob {:target :knob :knob-id knob-id :editable? true}
+                                                (:master :tempo) {:target target
+                                                                  :editable? (or (= :master target) (manual-clock? model))}
+                                                nil)})
+      (:knob-page state) (assoc :knob-page {:knob-ids (:knob-page state)}))))
 
 (defn display-view
   "Device-independent labels/values. A display transport draws this map."
@@ -668,6 +678,45 @@
                             (seq commands) (update :commands #(into commands %))
                             resolved? (assoc :refresh-model? true)))))))
 
+(def ^:private reserved-ccs
+  "Buttons and encoders this profile already interprets."
+  (into #{15 31 48 49 51 57 59 62 63 85 86 88 110 111 112 113}
+        (concat (range 20 28) (range 44 48) (range 71 80))))
+
+(defn- valid-knob-page? [{:keys [button knob-ids step] :as page} modifier-cc]
+  (and (map? page) (every? #{:button :knob-ids :step} (keys page))
+       (integer? button) (<= 0 button 127) (not (reserved-ccs button)) (not= button modifier-cc)
+       (vector? knob-ids) (<= 1 (count knob-ids) 8)
+       (every? #(or (keyword? %) (and (string? %) (seq %))) knob-ids)
+       (or (nil? step) (and (params/finite-number? step) (pos? step)))))
+
+(defn- track-touch-held? [state]
+  (some #(<= 0 % 7) (keys (:touches state))))
+
+(defn- knob-page-event? [{:keys [type note controller]}]
+  (or (and (#{:note-on :note-off} type) (<= 0 note 7))
+      (and (= :control-change type) (<= 71 controller 78))))
+
+(defn- knob-page-input
+  "Track encoders and their touches while the knob page is shown. A turn sends
+  the host's :knob/nudge; a touch is reported as the view's :touched-control."
+  [{:keys [knob-ids step]} state {:keys [type note controller raw-value]}]
+  (let [release #(-> % (update :touches dissoc note) (update :touch-order (fn [order] (vec (remove #{note} order)))))]
+    (case type
+      :note-on {:state (if-let [id (get knob-ids note)]
+                         (-> (release state)
+                             (assoc-in [:touches note] {:target :knob :knob-id id :encoder note})
+                             (update :touch-order conj note))
+                         state)}
+      :note-off {:state (release state)}
+      (let [id (get knob-ids (- controller 71))
+            delta (codec/signed-encoder raw-value)
+            increment (or step 1/100)]
+        {:state state
+         :commands (if (and id (not (zero? delta)))
+                     [{:op :knob/nudge :knob-id id :delta (* delta (if (:shift? state) (/ increment 10) increment))}]
+                     [])}))))
+
 (defn profile
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
   Sequential palette acquisition precedes writes; LEDs use acknowledged batches.
@@ -689,9 +738,16 @@
   overlay :state and optional :commands, or nil to leave the event to Push.
   Optional :parameter-editor takes model, instance, parameter, input and edit
   options. Return {:value v} to use a host-specific exact representation through
-  the normal parameter and gesture dispatch, or nil to use Afterglow typed editing."
+  the normal parameter and gesture dispatch, or nil to use Afterglow typed editing.
+  Optional :knob-page {:button cc :knob-ids [id ...] :step n} toggles the eight
+  track encoders between parameters and up to eight host knobs with a free
+  button CC. While it is shown a turn sends the host's :knob/nudge with step
+  (default 1/100) per detent, a tenth with Shift; a touch is the view's
+  :touched-control, and the view carries :knob-page {:knob-ids ids}. The page
+  does not change while a track encoder is touched."
   [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt
-           operator-gestures? temporary-encoder-modifier active-cue-grid? pad-overlay parameter-editor]
+           operator-gestures? temporary-encoder-modifier active-cue-grid? pad-overlay parameter-editor
+           knob-page]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
   (when (and pad-overlay (not (every? ifn? ((juxt :input :project) pad-overlay))))
@@ -709,6 +765,9 @@
                       (if (contains? #{nil :accent :shift 49} temporary-encoder-modifier)
                         accent-cc temporary-encoder-modifier))
         modifier-key (when (some? modifier-cc) :temporary-encoder-modifier-down?)
+        _ (when (and (some? knob-page) (not (valid-knob-page? knob-page modifier-cc)))
+            (throw (ex-info "Knob page needs a free button CC, one to eight knob IDs and a positive step"
+                            {:knob-page knob-page})))
         grid (launch/grid options)
         {:keys [modes actions] :as display-capabilities} (:display-capabilities display)
         _ (when-not (and (or (nil? modes) (and (set? modes) (seq modes) (every? display/modes modes)))
@@ -738,6 +797,12 @@
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
                 (cond
                   modifier-input? {:state (assoc state modifier-key down?)}
+                  (and knob-page control (= control (:button knob-page)))
+                  {:state (cond-> state
+                            (and down? (not (track-touch-held? state)))
+                            (assoc :knob-page (when-not (:knob-page state) (:knob-ids knob-page))))}
+                  (and knob-page (:knob-page state) (:ready? state) (knob-page-event? event))
+                  (knob-page-input knob-page state event)
                   overlay-input overlay-input
                   (and target-search (= 111 cc))
                   {:state (targets/toggle (cond-> state (:active-grid state) (set-active-grid-mode nil))

@@ -1708,3 +1708,80 @@
                 (is (= expected (bytes-at output 1 1 2 3))))
               (receive! h [0x80 36 0])))
           (finally (finish! h)))))))
+
+(defn- knob-harness [knob-page]
+  (let [h (fixture/harness {:profile (push/profile {:knob-page knob-page :operator-gestures? true})})
+        knobs (atom [])
+        apply! (get-in h [:options :dispatch!])
+        h (assoc h :session (session/create
+                              (assoc (:options h) :dispatch!
+                                     (fn [command]
+                                       (if (= "knob" (namespace (:op command)))
+                                         (do (swap! knobs conj (select-keys command [:op :knob-id :delta]))
+                                             {:status :accepted})
+                                         (apply! command))))))]
+    (swap! (:show h) assoc-in [:registry :effects :wash :params] schemas)
+    (swap! (:show h) assoc-in [:registry :effects :wash :param-order] order)
+    (assoc (fixture/ready! h) :knobs knobs)))
+
+(deftest knob-page-turns-host-knobs-and-reports-the-touch
+  (let [h (knob-harness {:button 52 :knob-ids [:look "warmth"]})
+        id (launch! h 36)
+        level #(get (values h id) :level)]
+    (try
+      (testing "the page is off until its button is pressed; encoders edit parameters"
+        (receive! h [0xb0 72 1])
+        (is (= 0.51 (level)))
+        (is (nil? (:knob-page (view h))))
+        (is (= [] @(:knobs h))))
+      (testing "the button toggles the page on press only"
+        (receive! h [0xb0 52 127])
+        (receive! h [0xb0 52 0])
+        (is (= {:knob-ids [:look "warmth"]} (:knob-page (view h)))))
+      (testing "a touch is reported as a knob control and starts no parameter gesture"
+        (receive! h [0x90 1 127])
+        (is (= {:target :knob :knob-id "warmth" :editable? true} (:touched-control (view h))))
+        (is (= [] (:touched-parameters (view h))))
+        (is (empty? (:encoder-gestures (local h)))))
+      (testing "turns nudge the knob at that slot, a tenth with Shift, and leave parameters alone"
+        (receive! h [0xb0 72 2])
+        (receive! h [0xb0 49 127])
+        (receive! h [0xb0 72 127])
+        (receive! h [0xb0 49 0])
+        (receive! h [0xb0 71 1])
+        (is (= [{:op :knob/nudge :knob-id "warmth" :delta 1/50}
+                {:op :knob/nudge :knob-id "warmth" :delta -1/1000}
+                {:op :knob/nudge :knob-id :look :delta 1/100}]
+               @(:knobs h)))
+        (is (= 0.51 (level))))
+      (testing "an empty slot and the touch strip do nothing to knobs or parameters"
+        (receive! h [0xb0 75 1])
+        (receive! h [0xe0 127 127])
+        (is (= 3 (count @(:knobs h))))
+        (is (= 0.51 (level))))
+      (testing "the page cannot change while a track encoder is touched"
+        (receive! h [0xb0 52 127])
+        (receive! h [0xb0 52 0])
+        (is (some? (:knob-page (view h))))
+        (receive! h [0x80 1 0])
+        (is (nil? (:touched-control (view h))))
+        (receive! h [0xb0 52 127])
+        (is (nil? (:knob-page (view h)))))
+      (testing "with the page off, the same encoder edits its parameter again"
+        (receive! h [0xb0 72 1])
+        (is (= 0.52 (level)))
+        (is (= 3 (count @(:knobs h)))))
+      (testing "master and tempo touches keep their own display"
+        (receive! h [0x90 8 127])
+        (is (= {:target :master :editable? true} (:touched-control (view h))))
+        (receive! h [0x80 8 0]))
+      (finally (finish! h)))))
+
+(deftest knob-page-options-are-validated
+  (doseq [page [{:button 49 :knob-ids [:a]} {:button 75 :knob-ids [:a]} {:button 57 :knob-ids [:a]}
+                {:button 52 :knob-ids []} {:button 52 :knob-ids (vec (range 9))}
+                {:button 52 :knob-ids [:a] :step 0} {:button 52 :knob-ids [""]}
+                {:button 128 :knob-ids [:a]} {:button 52 :knob-ids [:a] :extra 1}]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Knob page"
+                          (push/profile {:knob-page page :operator-gestures? true})) (pr-str page)))
+  (is (map? (push/profile {:knob-page {:button 52 :knob-ids [:a "b"] :step 1/20}}))))
