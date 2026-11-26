@@ -113,122 +113,255 @@
 (defn- motor-word [frame fixture axis]
   (let [{:keys [coarse fine]} (get-in fixture [:compiled-channels axis])
         byte-at (fn [[universe offset]] (bit-and (aget ^bytes (get-in frame [:universes universe]) offset) 255))]
-    (+ (* 256 (byte-at coarse)) (byte-at fine))))
+    (if fine (+ (* 256 (byte-at coarse)) (byte-at fine)) (byte-at coarse))))
+
+(defn- fine-native?
+  "Whether the resident renderer's guard window fits inside one 16-bit code
+  step. Wider rows resolve every coarse/fine axis on the reference."
+  [owner]
+  (< (* 2.0 65535 (get-in (movement/renderer owner) [:rounding :margin])) 1.0))
+
+(defn- with-coarse-axes
+  "The same rig with 8-bit pan and tilt. Every table row keeps these native."
+  [fixtures]
+  (mapv #(cond-> % (:pan (:channels %)) (assoc :channels {:pan 1 :tilt 3})) fixtures))
 
 (deftest physical-movement-resolves-a-rounding-boundary-on-the-reference
-  (let [head {:position [0 0 0] :universe 1 :channels {:pan [1 2] :tilt [3 4]}}
-        patch (frame/compile-patch [(assoc head :id :boundary :address 512)
-                                    (assoc head :id :stable :address 50)])
-        blocks [{:kind :assignments
-                 :assignments [{:target-id :boundary :attribute :direction :value [0.0 0.25 1.0]}
-                               {:target-id :stable :attribute :direction :value [0.45 0.33 1.0]}]}]
-        expected (frame/resolve-contributions patch blocks)]
-    (with-open [owner (movement/open! {:budget-ms 10000})]
-      (let [actual (movement/resolve-contributions! owner patch blocks)]
-        (is (= {:backend :native-gpu :gpu-heads 1 :cpu-heads 1} (:movement actual)))
-        (is (= 32768 (motor-word actual (get-in patch [:by-id :boundary]) :pan)))
-        (is (= (update-vals (:universes expected) vec)
-               (update-vals (:universes actual) vec)))))))
+  (doseq [[channels boundary-code] [[{:pan [1 2] :tilt [3 4]} 32768] [{:pan 1 :tilt 3} 128]]]
+    (testing channels
+      (let [head {:position [0 0 0] :universe 1 :channels channels}
+            patch (frame/compile-patch [(assoc head :id :boundary :address 512)
+                                        (assoc head :id :stable :address 50)])
+            blocks [{:kind :assignments
+                     :assignments [{:target-id :boundary :attribute :direction :value [0.0 0.25 1.0]}
+                                   {:target-id :stable :attribute :direction :value [0.45 0.33 1.0]}]}]
+            expected (frame/resolve-contributions patch blocks)]
+        (with-open [owner (movement/open! {:budget-ms 10000})]
+          (let [actual (movement/resolve-contributions! owner patch blocks)]
+            (is (= (if (or (not (vector? (:pan channels))) (fine-native? owner))
+                     {:backend :native-gpu :gpu-heads 1 :cpu-heads 1}
+                     {:backend :cpu :gpu-heads 0 :cpu-heads 2 :reason :ambiguous})
+                   (:movement actual)))
+            (is (= boundary-code (motor-word actual (get-in patch [:by-id :boundary]) :pan)))
+            (is (= (update-vals (:universes expected) vec)
+                   (update-vals (:universes actual) vec)))))))))
 
-(deftest a-seeded-movement-sweep-packs-the-reference-bytes
-  ;; Every driver must publish the reference bytes. The guard margin was
-  ;; measured on Apple Silicon hardware; Mesa llvmpipe 26.0.8 reached about
-  ;; twice the margin, so its unguarded error and native retention are only
-  ;; reported. Software renderers must not be treated as qualified for the margin.
-  (let [n 32
+(deftest a-beam-near-the-pan-axis-resolves-its-pan-on-the-reference
+  (let [margin 1.0e-6]
+    (doseq [elevation [0.0 45.0 -80.0 82.0]]
+      (is (= margin (gpu/pan-margin margin elevation)) (str elevation)))
+    (doseq [elevation [87.0 -88.5 89.9]
+            :let [secant (/ 1.0 (Math/cos (Math/toRadians elevation)))]]
+      (is (< (abs (- (* margin (/ secant 8.0)) (gpu/pan-margin margin elevation))) 1.0e-18) (str elevation)))
+    (is (every? #(< 1.0 (gpu/pan-margin margin %)) [90.0 -90.0])
+        "On the pan axis the margin exceeds the whole normalized range")
+    (is (zero? (gpu/pan-margin 0.0 89.9))))
+  ;; Both heads request one pan, clear of a 16-bit rounding boundary by twice
+  ;; the Apple margin. Only the elevation differs: 63.4 and 89.7 degrees.
+  (let [head {:position [0 0 0] :universe 0 :channels {:pan [1 2] :tilt [3 4]}}
+        patch (frame/compile-patch [(assoc head :id :near :address 1) (assoc head :id :clear :address 5)])
+        targets {:near {:direction [0.003 1.0 0.004]} :clear {:direction [0.3 1.0 0.4]}}]
+    (with-open [solver (gpu/open! patch)]
+      (let [fine? (< (* 2.0 65535 (get-in solver [:resources :rounding :margin])) 1.0)
+            unguarded (assoc-in solver [:resources :rounding :margin] 0.0)]
+        (is (= (if fine? #{:clear} #{}) (set (keys (gpu/solve-selected! solver targets {})))))
+        (is (= #{:near :clear} (set (keys (gpu/solve-selected! unguarded targets {})))))))))
+
+(deftest an-aim-near-its-mount-packs-the-reference-bytes
+  ;; Every component of this aim passes movement's float32 subtraction check.
+  ;; Subtracted in float32, its pan was 1.13 times its guard margin off on an
+  ;; Apple M4 Pro and packed one 16-bit code above the reference.
+  (let [position [2.7790385965192548 2.4569145810083777 3.104342354608092]
+        aim [2.55913148710616 2.660773155197291 3.2690111407200733]
         patch (frame/compile-patch
-               (mapv (fn [i]
-                       {:id i :position [(- (mod i 8) 4) (+ 2.0 (mod i 3)) (- (quot i 8) 2)]
-                        :rotation-deg [(if (odd? i) 180 0) (- (mod (* i 31) 340) 170) (mod i 27)]
-                        :universe 0 :address (inc (* 4 i)) :channels {:pan [1 2] :tilt [3 4]}
-                        :calibration (if (even? i)
-                                       {:pan {:min-deg -270 :max-deg 270} :tilt [120 150]}
-                                       {:pan [125 -170] :tilt {:min-deg -45 :max-deg 55}})})
-                     (range n)))
-        margin @#'gpu/rounding-margin
-        rng (java.util.Random. 555)
+               [{:id :near :position position :rotation-deg [-48.70789975821497 134.36556034807018 6.9888084391654814]
+                 :universe 0 :address 1 :channels {:pan [1 2] :tilt [3 4]}
+                 :calibration {:pan {:min-deg -180.0 :max-deg 180.0} :tilt {:min-deg -135.0 :max-deg 135.0}}}])
+        blocks [{:kind :assignments :assignments [{:target-id :near :attribute :aim :value aim}]}]
+        expected (frame/resolve-contributions patch blocks)]
+    (with-open [solver (gpu/open! patch)
+                owner (movement/open! {:budget-ms 10000})]
+      (let [unguarded (assoc-in solver [:resources :rounding :margin] 0.0)]
+        (is (= (gpu/solve-selected! unguarded {:near {:direction (mapv - aim position)}} {})
+               (gpu/solve-selected! unguarded {:near {:aim aim}} {}))
+            "An aim draws as the float64 direction from its mount"))
+      (let [actual (movement/resolve-contributions! owner patch blocks)]
+        (is (= 46321 (motor-word expected (get-in patch [:by-id :near]) :pan)))
+        (is (= (update-vals (:universes expected) vec) (update-vals (:universes actual) vec)))))))
+
+(defn- sweep-patch [heads channels]
+  (frame/compile-patch
+   (mapv (fn [i]
+           {:id i :position [(- (mod i 8) 4) (+ 2.0 (mod i 3)) (- (quot i 8) 2)]
+            :rotation-deg [(if (odd? i) 180 0) (- (mod (* i 31) 340) 170) (mod i 27)]
+            :universe 0 :address (inc (* 4 i)) :channels channels
+            :calibration (if (even? i)
+                           {:pan {:min-deg -270 :max-deg 270} :tilt [120 150]}
+                           {:pan [125 -170] :tilt {:min-deg -45 :max-deg 55}})})
+         (range heads))))
+
+(defn- axis-errors
+  "Largest unguarded :scaled, :pan and :tilt errors of the solved heads.
+  :scaled is what a row margin has to cover: the tilt error, and the pan error
+  divided by the factor that gpu/pan-margin widens the margin by at that
+  elevation."
+  [expected solved]
+  (reduce (fn [worst [id values]]
+            (let [error (fn [axis] (abs (- (get-in expected [id axis]) (axis values))))
+                  pan (error :pan) tilt (error :tilt)]
+              (-> worst
+                  (update :scaled max tilt (/ pan (gpu/pan-margin 1.0 (:tilt-deg values))))
+                  (update :pan max pan)
+                  (update :tilt max tilt))))
+          {:scaled 0.0 :pan 0.0 :tilt 0.0} solved))
+
+(defn- movement-sweep
+  "Send seeded random aims through the guarded owner and compare each packed
+  frame with the reference. Also read every head the shader itself accepts
+  without the rounding guard, to measure the float32 axis error it must cover."
+  [{:keys [heads frames seed channels]}]
+  (let [patch (sweep-patch heads channels)
+        rng (java.util.Random. seed)
         coordinate #(* % (- (.nextDouble rng) 0.5))]
     (with-open [solver (gpu/open! patch)
                 owner (movement/open! {:budget-ms 10000})]
-      (let [renderer (str (get-in solver [:resources :renderer]))
-            qualified? (boolean (re-find #"^Apple M\d" renderer))]
-        (loop [frame 0 history {} retained 0 worst 0.0]
-          (if (< frame 40)
-            (let [targets (into {} (for [id (range n)] [id [(coordinate 6.0) (coordinate 3.0) (coordinate 6.0)]]))
+      (let [unguarded (assoc-in solver [:resources :rounding :margin] 0.0)]
+        (loop [frame 0 history {} result {:retained 0 :accepted 0 :mismatched []
+                                          :errors {:scaled 0.0 :pan 0.0 :tilt 0.0}}]
+          (if (< frame frames)
+            (let [targets (into {} (for [id (range heads)] [id [(coordinate 6.0) (coordinate 3.0) (coordinate 6.0)]]))
                   blocks [{:kind :assignments
                            :assignments (vec (for [[id aim] targets] {:target-id id :attribute :aim :value aim}))}]
                   options (assoc history :compact-values? true)
                   expected (frame/resolve-contributions patch blocks options)
                   actual (movement/resolve-contributions! owner patch blocks options)
-                  solved (gpu/solve! solver targets history)
-                  error (reduce max 0.0 (for [[id values] solved axis [:pan :tilt]]
-                                          (abs (- (get-in expected [:values id axis]) (axis values)))))]
-              (is (= (update-vals (:universes expected) vec) (update-vals (:universes actual) vec))
-                  (str "frame " frame))
+                  solved (gpu/solve-selected! unguarded targets history)]
               (recur (inc frame) {:previous-compact (:compact expected)}
-                     (+ retained (get-in actual [:movement :gpu-heads])) (max worst error)))
-            (do
-              (println "Movement sweep" {:renderer renderer :qualified-margin? qualified?
-                                         :max-axis-error worst :error-over-margin (/ worst margin)
-                                         :gpu-heads retained :heads (* n 40)})
-              (when qualified?
-                (is (< worst margin) "Unguarded axis error must stay inside the rounding margin")
-                ;; Roughly a quarter of heads have an axis within the margin of
-                ;; a 16-bit step; the rest must stay on the native path.
-                (is (< (* 0.5 n 40) retained))))))))))
+                     (cond-> (-> result
+                                 (update :retained + (get-in actual [:movement :gpu-heads]))
+                                 (update :accepted + (count solved))
+                                 (update :errors #(merge-with max % (axis-errors (:values expected) solved))))
+                       (not= (update-vals (:universes expected) vec) (update-vals (:universes actual) vec))
+                       (update :mismatched conj frame))))
+            (merge result (select-keys (:resources solver) [:renderer :version :rounding]))))))))
+
+(deftest a-seeded-movement-sweep-packs-the-reference-bytes
+  ;; Every driver must publish the reference bytes and keep its unguarded axis
+  ;; error inside the margin that gpu/rounding-margins assigns to it. The
+  ;; printed scaled maximum is the measurement that qualifies a table row. The
+  ;; raw pan maximum has no bound: it grows as a sample lands nearer the pan
+  ;; axis. 8-bit axes keep native results under every row, so the byte
+  ;; comparison also covers drivers whose row resolves all coarse/fine axes on
+  ;; the reference.
+  (doseq [{:keys [heads frames channels apple-floor] :as rig}
+          [{:rig :fine-acceptance :heads 32 :frames 40 :seed 555 :channels {:pan [1 2] :tilt [3 4]} :apple-floor 1000}
+           {:rig :fine :heads 64 :frames 400 :seed 648 :channels {:pan [1 2] :tilt [3 4]}}
+           {:rig :coarse :heads 64 :frames 400 :seed 649 :channels {:pan 1 :tilt 2}}]]
+    (testing (:rig rig)
+      (let [{:keys [renderer version rounding retained accepted errors mismatched]} (movement-sweep rig)
+            margin (:margin rounding)
+            worst (:scaled errors)
+            ;; Share of one physical code step that the guard window spans.
+            window (* 2.0 margin (if (vector? (:pan channels)) 65535 255))
+            clear (max 0.0 (- 1.0 window))
+            total (* heads frames)]
+        (println "Movement sweep" {:rig (:rig rig) :renderer renderer :version version :rounding rounding
+                                   :max-scaled-error worst :error-over-margin (/ worst margin)
+                                   :max-pan-error (:pan errors) :max-tilt-error (:tilt errors)
+                                   :axis-samples (* 2 accepted) :gpu-heads retained :heads total})
+        (is (= [] mismatched) "Every frame must pack the reference bytes")
+        (is (< worst margin) "Unguarded axis error must stay inside the renderer's rounding margin")
+        ;; An axis stays native while its guard window sits inside one code
+        ;; step, so both axes of a head do for about the square of that share.
+        (is (<= (* 0.9 clear clear accepted) retained accepted total))
+        ;; A margin above half a step reaches a boundary even from a clamped end.
+        (when (< 1.0 window)
+          (is (zero? retained) "A window wider than one code step always straddles a rounding boundary"))
+        (when (and apple-floor (= :apple-m-series (:row rounding)))
+          (is (<= apple-floor retained)))))))
+
+(deftest the-rounding-table-qualifies-only-measured-renderers
+  (let [ulp (double (Math/ulp (float 1.0)))
+        row (fn [renderer] (:row (gpu/rounding-guard renderer)))]
+    (is (= {:row :apple-m-series :ulps 8 :margin (* 8 ulp)} (gpu/rounding-guard "Apple M4 Pro")))
+    (is (= {:row :mesa-llvmpipe :ulps 128 :margin (* 128 ulp)}
+           (gpu/rounding-guard "llvmpipe (LLVM 21.1.8, 256 bits)")))
+    (is (= {:row :apple-software :ulps 512 :margin (* 512 ulp)} (gpu/rounding-guard "Apple Software Renderer")))
+    (is (= {:row :unqualified :ulps 512 :margin (* 512 ulp)} (gpu/rounding-guard nil)))
+    (is (every? #(= :apple-m-series (row %))
+                ["Apple M1" "Apple M2 Ultra" "Apple M3 Max" "Apple M4" "Apple M4 Pro" "Apple M4 Max" "Apple M12 Pro"]))
+    (is (every? #(= :mesa-llvmpipe (row %))
+                ["llvmpipe (LLVM 21.1.8, 256 bits)" "llvmpipe (LLVM 15.0.7, 128 bits)"]))
+    ;; Software, translated and other vendors' drivers have no measured bound.
+    ;; Neither has a chip name with any suffix other than Pro, Max or Ultra.
+    (is (every? #(= :unqualified (row %))
+                ["" "Apple Software Renderer 2" "Apple M1 (G13G B0)" "Apple M4 Pro (software)" "Apple MX"
+                 "Apple Paravirtual device" "AMD Radeon Pro 5500M OpenGL Engine" "Intel(R) Iris(TM) Plus Graphics OpenGL Engine"
+                 "softpipe" "zink Vulkan 1.3(llvmpipe (LLVM 21.1.8, 256 bits) (LLVMPIPE))" "llvmpipe"
+                 "NVIDIA GeForce RTX 4090/PCIe/SSE2" "Mesa Intel(R) UHD Graphics 770 (ADL-S GT1)"]))
+    ;; Rows never narrow in order, and the fallback row matches every renderer.
+    (is (apply <= (map :ulps gpu/rounding-margins)))
+    (is (nil? (:renderer (peek gpu/rounding-margins))))))
 
 (deftest published-frames-use-only-effective-selected-movement
-  (let [patch (frame/compile-patch fixtures)
-        reordered (frame/compile-patch (vec (reverse fixtures)))
-        before (frame/resolve-frame reordered [{:target-id :back :attribute :pan :value 0.04}] {:compact-values? true})]
-    (with-open [owner (movement/open! {:budget-ms 10000})]
-      (doseq [rich? [true false] alpha [0.0 0.25 0.75 1.0]
-              :let [options {:previous-compact (:compact before) :include-values? rich? :compact-values? true}
-                    expected (frame/resolve-contributions patch (movement-blocks alpha) options)
-                    actual (movement/resolve-contributions! owner patch (movement-blocks alpha) options)
-                    ref (first (frame/project-compact (:compact expected)))
-                    pose (first (frame/project-compact (:compact actual)))]]
-        (is (= {:backend :native-gpu :gpu-heads 1 :cpu-heads 0} (:movement actual)))
-        (is (= (:aim ref) (:aim pose)))
-        (is (= (rest (frame/project-compact (:compact expected))) (rest (frame/project-compact (:compact actual)))))
-        (is (= (vec (get-in expected [:universes 0])) (vec (get-in actual [:universes 0]))))
-        (doseq [axis [:pan :tilt]]
-          (is (< (abs (- (axis ref) (axis pose))) 1.0e-5))
-          (is (<= (abs (- (motor-word expected (get-in patch [:by-id :back]) axis)
-                           (motor-word actual (get-in patch [:by-id :back]) axis))) 1)))
-        (when rich?
-          (let [compare-attr (fn [attr] (abs (- (get-in expected [:values :back attr])
-                                                 (get-in actual [:values :back attr]))))]
-            (is (< (compare-attr :pan-deg) 0.001))
-            (is (< (compare-attr :tilt-deg) 0.001))
-            (is (= (get-in expected [:values :back :aim-reachable?])
-                   (get-in actual [:values :back :aim-reachable?]))))))
-      (testing "changed position and ordering replace the resident native mounts"
-        (let [next-patch (frame/compile-patch (vec (reverse (assoc-in fixtures [0 :position] [5 2 1]))))
-              options {:previous-compact (:compact before)}
-              blocks (movement-blocks 0.25)
-              actual (movement/resolve-contributions! owner next-patch blocks options)
-              reference (frame/resolve-contributions next-patch blocks options)]
-          (is (= :native-gpu (get-in actual [:movement :backend])))
-          (assert-axes (:values reference) (select-keys (:values actual) [:back]))))
-      (testing "the sparse solver leaves exact world coordinates and singulars to the CPU"
-        (doseq [[assignment reason] [[{:attribute :aim :value [1/3 2 1]} :cpu-input]
-                                     [{:attribute :direction :value [0 0 -1]} :ambiguous]]
-                :let [blocks [{:kind :assignments :assignments [(assoc assignment :target-id :back)]}]
-                      out (movement/resolve-contributions! owner patch blocks)
-                      cpu (frame/resolve-contributions patch blocks)]]
-          (is (= reason (get-in out [:movement :reason])))
-          (is (= 0 (get-in out [:movement :gpu-heads])))
-          (is (= (frame/portable-frame cpu) (frame/portable-frame out)))))
-      (testing "bad authored geometry reaches the supervised source without contaminating later frames"
-        (try
-          (movement/resolve-contributions! owner patch [{:kind :assignments :source :broken
-                                                         :assignments [{:target-id :back :attribute :aim
-                                                                        :value [3 1 0]}]}])
-          (is false "zero distance should fail")
-          (catch clojure.lang.ExceptionInfo error (is (= :broken (:effect-source (ex-data error))))))
-        (is (= :native-gpu (get-in (movement/resolve-contributions! owner patch (movement-blocks 0.25))
-                                   [:movement :backend])))))))
+  (doseq [[axes rig] [[:fine fixtures] [:coarse (with-coarse-axes fixtures)]]]
+    (testing axes
+      (let [patch (frame/compile-patch rig)
+            reordered (frame/compile-patch (vec (reverse rig)))
+            before (frame/resolve-frame reordered [{:target-id :back :attribute :pan :value 0.04}] {:compact-values? true})]
+        (with-open [owner (movement/open! {:budget-ms 10000})]
+          (doseq [rich? [true false] alpha [0.0 0.25 0.75 1.0]
+                  :let [options {:previous-compact (:compact before) :include-values? rich? :compact-values? true}
+                        expected (frame/resolve-contributions patch (movement-blocks alpha) options)
+                        actual (movement/resolve-contributions! owner patch (movement-blocks alpha) options)
+                        ref (first (frame/project-compact (:compact expected)))
+                        pose (first (frame/project-compact (:compact actual)))]]
+            (is (= (if (or (= :coarse axes) (fine-native? owner))
+                     {:backend :native-gpu :gpu-heads 1 :cpu-heads 0}
+                     {:backend :cpu :gpu-heads 0 :cpu-heads 1 :reason :ambiguous})
+                   (:movement actual)))
+            (is (= (:aim ref) (:aim pose)))
+            (is (= (rest (frame/project-compact (:compact expected))) (rest (frame/project-compact (:compact actual)))))
+            (is (= (vec (get-in expected [:universes 0])) (vec (get-in actual [:universes 0]))))
+            (doseq [axis [:pan :tilt]]
+              (is (< (abs (- (axis ref) (axis pose))) 1.0e-5))
+              (is (<= (abs (- (motor-word expected (get-in patch [:by-id :back]) axis)
+                               (motor-word actual (get-in patch [:by-id :back]) axis))) 1)))
+            (when rich?
+              (let [compare-attr (fn [attr] (abs (- (get-in expected [:values :back attr])
+                                                     (get-in actual [:values :back attr]))))]
+                (is (< (compare-attr :pan-deg) 0.001))
+                (is (< (compare-attr :tilt-deg) 0.001))
+                (is (= (get-in expected [:values :back :aim-reachable?])
+                       (get-in actual [:values :back :aim-reachable?]))))))
+          (let [backend (if (or (= :coarse axes) (fine-native? owner)) :native-gpu :cpu)]
+            (testing "changed position and ordering replace the resident native mounts"
+              ;; This position keeps both axes clear of every row's 8-bit guard window.
+              (let [next-patch (frame/compile-patch (vec (reverse (assoc-in rig [0 :position] [6 2 1]))))
+                    options {:previous-compact (:compact before)}
+                    blocks (movement-blocks 0.25)
+                    actual (movement/resolve-contributions! owner next-patch blocks options)
+                    reference (frame/resolve-contributions next-patch blocks options)]
+                (is (= backend (get-in actual [:movement :backend])))
+                (assert-axes (:values reference) (select-keys (:values actual) [:back]))))
+            (testing "the sparse solver leaves exact world coordinates and singulars to the CPU"
+              (doseq [[assignment reason] [[{:attribute :aim :value [1/3 2 1]} :cpu-input]
+                                           [{:attribute :direction :value [0 0 -1]} :ambiguous]]
+                      :let [blocks [{:kind :assignments :assignments [(assoc assignment :target-id :back)]}]
+                            out (movement/resolve-contributions! owner patch blocks)
+                            cpu (frame/resolve-contributions patch blocks)]]
+                (is (= reason (get-in out [:movement :reason])))
+                (is (= 0 (get-in out [:movement :gpu-heads])))
+                (is (= (frame/portable-frame cpu) (frame/portable-frame out)))))
+            (testing "bad authored geometry reaches the supervised source without contaminating later frames"
+              (try
+                (movement/resolve-contributions! owner patch [{:kind :assignments :source :broken
+                                                               :assignments [{:target-id :back :attribute :aim
+                                                                              :value [3 1 0]}]}])
+                (is false "zero distance should fail")
+                (catch clojure.lang.ExceptionInfo error (is (= :broken (:effect-source (ex-data error))))))
+              (is (= backend (get-in (movement/resolve-contributions! owner patch (movement-blocks 0.25))
+                                     [:movement :backend]))))))))))
 
 (deftest late-draws-cannot-change-a-published-frame-or-enter-a-later-frame
   (let [patch (frame/compile-patch fixtures)
@@ -239,7 +372,8 @@
         accepted (frame/resolve-frame patch [{:target-id :back :attribute :pan :value 0.15}]
                                       {:compact-values? true})]
     (try
-      (is (= :native-gpu (get-in (movement/resolve-contributions! owner patch blocks) [:movement :backend])))
+      (let [first-frame (movement/resolve-contributions! owner patch blocks)]
+        (is (= (if (fine-native? owner) :native-gpu :cpu) (get-in first-frame [:movement :backend]))))
       (with-redefs [gpu/solve-selected! (fn [solver targets history]
                                          (deliver started true)
                                          (deref release 5000 nil)
@@ -263,7 +397,7 @@
       (let [next-patch (frame/compile-patch (vec (reverse fixtures)))
             next-blocks (movement-blocks 1.0)
             out (movement/resolve-contributions! owner next-patch next-blocks)]
-        (is (= :native-gpu (get-in out [:movement :backend])))
+        (is (= (if (fine-native? owner) :native-gpu :cpu) (get-in out [:movement :backend])))
         (assert-axes (:values (frame/resolve-contributions next-patch next-blocks))
                      (select-keys (:values out) [:back])))
       (finally (deliver release true) (movement/close! owner)))

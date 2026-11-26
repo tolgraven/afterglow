@@ -46,14 +46,21 @@
    (let [answer (deref (:done owner) timeout-ms ::pending)]
      (cond (= ::pending answer) false (some? answer) (throw answer) :else true))))
 
+(defn renderer
+  "Driver of the resident native rig: its :renderer, :version and the :rounding
+  guard selected for it. Nil until a frame has opened a native context."
+  [owner]
+  (some-> (:solver @(:resident owner)) :resources (select-keys [:renderer :version :rounding])))
+
 (defn- fail-or-fallback [error reason]
   (if (faults/recoverable? error)
     {:reason reason :error (.getName (class error))}
     (throw error)))
 
 (defn- native-rig! [{:keys [resident options]} patch]
-  ;; Only the worker accesses the cached solver. An unavailable context stays
-  ;; retired until a new patch is installed or the caller reopens the owner.
+  ;; Only the worker draws with or replaces the cached solver. An unavailable
+  ;; context stays retired until a new patch is installed or the caller reopens
+  ;; the owner.
   (if (identical? patch (:patch @resident))
     @resident
     (do

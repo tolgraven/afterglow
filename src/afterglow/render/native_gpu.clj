@@ -49,10 +49,33 @@
     (context/check-gl! gl :configure)
     {:program program :vao (aget vao 0) :input (aget buffers 1) :output (aget buffers 2)}))
 
+(def rounding-margins
+  "Physical rounding guard for each driver, in float32 steps at 1.0 (:ulps) on
+  a normalized axis. Rows are tried in order and :renderer must match the whole
+  GL_RENDERER string. The final row covers every driver without a measured
+  bound and is never narrower than a measured row.
+  doc/architecture/moving-head-shaders.md records the measurements and how to
+  qualify another driver."
+  [{:row :apple-m-series :renderer #"Apple M\d+(?: (?:Pro|Max|Ultra))?" :ulps 8}
+   {:row :mesa-llvmpipe :renderer #"llvmpipe \(LLVM [^()]*\)" :ulps 128}
+   {:row :apple-software :renderer #"Apple Software Renderer" :ulps 512}
+   {:row :unqualified :ulps 512}])
+
+(defn rounding-guard
+  "Select the rounding guard for a GL_RENDERER string. Returns the matched
+  table :row, its :ulps and the :margin in normalized axis units."
+  [renderer]
+  (let [{:keys [row ulps]} (first (filter (fn [{pattern :renderer}]
+                                            (or (nil? pattern)
+                                                (and (string? renderer) (re-matches pattern renderer))))
+                                          rounding-margins))]
+    {:row row :ulps ulps :margin (* ulps (double (Math/ulp (float 1.0))))}))
+
 (defn open!
   "Open a private OpenGL 3.3+ solver for the pan/tilt fixtures of a compiled
   Afterglow patch. :timeout-ms (default 1000) bounds native fence waiting.
-  The returned Closeable exposes driver :renderer and :version under :resources."
+  The returned Closeable exposes driver :renderer and :version under :resources,
+  with the :rounding guard that rounding-margins assigns to that renderer."
   ([patch] (open! patch {}))
   ([patch {:keys [timeout-ms] :or {timeout-ms 1000}}]
    (when-not (= :afterglow.render.frame/patch (:type patch))
@@ -63,8 +86,10 @@
      (when (zero? n) (throw (ex-info "Patch has no pan/tilt fixtures" {})))
      (let [data (mounts fixtures)
            inputs (context/floats-buffer (* n 5))
-           outputs (context/floats-buffer (* n 7))]
-       (assoc (context/open! ::moving-heads timeout-ms #(configure! % data n))
+           outputs (context/floats-buffer (* n 7))
+           solver (context/open! ::moving-heads timeout-ms #(configure! % data n))]
+       (assoc solver
+              :resources (assoc (:resources solver) :rounding (rounding-guard (:renderer (:resources solver))))
               :patch patch :ids ids :ids-set (set ids) :input-buffer inputs :output-buffer outputs)))))
 
 (defn- target-buffer! [{:keys [patch ids ids-set input-buffer]} targets history all?]
@@ -82,9 +107,13 @@
                   target (if (map? assignment) (or (:aim assignment) (:direction assignment)) assignment)]]
       (when-not (and (vector? target) (= 3 (count target)))
         (throw (ex-info "Expected a world-space aim or direction vector" {:fixture-id id :target target})))
-      (doseq [coord target] (.put data (context/finite-float coord)))
+      ;; Subtract an aim from its mount in float64, as the reference does, and
+      ;; draw the difference as a direction. A float32 difference of nearby
+      ;; points can move an axis further than the rounding guard measures.
+      (doseq [[coord origin] (map vector target (if direction? [0 0 0] (get-in patch [:by-id id :position])))]
+        (.put data (context/finite-float (if direction? coord (- (double coord) (double origin))))))
       (.put data (float (or (get pans id) -1)))
-      (.put data (float (if direction? 1 0))))
+      (.put data (float 1)))
     (.flip data)))
 
 (defn- dispatch! [^GL3 gl solver ^FloatBuffer targets]
@@ -97,17 +126,29 @@
     (.glBufferSubData gl GL/GL_ARRAY_BUFFER 0 (* n 20) targets)
     (context/capture! gl output n data (:timeout-ms solver))))
 
-(def ^:private rounding-margin
-  ;; Reserve several float32 steps before a physical coarse/fine rounding
+(def ^:private ^:const pan-secant-limit
+  ;; Row margins are measured with the pan error scaled back to this
+  ;; amplification, which a beam reaches about 7.2 degrees from the pan axis.
+  8.0)
+
+(defn pan-margin
+  "Pan guard margin for a head whose requested elevation is elevation-deg.
+  The float32 pan error grows with the secant of the elevation as the beam
+  nears the pan axis. Beyond a secant of 8 the margin grows with it."
+  ^double [^double margin ^double elevation-deg]
+  (let [cosine (abs (Math/cos (Math/toRadians elevation-deg)))]
+    (cond (zero? cosine) Double/POSITIVE_INFINITY
+          (< (* pan-secant-limit cosine) 1.0) (/ margin (* pan-secant-limit cosine))
+          :else margin)))
+
+(defn- stable-channel-axes? [patch id pan tilt elevation margin]
+  ;; Reserve the renderer's margin before a physical coarse/fine rounding
   ;; boundary. The ordinary shader result is still a float32 estimate.
-  (* 8.0 (Math/ulp (float 1.0))))
-
-(defn- stable-channel-axes? [patch id pan tilt]
   (let [channels (get-in patch [:by-id id :compiled-channels])]
-    (and (frame/stable-channel-code? (:pan channels) pan rounding-margin)
-         (frame/stable-channel-code? (:tilt channels) tilt rounding-margin))))
+    (and (frame/stable-channel-code? (:pan channels) pan (pan-margin margin elevation))
+         (frame/stable-channel-code? (:tilt channels) tilt margin))))
 
-(defn- values [patch ids targets ^FloatBuffer data angles?]
+(defn- values [patch ids targets ^FloatBuffer data angles? margin]
   (reduce (fn [result id]
             (let [pan (.get data) tilt (.get data) reachable (.get data) valid (.get data)
                   yaw (.get data) elevation (.get data) stable (.get data)]
@@ -117,7 +158,7 @@
                                  (Float/isFinite yaw) (Float/isFinite elevation)
                                  (or (= reachable 0.0) (= reachable 1.0)))
                     (throw (ex-info "Invalid aim result or zero-distance target" {:fixture-id id})))
-                  (if (and angles? (not (stable-channel-axes? patch id pan tilt)))
+                  (if (and angles? (not (stable-channel-axes? patch id pan tilt elevation margin)))
                     result
                     (assoc result id (cond-> {:pan (double pan) :tilt (double tilt) :aim-reachable? (= reachable 1.0)}
                                        angles? (assoc :pan-deg (double yaw) :tilt-deg (double elevation))))))
@@ -128,7 +169,8 @@
     (fn []
       (let [input (target-buffer! solver targets history all?)]
         (context/invoke! solver #(dispatch! % solver input))
-        (values (:patch solver) (:ids solver) targets (:output-buffer solver) (not all?))))))
+        (values (:patch solver) (:ids solver) targets (:output-buffer solver) (not all?)
+                (get-in solver [:resources :rounding :margin]))))))
 
 (defn solve!
   "Solve one batch of world-space targets/directions keyed by fixture ID. A
@@ -142,7 +184,8 @@
 (defn solve-selected!
   "Solve active targets by stable fixture ID for this frame. In addition to
   normalized axes, return the requested pan/tilt degrees for rich fixture state.
-  Omit ambiguous wraps, mechanical stops, singulars and nearby DMX rounding
-  boundaries for CPU resolution."
+  Omit ambiguous wraps, mechanical stops, singulars and axes within the
+  renderer's :rounding margin of a DMX rounding boundary for CPU resolution.
+  pan-margin widens that margin for a beam near the pan axis."
   [solver targets history]
   (solve-batch! solver targets history false))
