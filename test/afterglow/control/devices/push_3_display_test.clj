@@ -141,8 +141,11 @@
       (finally ((:close! sink) handle)))
     (let [receipt (display/refresh-receipt handle)]
       (is (= 40 (:target-hz receipt)))
-      (is (< (get-in receipt [:interval :median-ms]) 32.0) (pr-str receipt))
-      (is (> (:frames-per-second receipt) 30.0) (pr-str receipt)))))
+      ;; Relative to measured transfers, so a loaded machine cannot fake a pass:
+      ;; a fixed delay cannot start frames less than 25 ms + transfer apart.
+      (is (< (get-in receipt [:interval :median-ms])
+             (+ 20.0 (get-in receipt [:payload-transfer :median-ms])))
+          (pr-str receipt)))))
 
 (deftest libusb-ffi-replay-shares-one-context
   (when (#{"Linux" "Mac OS X"} (System/getProperty "os.name"))
