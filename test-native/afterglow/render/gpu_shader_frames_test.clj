@@ -52,10 +52,14 @@
       (is (= ::context/invalid-program (:type failure)))
       (is (= :compile (:stage failure)))
       (is (re-find #"0:1" (:log failure)) "Log lines count from the author's source")
+      (testing "after an author version line, blank lines and an #extension"
+        (let [late (try (renderer/await! (renderer/compile! r {:source "\n#version 300 es\n#extension GL_ARB_shading_language_packing : enable\nvoid main() {\n  fragColor = vec4(oops);\n}"}) 5000)
+                        (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+          (is (re-find #"0:5:" (:log late)) (:log late))))
       (is (= (vec (:pixels good))
              (vec (:pixels (render r gradient {:width 2 :height 2 :uniforms {"u_blue" 1.0}}))))
           "The resident program still renders")
-      (is (= [1 1 1] ((juxt :programs :compile-failures :compiles) (renderer/status r)))))))
+      (is (= [1 2 1] ((juxt :programs :compile-failures :compiles) (renderer/status r)))))))
 
 (deftest frames-own-their-pixels-and-caches-are-bounded
   (with-open [r (renderer/open! {:max-programs 2 :max-targets 2})]
@@ -65,7 +69,7 @@
       (is (= 255 (first (bgra b 0 0))) "The worker's readback buffer never escapes")
       (doseq [i (range 3)]
         (render r (assoc gradient :source (str (:source gradient) "\n// variant " i)) {:width (+ 3 i) :height 1 :uniforms {"u_blue" 0}}))
-      (is (= [2 2 2] ((juxt :programs :targets :evictions) (renderer/status r))))
+      (is (= [2 2 2 2] ((juxt :programs :targets :evictions :target-evictions) (renderer/status r))))
       (is (true? (renderer/await! (renderer/release! r (assoc gradient :source (str (:source gradient) "\n// variant 2"))))))
       (is (= 1 (:programs (renderer/status r)))))))
 

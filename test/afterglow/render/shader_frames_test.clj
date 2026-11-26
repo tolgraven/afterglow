@@ -2,7 +2,7 @@
   (:require [afterglow.render.shader-frames :as frames]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]])
-  (:import [java.nio ByteBuffer]))
+  )
 
 (def plasma {:source "void main() { fragColor = vec4(u_tint * u_level, 1.0); }"
              :uniforms {"u_tint" :vec3 "u_level" :float "u_on" :bool "u_steps" :int}})
@@ -35,7 +35,9 @@
       (is (= declarations (filterv #(or (str/starts-with? % "uniform") (str/starts-with? % "out"))
                                    (str/split-lines text)))
           "Uniforms are declared once, in name order")
-      (is (str/includes? text "#line 1\nvoid main()") "Log lines count from the author's first line"))))
+      (is (str/includes? text "#line 1\n") "Log lines count from the author's first line"))
+    (is (str/includes? desktop "#line 1\n\nvoid main()") "The dropped version line stays as an empty line")
+    (is (str/includes? web "#line 1\nvoid main()"))))
 
 (deftest uniforms-are-packed-by-declared-type
   (let [packed (frames/pack-uniforms plasma {"u_tint" [1 0.5 0.25] "u_level" 0.75 "u_on" true "u_steps" 3})]
@@ -63,10 +65,29 @@
     (is (= [0 0 200 1] (frames/gl-viewport {:width 200 :height 1})))
     (is (= [40 160 320 180] (frames/gl-viewport {:width 640 :height 360 :viewport [40 20 320 180]})))))
 
-(deftest bottom-up-rows-are-copied-top-down-into-an-owned-array
-  (let [source (ByteBuffer/wrap (byte-array (range 24)))
-        rows (frames/copy-bottom-up source 2 3)]
-    (is (= (concat (range 16 24) (range 8 16) (range 0 8)) (seq rows)))
-    (is (zero? (.position source)) "The worker's readback buffer is not consumed")
-    (aset-byte rows 0 (byte 99))
-    (is (= 16 (.get source 16)) "The returned frame shares nothing with the readback buffer")))
+(deftest rows-are-flipped-in-place-into-top-down-order
+  (let [pixels (byte-array (range 24))]
+    (is (identical? pixels (frames/flip-rows! pixels 2 3)))
+    (is (= (concat (range 16 24) (range 8 16) (range 0 8)) (seq pixels))))
+  (let [one-row (byte-array (range 8))]
+    (is (= (range 8) (seq (frames/flip-rows! one-row 2 1))))))
+
+(defn- body-lines
+  "Lines after #line 1, numbered from 1."
+  [text]
+  (vec (rest (drop-while #(not= "#line 1" %) (str/split text #"\n" -1)))))
+
+(deftest log-line-numbers-match-the-authors-text
+  (testing "an author's version line and the blank lines before it keep their line numbers"
+    (let [text (frames/fragment-source {:source "\n\n#version 300 es\nvoid main() {\n  fragColor = vec4(1.0);\n}"})]
+      (is (= 1 (count (re-seq #"#version" text))))
+      (is (= "void main() {" (nth (body-lines text) 3)) "author line 4 is body line 4")))
+  (testing "#extension lines move ahead of the declarations and leave a blank line behind"
+    (let [text (frames/fragment-source {:source "#extension GL_ARB_shading_language_packing : enable\nvoid main() {}\n"
+                                        :uniforms {"u_a" :float}})
+          lines (str/split-lines text)]
+      (is (= "#extension GL_ARB_shading_language_packing : enable" (second lines)))
+      (is (< 1 (.indexOf lines "uniform float u_a;")))
+      (is (= ["" "void main() {}"] (subvec (body-lines text) 0 2)))))
+  (is (= [[:source]] (map :path (frames/shader-errors {:source "void main(){}\n#version 330 core"}))))
+  (is (= [[:source]] (map :path (frames/shader-errors {:source "#version 330 core\n#version 330 core\nvoid main(){}"})))))

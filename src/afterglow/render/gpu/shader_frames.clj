@@ -9,14 +9,19 @@
   log and leaves every resident program usable, so a host can keep rendering
   the last working version. Programs and render targets are bounded LRU caches.
 
-  Each returned frame owns a fresh byte array, top-down, BGRA8. The direct
-  readback buffer is private to the worker and reused."
+  Each returned frame owns a fresh heap byte array, top-down, BGRA8: the
+  driver reads straight into it and the rows are flipped in place, so no
+  direct memory is retained per render target.
+
+  Teardown (releasing programs and targets, then destroying the context)
+  runs once on the `afterglow-gpu-cleanup` thread after the worker has
+  stopped, so GL calls are still made by one thread at a time."
   (:require [afterglow.render.gpu.lifecycle :as lifecycle]
             [afterglow.render.gpu.native-context :as context]
             [afterglow.render.shader-frames :as frames])
   (:import [com.jogamp.opengl GL GL2ES2 GL2GL3 GL3 GL3ES3]
            [java.io Closeable]
-           [java.nio ByteBuffer ByteOrder]
+           [java.nio ByteBuffer]
            [java.util LinkedHashMap]
            [java.util.concurrent ArrayBlockingQueue Callable ExecutionException Future FutureTask
             RejectedExecutionException ThreadFactory ThreadPoolExecutor ThreadPoolExecutor$AbortPolicy TimeUnit]))
@@ -92,8 +97,7 @@
         (when-not (= status GL/GL_FRAMEBUFFER_COMPLETE)
           (throw (ex-info "Render target is incomplete" {:status status :width width :height height}))))
       (context/check-gl! gl :render-target)
-      {:framebuffer (aget fb 0) :texture (aget tex 0) :width width :height height
-       :readback (.order (ByteBuffer/allocateDirect (* 4 (int width) (int height))) (ByteOrder/nativeOrder))}
+      {:framebuffer (aget fb 0) :texture (aget tex 0) :width width :height height}
       (catch Throwable e
         (release-target! gl {:framebuffer (aget fb 0) :texture (aget tex 0)})
         (throw e)))))
@@ -136,13 +140,13 @@
     (.glEndQuery gl GL2ES2/GL_TIME_ELAPSED)
     (await-fence! gl timeout-ms)
     (let [drawn (System/nanoTime)
-          ^ByteBuffer buffer (:readback target)]
-      (.clear buffer)
+          ;; The frame's own array is the readback destination.
+          pixels (byte-array (* 4 (long width) (long height)))]
       (.glPixelStorei gl GL/GL_PACK_ALIGNMENT 4)
-      (.glReadPixels gl 0 0 (int width) (int height) GL/GL_BGRA GL2GL3/GL_UNSIGNED_INT_8_8_8_8_REV buffer)
+      (.glReadPixels gl 0 0 (int width) (int height) GL/GL_BGRA GL2GL3/GL_UNSIGNED_INT_8_8_8_8_REV (ByteBuffer/wrap pixels))
       (context/check-gl! gl :readback)
-      (let [pixels (frames/copy-bottom-up buffer width height)
-            elapsed (long-array 1)]
+      (frames/flip-rows! pixels width height)
+      (let [elapsed (long-array 1)]
         (.glGetQueryObjecti64v gl query GL2ES2/GL_QUERY_RESULT elapsed 0)
         {:pixels pixels :width width :height height
          ;; Apple's GL-over-Metal driver can report a negative elapsed time;
@@ -177,7 +181,7 @@
    (let [gate (Object.) done (promise)
          programs (LinkedHashMap. 16 0.75 true)
          targets (LinkedHashMap. 8 0.75 true)
-         stats (atom {:renders 0 :compiles 0 :compile-failures 0 :evictions 0 :programs 0 :targets 0})
+         stats (atom {:renders 0 :compiles 0 :compile-failures 0 :evictions 0 :target-evictions 0 :programs 0 :targets 0})
          owner (context/open! ::renderer timeout-ms
                               (fn [^GL3 gl]
                                 (let [vao (int-array 1) query (int-array 1)]
@@ -227,8 +231,11 @@
              (throw (ex-info "Shader renderer queue is full" {:type ::busy :queued (:queued (status renderer))})))))
     job))
 
-(defn- program-key [shader]
-  (frames/fragment-source shader :glsl-330))
+(defn- program-key
+  "Programs are cached by the shader map itself, whose hash is cached; the
+  assembled source is built only when a program compiles."
+  [shader]
+  (select-keys shader [:source :uniforms]))
 
 (defn- resident-program! [{:keys [owner ^LinkedHashMap programs max-programs stats]} shader]
   (let [k (program-key shader)]
@@ -253,7 +260,8 @@
         (let [target (context/invoke! owner #(build-target! % width height))]
           (when (>= (.size targets) (long max-targets))
             (let [eldest (.next (.iterator (.keySet targets)))]
-              (context/invoke! owner #(release-target! % (.remove targets eldest)))))
+              (context/invoke! owner #(release-target! % (.remove targets eldest)))
+              (swap! stats update :target-evictions inc)))
           (.put targets k target)
           (swap! stats assoc :targets (.size targets))
           target))))

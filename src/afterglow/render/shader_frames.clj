@@ -7,18 +7,18 @@
     {:source   \"void main() { fragColor = vec4(u_tint, 1.0); }\"
      :uniforms {\"u_tint\" :vec3 \"u_speed\" :float}}
 
-  The source is a GLSL ES 3.00 fragment body. Afterglow declares every listed
-  uniform, the viewport size `u_resolution` (vec2, pixels) and the output
-  `fragColor` (vec4) before it, so the same source runs on the desktop GL 3.3
-  context (`afterglow.render.gpu.shader-frames`) and in WebGL2. `u_origin`
+  The source is a GLSL 3.30 fragment body, compiled on the desktop GL 3.3
+  context (`afterglow.render.gpu.shader-frames`). Afterglow declares every
+  listed uniform, the viewport size `u_resolution` (vec2, pixels) and the
+  output `fragColor` (vec4) before it; author #extension lines are moved
+  ahead of those declarations. `u_origin`
   (vec2) is the viewport's lower-left corner in window pixels. The source
   must not declare them again. `fragColor` holds display (sRGB-encoded)
   values in [0,1], as a video frame does; the frame stores them as BGRA8.
 
   Frames are top-down: row 0 of the returned pixels is the top of the image,
   although gl_FragCoord.y grows upwards in the shader."
-  (:require [clojure.string :as str])
-  (:import [java.nio ByteBuffer]))
+  (:require [clojure.string :as str]))
 
 (def uniform-types
   "Declared uniform types, their GLSL names and component counts. A :bool is
@@ -68,8 +68,12 @@
           [(error [:source] "A shader needs GLSL source text")])
         (when (and (string? source) (> (count source) max-source-chars))
           [(error [:source] (str "Shader source is limited to " max-source-chars " characters"))])
-        (when (and (string? source) (re-find #"(?m)^\s*#\s*version\b" (str/replace-first source #"\A\s*#\s*version[^\n]*" "")))
-          [(error [:source] "Only a first line may name the GLSL version")])
+        (when (and (string? source)
+                   (let [lines (str/split-lines source)
+                         versions (keep-indexed (fn [i l] (when (re-matches #"\s*#\s*version\b.*" l) i)) lines)]
+                     (or (> (count versions) 1)
+                         (and (seq versions) (not (every? str/blank? (take (first versions) lines)))))))
+          [(error [:source] "Only the first line may name the GLSL version")])
         (when-not (or (nil? uniforms) (map? uniforms))
           [(error [:uniforms] "Uniforms are a map from GLSL name to type")])
         (when (and (map? uniforms) (> (count uniforms) max-uniforms))
@@ -93,28 +97,53 @@
       (throw (ex-info "Invalid shader" {:type ::invalid-shader :errors errors})))
     shader))
 
-(defn- body [source]
-  ;; The header names the version; an author's own first-line version is dropped.
-  (str/replace-first source #"\A\s*#\s*version[^\n]*\n?" ""))
+(defn- directive? [line kind]
+  (re-matches (re-pattern (str "\\s*#\\s*" kind "\\b.*")) line))
+
+(defn- version-line
+  "Index of an author's #version line, when only blank lines precede it."
+  [lines]
+  (let [i (first (keep-indexed (fn [i l] (when (directive? l "version") i)) lines))]
+    (when (and i (every? str/blank? (take i lines))) i)))
+
+(defn- split-source
+  "The author's #extension lines, which GLSL requires before any declaration,
+  and the body. Each removed line (an author #version and the blank lines
+  before it, or an #extension) stays as an empty line, so `#line 1` numbers
+  the body exactly as the author's text."
+  [source]
+  (let [lines (str/split source #"\n" -1)
+        version (version-line lines)]
+    (reduce (fn [{:keys [extensions body]} [i line]]
+              (cond
+                (and version (<= i version)) {:extensions extensions :body (conj body "")}
+                (directive? line "extension") {:extensions (conj extensions (str/trim line)) :body (conj body "")}
+                :else {:extensions extensions :body (conj body line)}))
+            {:extensions [] :body []}
+            (map-indexed vector lines))))
 
 (defn fragment-source
   "Complete fragment shader text for :glsl-330 (desktop GL 3.3 core) or
-  :glsl-es-300 (WebGL2). Uniforms are declared in name order, and `#line 1`
-  keeps compiler log line numbers relative to the author's source."
+  :glsl-es-300. Author #extension lines come first, then the declarations
+  in name order; `#line 1` keeps driver log line numbers equal to the
+  author's. Only the desktop dialect is compiled and tested. GLSL ES 3.00 is
+  stricter (no implicit int to float conversion, for one), so the ES text
+  declares the same interface but the same body is not guaranteed to
+  compile in WebGL2."
   ([shader] (fragment-source shader :glsl-330))
   ([shader dialect]
    (let [{:keys [source uniforms]} (validate-shader! shader)
-         header (case dialect
-                  :glsl-330 "#version 330 core\n"
-                  :glsl-es-300 "#version 300 es\nprecision highp float;\nprecision highp int;\n")]
-     (str header
+         {:keys [extensions body]} (split-source source)]
+     (str (case dialect :glsl-330 "#version 330 core\n" :glsl-es-300 "#version 300 es\n")
+          (apply str (map #(str % "\n") extensions))
+          (when (= :glsl-es-300 dialect) "precision highp float;\nprecision highp int;\n")
           "uniform vec2 " resolution-uniform ";\n"
           "uniform vec2 " origin-uniform ";\n"
           (apply str (for [[name type] (sort-by key uniforms)]
                        (str "uniform " (get-in uniform-types [type :glsl]) " " name ";\n")))
           "out vec4 fragColor;\n"
           "#line 1\n"
-          (body source)
+          (str/join "\n" body)
           "\n"))))
 
 (def vertex-source
@@ -184,14 +213,15 @@
   (let [[x y w h] (or viewport [0 0 width height])]
     [x (- height y h) w h]))
 
-(defn copy-bottom-up
-  "Copy width × height BGRA rows read bottom-up from GL into a new, owned
-  top-down byte array."
-  ^bytes [^ByteBuffer source width height]
+(defn flip-rows!
+  "Reverse the row order of an owned width × height BGRA array in place (GL
+  reads bottom-up; frames are top-down). Returns the array."
+  ^bytes [^bytes pixels width height]
   (let [row (* 4 (long width))
-        out (byte-array (* row (long height)))
-        src (.duplicate source)]
-    (dotimes [y height]
-      (.position src (int (* row (- (long height) 1 y))))
-      (.get src out (int (* row y)) (int row)))
-    out))
+        scratch (byte-array row)]
+    (dotimes [y (quot (long height) 2)]
+      (let [top (* row y) bottom (* row (- (long height) 1 y))]
+        (System/arraycopy pixels top scratch 0 row)
+        (System/arraycopy pixels bottom pixels top row)
+        (System/arraycopy scratch 0 pixels bottom row)))
+    pixels))
