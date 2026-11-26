@@ -69,6 +69,25 @@
     (when (seq (musical-time/validate-duration (get instance field)))
       (fail! ::invalid-duration "Invalid musical duration" {:instance-id id :field field}))))
 
+(defn- validate-render-inputs!
+  "Check the frame-local render inputs of a frame or of its reload fallback."
+  [model frame]
+  (let [factors (get frame ::opacity-factors {})]
+    (when-not (map? factors)
+      (fail! ::invalid-opacity-factors "Expected an instance ID to opacity factor map" {}))
+    (doseq [[id factor] factors]
+      (when-not (and (contains? (:instances model) id)
+                     (if (map? factor)
+                       (every? (fn [[version value]]
+                                 (and (integer? version) (pos? version) (unit-opacity? value))) factor)
+                       (unit-opacity? factor)))
+        (fail! ::invalid-opacity-factors "Active instance opacity factors must be in [0,1], optionally by definition version"
+               {:instance-id id :factor factor}))))
+  (when-let [errors (seq (instance-order/priority-override-errors
+                           (:instances model) (get frame ::priority-overrides {})))]
+    (fail! ::invalid-priority-overrides "Frame priority overrides must be finite and agree within native layers"
+           {:errors (vec errors)})))
+
 (defn- validate-input!
   [model frame compile-effect]
   (when-not (and (map? model) (map? (:instances model))
@@ -92,21 +111,14 @@
            {:model-time-ms (:time-ms model) :frame-time-ms (:time-ms frame)}))
   (when (and (contains? frame :delta-ms) (not (nonnegative-number? (:delta-ms frame))))
     (fail! ::invalid-delta "Frame delta must be finite and nonnegative" {}))
-  (let [factors (get frame ::opacity-factors {})]
-    (when-not (map? factors)
-      (fail! ::invalid-opacity-factors "Expected an instance ID to opacity factor map" {}))
-    (doseq [[id factor] factors]
-      (when-not (and (contains? (:instances model) id)
-                     (if (map? factor)
-                       (every? (fn [[version value]]
-                                 (and (integer? version) (pos? version) (unit-opacity? value))) factor)
-                       (unit-opacity? factor)))
-        (fail! ::invalid-opacity-factors "Active instance opacity factors must be in [0,1], optionally by definition version"
-               {:instance-id id :factor factor}))))
-  (when-let [errors (seq (instance-order/priority-override-errors
-                           (:instances model) (get frame ::priority-overrides {})))]
-    (fail! ::invalid-priority-overrides "Frame priority overrides must be finite and agree within native layers"
-           {:errors (vec errors)}))
+  (validate-render-inputs! model frame)
+  (when (contains? frame ::reload-fallback)
+    (let [fallback (::reload-fallback frame)]
+      (when-not (and (map? fallback)
+                     (not-any? #(contains? fallback %) [:time-ms :delta-ms :epoch :show-id ::reload-fallback]))
+        (fail! ::invalid-reload-fallback
+               "Reload fallback inputs must be a map without frame time or show identity" {}))
+      (validate-render-inputs! model fallback)))
   (doseq [[id instance] (:instances model)]
     (validate-instance! id instance)))
 
@@ -467,17 +479,29 @@
                                                  (take 4 (take-while some? (iterate #(.getCause ^Throwable %) error))))
                                          :result :evaluate) error)})))))
 
-(defn- evaluate-isolated [snapshot compiled factors prepared]
-  (let [result (attempt snapshot compiled factors prepared)
-        candidate? (:candidate? prepared)
+(defn- rejected-fallback
+  "The captured last-good revision of a rejected reload candidate, carrying the fault."
+  [prepared fault]
+  (-> (:fallback prepared)
+      (assoc :before (:before prepared) :candidate? false)
+      (assoc-in [:instance :reload-fault] fault)
+      (update :intents conj (faults/event :effect/reload-failed fault))))
+
+(defn- deferred-fallback
+  "The captured revision of a healthy reload candidate that waits for a later frame."
+  [prepared]
+  (assoc (:fallback prepared) :before (:before prepared) :candidate? false))
+
+(defn- settle
+  "Complete one instance from its first attempt. A rejected reload candidate
+  evaluates the captured last-good revision in its place."
+  [snapshot compiled factors prepared result]
+  (let [candidate? (:candidate? prepared)
         before (:before prepared)
         fault (:failure result)
         [result prepared]
         (if (and fault candidate?)
-          (let [fallback (-> (:fallback prepared)
-                             (assoc :before before :candidate? false)
-                             (assoc-in [:instance :reload-fault] fault)
-                             (update :intents conj (faults/event :effect/reload-failed fault)))]
+          (let [fallback (rejected-fallback prepared fault)]
             [(attempt snapshot compiled factors fallback) fallback])
           [result prepared])
         succeeded? (and (nil? (:failure result)) (not (:skipped? result)))
@@ -498,30 +522,43 @@
                                  :effect-id (:effect-id before) :effect-version (get-in result [:instance :effect-version])})))]
     (assoc result :before before :prepared prepared)))
 
-(defn- assemble [model snapshot descriptors evaluations]
-  (let [live-instances (eduction (remove #(get-in % [:prepared :expired?])) (map :instance) evaluations)
-        suppressed (effect-selection/suppressed-instance-ids live-instances)
-        evaluated (runtime/merge-results {:frame snapshot :effects descriptors ::runtime/suppressed-instance-ids suppressed}
-                                         evaluations)
-        instances (into {} (keep (fn [result]
-                                  (when-not (:done? result)
-                                    [(:id result) (runtime/observable-instance result)]))) evaluations)
-        next-model (control/track-parameter-generations model (assoc model :instances instances))
-        events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
-    (cond-> {:model (faults/record-events next-model events)
-             :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
-             :keyframes (keyframes/committed-windows snapshot evaluations)
-             :fault-events events
-             ;; Private evaluation records never enter the model or a saved show. A
-             ;; renderer can reject one malformed output without running healthy code twice.
-             ::evaluation {:model model :snapshot snapshot :descriptors descriptors :results evaluations}}
-      (seq (:intent-emissions evaluated)) (assoc :intent-emissions (:intent-emissions evaluated)))))
+(defn- evaluate-isolated [snapshot compiled factors prepared]
+  (settle snapshot compiled factors prepared (attempt snapshot compiled factors prepared)))
+
+(defn- assemble
+  ([model snapshot descriptors evaluations] (assemble model snapshot descriptors evaluations nil))
+  ([model snapshot descriptors evaluations {:keys [reload-inputs fallback]}]
+   (let [live-instances (eduction (remove #(get-in % [:prepared :expired?])) (map :instance) evaluations)
+         suppressed (effect-selection/suppressed-instance-ids live-instances)
+         evaluated (runtime/merge-results {:frame snapshot :effects descriptors ::runtime/suppressed-instance-ids suppressed}
+                                          evaluations)
+         instances (into {} (keep (fn [result]
+                                   (when-not (:done? result)
+                                     [(:id result) (runtime/observable-instance result)]))) evaluations)
+         next-model (control/track-parameter-generations model (assoc model :instances instances))
+         events (filterv #(#{:effect/failed :effect/reload-failed :effect/recovered} (:type %)) (:intents evaluated))]
+     (cond-> {:model (faults/record-events next-model events)
+              :assignments (:assignments evaluated) :contributions (:contributions evaluated) :intents (:intents evaluated)
+              :keyframes (keyframes/committed-windows snapshot evaluations)
+              :fault-events events
+              ;; Private evaluation records never enter the model or a saved show. A
+              ;; renderer can reject one malformed output without running healthy code twice.
+              ;; :fallback re-evaluates a frame that supplied ::reload-fallback when the
+              ;; renderer rejects a reload candidate it had accepted.
+              ::evaluation (cond-> {:model model :snapshot snapshot :descriptors descriptors :results evaluations}
+                             reload-inputs (assoc :reload-inputs reload-inputs)
+                             fallback (assoc :fallback fallback))}
+       reload-inputs (assoc :reload-inputs reload-inputs)
+       (seq (:intent-emissions evaluated)) (assoc :intent-emissions (:intent-emissions evaluated))))))
 
 (defn reject-output
   "Reject one renderer-attributed output, preserving all other evaluated results.
-  Unknown/global errors and a repeated rejection remain whole-frame failures."
+  Unknown/global errors and a repeated rejection remain whole-frame failures.
+  A rejected reload candidate in a frame that supplied ::reload-fallback is the
+  one exception to keeping the other results: that frame is evaluated again on
+  its fallback inputs, as it is for every earlier rejection stage."
   [result error]
-  (let [{:keys [model snapshot descriptors results]} (::evaluation result)
+  (let [{:keys [model snapshot descriptors results reload-inputs fallback]} (::evaluation result)
         source (:effect-source (ex-data error))
         index (first (keep-indexed #(when (= (:instance-id source) (:id %2)) %1) results))
         evaluated (when (some? index) (nth results index))]
@@ -531,14 +568,32 @@
     (let [prepared (:prepared evaluated) before (:before evaluated)
           failed (:instance evaluated)
           diagnostic (faults/diagnostic snapshot failed (:effect-version failed) :output error)
-          candidate? (not= (:effect-version before) (:effect-version failed))
-          prepared (if candidate? (:fallback prepared) prepared)
-          next (-> (silent-result prepared)
-                   (update :instance dissoc :retry-fault)
-                   (assoc :before before :prepared prepared :output-rejected? true)
-                   (assoc-in [:instance (if candidate? :reload-fault :fault)] diagnostic)
-                   (update :intents conj (faults/event (if candidate? :effect/reload-failed :effect/failed) diagnostic)))]
-      (assemble model snapshot descriptors (assoc results index next)))))
+          candidate? (not= (:effect-version before) (:effect-version failed))]
+      (if (and candidate? fallback)
+        (fallback {(:id failed) diagnostic})
+        (let [prepared (if candidate? (:fallback prepared) prepared)
+              next (-> (silent-result prepared)
+                       (update :instance dissoc :retry-fault)
+                       (assoc :before before :prepared prepared :output-rejected? true)
+                       (assoc-in [:instance (if candidate? :reload-fault :fault)] diagnostic)
+                       (update :intents conj (faults/event (if candidate? :effect/reload-failed :effect/failed) diagnostic)))]
+          (assemble model snapshot descriptors (assoc results index next)
+                    {:reload-inputs reload-inputs :fallback fallback}))))))
+
+(defn- frame-inputs
+  "Freeze the inputs one evaluation pass reads from a frame: the shared snapshot,
+  the frame-local opacity factors and the render positions."
+  [model frame time-ms delta-ms frame-number]
+  (let [snapshot (merge {:fixtures []} (dissoc frame ::opacity-factors ::priority-overrides ::reload-fallback)
+                        {:show-id (:show-id model) :epoch (:epoch model)
+                         :revision (:revision model) :number frame-number
+                         :time-ms time-ms :delta-ms delta-ms
+                         :variables (get frame :resolved-variables (:variables model)) :master (:master model)
+                         :blackout? (:blackout? model) :transport (:transport model)})]
+    {:snapshot (assoc snapshot :transport-clock (musical-time/frame-clock snapshot))
+     :factors (::opacity-factors frame)
+     ;; Resolve modulated layer priority once from this frozen frame input.
+     :positions (instance-order/with-priority-overrides (:instances model) (::priority-overrides frame))}))
 
 (defn advance
   "Advance the new control model by one fully evaluated frame.
@@ -601,6 +656,23 @@
   overriding value places the instance (or its whole native layer) in that tier,
   tied with equal priorities by launch order. Unknown IDs are ignored.
 
+  Optional ::reload-fallback is a map of frame inputs that replace the frame's
+  own whenever this frame rejects a hot reload. A host supplies it when inputs
+  it computed before the frame, such as modulated parameters, already follow a
+  newer definition and would be wrong for the captured last-good revision. With
+  it the frame reads one input set throughout. Reload candidates are attempted
+  first on the frame's own inputs. If every candidate is accepted, the other
+  instances evaluate on those inputs too. If any candidate is rejected at
+  preparation, compilation, migration or evaluation, every instance evaluates
+  its captured revision on the merged fallback inputs: the rejected candidates
+  record their reload fault as usual, and the accepted ones stay candidates,
+  without a fault, for the next frame. The fallback may carry any frame input,
+  including ::opacity-factors and ::priority-overrides, but not :time-ms,
+  :delta-ms, :epoch or :show-id. The result's :reload-inputs is :frame or
+  :fallback and names the set that was read; it is absent when no fallback was
+  supplied. The host commits whatever state produced that set. A frame with
+  candidates makes two mapping calls, each with its own executor deadline.
+
   Command :revision is preserved; :frame-number advances. Asynchronous shells
   must compare [epoch revision frame-number] before committing a frame, or use a
   single owner that drains commands and evaluates frames sequentially."
@@ -613,40 +685,65 @@
          delta-ms (get frame :delta-ms (- time-ms (get model :last-frame-time-ms (:time-ms model))))
          _ (when-not (nonnegative-number? delta-ms)
              (fail! ::invalid-delta "Computed frame delta must be nonnegative" {}))
-         factors (::opacity-factors frame)
-         ;; Resolve modulated layer priority once from this frozen frame input.
-         positions (instance-order/with-priority-overrides (:instances model) (::priority-overrides frame))
-         position-of (fn [instance] (get positions (:id instance) instance))
-         snapshot (merge {:fixtures []} (dissoc frame ::opacity-factors ::priority-overrides)
-                         {:show-id (:show-id model) :epoch (:epoch model)
-                          :revision (:revision model) :number frame-number
-                          :time-ms time-ms :delta-ms delta-ms
-                          :variables (get frame :resolved-variables (:variables model)) :master (:master model)
-                          :blackout? (:blackout? model) :transport (:transport model)})
-         clock (musical-time/frame-clock snapshot)
-         snapshot (assoc snapshot :transport-clock clock)
+         inputs (fn [frame] (frame-inputs model frame time-ms delta-ms frame-number))
+         {:keys [snapshot] :as own} (inputs frame)
+         clock (:transport-clock snapshot)
          _ (when (and (some? (:last-frame-beat model)) (some? (:beat clock))
                       (< (:beat clock) (:last-frame-beat model)))
              (fail! ::stale-beat "Transport beat cannot move backwards within a show epoch" {}))
          prepared (mapv (fn [positioned] (prepare-isolated model clock snapshot (get-in model [:instances (:id positioned)])))
-                        (sort instance-order/render-instance-comparator (vals positions)))
+                        (sort instance-order/render-instance-comparator (vals (:positions own))))
          definitions (distinct (map :program
                                     (remove #(or (:expired? %) (= (get-in % [:instance :effect-version])
                                                                   (get-in % [:instance :fault :effect-version])))
                                             (mapcat #(cond-> [%] (:candidate? %) (conj (:fallback %))) prepared))))
-         snapshot (cond-> snapshot
-                    (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
-                    keyframes/with-rig-positions)
+         with-rig (fn [inputs frame]
+                    (cond-> inputs
+                      (or (seq (:keyframes frame)) (seq (:keyframe-intervals frame)) (some :keyframes definitions))
+                      (update :snapshot keyframes/with-rig-positions)))
+         own (with-rig own frame)
          compiled (into {} (map (fn [definition] [definition (compile-isolated compile-effect definition)])) definitions)
+         next-model (assoc model :time-ms time-ms :last-frame-time-ms time-ms
+                                 :last-frame-beat (:beat clock) :frame-number frame-number)
          render-keys [:priority :order :render-priority :render-order]
-         descriptors (mapv #(let [instance (:instance %)]
-                              (assoc (merge (select-keys instance [:id :state])
-                                            (select-keys (position-of instance) render-keys))
-                                     :step identity)) prepared)
-         evaluations (vec (map-work (partial evaluate-isolated snapshot compiled factors) prepared))
          ;; Worker completion order is deliberately discarded before the model,
          ;; fault journal and result records are assembled.
-         evaluations (vec (sort-by (comp position-of :instance) instance-order/render-instance-comparator evaluations))]
-     (assemble (assoc model :time-ms time-ms :last-frame-time-ms time-ms
-                            :last-frame-beat (:beat clock) :frame-number frame-number)
-               snapshot descriptors evaluations))))
+         finish (fn [{:keys [snapshot positions]} entries evaluations reload]
+                  (let [position-of (fn [instance] (get positions (:id instance) instance))]
+                    (assemble next-model snapshot
+                              (mapv #(let [instance (:instance %)]
+                                       (assoc (merge (select-keys instance [:id :state])
+                                                     (select-keys (position-of instance) render-keys))
+                                              :step identity)) entries)
+                              (vec (sort-by (comp position-of :instance) instance-order/render-instance-comparator evaluations))
+                              reload)))
+         evaluate (fn [{:keys [snapshot factors]} entries]
+                    (vec (map-work (partial evaluate-isolated snapshot compiled factors) entries)))
+         fallback-frame (when (contains? frame ::reload-fallback) (merge frame (::reload-fallback frame)))
+         candidates (when fallback-frame (filterv :candidate? prepared))]
+     (if-not (or (seq candidates) (and fallback-frame (some :prepare-failed? prepared)))
+       (finish own prepared (evaluate own prepared) (when fallback-frame {:reload-inputs :frame}))
+       ;; Reload candidates decide which inputs this whole frame reads, so they
+       ;; are attempted first and nothing else has evaluated when one is rejected.
+       (let [instance-id (fn [entry] (get-in entry [:instance :id]))
+             trials (if (seq candidates)
+                      (into {} (map-work (fn [entry] [(instance-id entry) (attempt (:snapshot own) compiled (:factors own) entry)])
+                                         candidates))
+                      {})
+             rejected (into {} (keep (fn [[id result]] (when-let [failure (:failure result)] [id failure]))) trials)
+             fallback-inputs (delay (with-rig (inputs fallback-frame) fallback-frame))
+             evaluate-fallback
+             (fn [rejected]
+               (let [{:keys [snapshot factors] :as fallback} @fallback-inputs
+                     evaluate-entry (fn [entry]
+                                      (if-let [fault (get rejected (instance-id entry))]
+                                        (settle snapshot compiled factors entry {:failure fault})
+                                        (evaluate-isolated snapshot compiled factors
+                                                           (cond-> entry (:candidate? entry) deferred-fallback))))]
+                 (finish fallback prepared (vec (map-work evaluate-entry prepared)) {:reload-inputs :fallback})))]
+         (if (or (seq rejected) (some :prepare-failed? prepared))
+           (evaluate-fallback rejected)
+           (finish own prepared
+                   (into (mapv #(settle (:snapshot own) compiled (:factors own) % (get trials (instance-id %))) candidates)
+                         (evaluate own (filterv (complement :candidate?) prepared)))
+                   {:reload-inputs :frame :fallback evaluate-fallback})))))))
