@@ -69,7 +69,8 @@
     (reject! :invalid-value "The additive modifier must be boolean"))
   (when (and (contains? command :mode) (not (#{:exclusive :additive} mode)))
     (reject! :invalid-value "A toggle mode is :exclusive or :additive" {:mode mode}))
-  (when (and (some? mode) (contains? command :additive?) (not= additive? (= :additive mode)))
+  ;; :additive? false only means "no additive modifier", so it agrees with either mode.
+  (when (and (true? additive?) (= :exclusive mode))
     (reject! :invalid-value "The additive modifier contradicts the toggle mode"
              {:mode mode :additive? additive?}))
   (cond mode mode additive? :additive :else (get (modes model) control)))
@@ -106,8 +107,8 @@
   "Apply a selection operation within the shared command reducer. Selectors use
   the category selector dimensions and optionally a native :layer-id. A toggle's
   :mode (:exclusive or :additive) overrides the configured mode for that action
-  only; :additive? true is shorthand for :mode :additive, and a command giving
-  both must agree. Invalid operations throw a :control/error."
+  only; :additive? true is shorthand for :mode :additive and contradicts
+  :mode :exclusive. Invalid operations throw a :control/error."
   [model {:keys [op modes] :as command}]
   (case op
     :effect-selection/toggle (toggle model command)

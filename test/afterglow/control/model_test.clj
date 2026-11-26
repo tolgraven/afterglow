@@ -121,14 +121,15 @@
                                                    :selector {:instance-ids ["0:3"]}})
                                      :soloed?))
             "The next toggle without a mode is exclusive again")))
-    (testing ":additive? keeps its meaning, alone or agreeing with :mode"
+    (testing ":additive? keeps its meaning alone, and false defers to :mode"
       (let [soloed (apply! running {:op :effect-selection/toggle :control :solo :selector {:instance-ids ["0:3"]}})
             outcome (fn [operation]
                       (let [{:keys [model ack]} (toggle-result soloed (merge {:control :solo :selector {:instance-ids ["0:1"]}}
                                                                              operation))]
                         [(:mode ack) (selected-ids model :soloed?)]))]
         (is (= [:additive ["0:1" "0:3"]] (outcome {:additive? true}) (outcome {:mode :additive})
-               (outcome {:mode :additive :additive? true})))
+               (outcome {:mode :additive :additive? true}) (outcome {:mode :additive :additive? false}))
+            ":additive? false means no modifier, so :mode decides")
         (is (= [:exclusive ["0:1"]] (outcome {}) (outcome {:additive? false}) (outcome {:mode :exclusive})
                (outcome {:mode :exclusive :additive? false})))))
     (testing "nothing matching leaves the selection unchanged"
@@ -140,7 +141,6 @@
         (is (empty? events))))
     (testing "invalid or contradictory modes are rejected without a change"
       (doseq [[operation code] [[{:mode :exclusive :additive? true} :invalid-value]
-                                [{:mode :additive :additive? false} :invalid-value]
                                 [{:mode :replace} :invalid-value]
                                 [{:mode "exclusive"} :invalid-value]
                                 [{:mode nil} :invalid-value]
