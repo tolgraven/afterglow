@@ -53,9 +53,12 @@
                  (when @running
                    (reset! pending
                            (.schedule executor
+                                      ;; Cancel can land between schedule and reset!, missing
+                                      ;; this run in pending, so each run checks again.
                                       ^Runnable (fn []
-                                                  (try (refresh!) (catch Exception _))
-                                                  (arm! (next-deadline-ns deadline period (System/nanoTime))))
+                                                  (when @running
+                                                    (try (refresh!) (catch Exception _))
+                                                    (arm! (next-deadline-ns deadline period (System/nanoTime)))))
                                       (max 0 (- deadline (System/nanoTime))) TimeUnit/NANOSECONDS))))]
       (arm! (+ (System/nanoTime) period))
       ;; A run already in progress finishes; it cannot re-arm after this.

@@ -230,3 +230,21 @@
     (let [stopped @runs]
       (Thread/sleep 50)
       (is (<= (- @runs stopped) 1)))))
+
+(deftest deadline-scheduler-never-starts-a-run-after-cancel-returns
+  ;; A run re-arming as cancel ran could leave one more run queued a period
+  ;; later. Cancel right after a run, when the worker is re-arming, many times.
+  (let [period-ns (long (/ 1e9 240))
+        runs (vec (for [_ (range 500)]
+                    (let [starts (atom []) give-up (+ (System/nanoTime) 2000000000)
+                          cancel ((transports/deadline-scheduler 240)
+                                  #(swap! starts conj (System/nanoTime)))]
+                      ;; Spin, then sweep a few microseconds, so cancel lands while the worker re-arms.
+                      (while (and (empty? @starts) (< (System/nanoTime) give-up)))
+                      (let [until (+ (System/nanoTime) (rand-int 30000))] (while (< (System/nanoTime) until)))
+                      (cancel)
+                      [starts (System/nanoTime)])))]
+    (Thread/sleep 20)
+    ;; A run already in progress may finish; a queued one starts about a period later.
+    (is (zero? (count (filter (fn [[starts cancelled]] (some #(> % (+ cancelled (quot period-ns 2))) @starts))
+                              runs))))))
