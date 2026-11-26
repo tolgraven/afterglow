@@ -1785,3 +1785,24 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Knob page"
                           (push/profile {:knob-page page :operator-gestures? true})) (pr-str page)))
   (is (map? (push/profile {:knob-page {:button 52 :knob-ids [:a "b"] :step 1/20}}))))
+
+(deftest the-knob-page-waits-for-a-touch-on-an-empty-slot-to-lift
+  ;; A touch on a slot with no parameter records only its touch mode. Switching
+  ;; the page under it would leave that mode behind and swallow the next
+  ;; parameter touch on the slot.
+  (let [h (knob-harness {:button 52 :knob-ids [:look]})]
+    (try
+      (receive! h [0xb0 57 127])
+      (receive! h [0x90 1 127])
+      (receive! h [0xb0 57 0])
+      (receive! h [0xb0 52 127])
+      (receive! h [0xb0 52 0])
+      (is (nil? (:knob-page (view h))) "the page stays while the empty slot is held")
+      (receive! h [0x80 1 0])
+      (is (empty? (:encoder-touch-modes (local h))))
+      (let [id (launch! h 36)]
+        (receive! h [0x90 1 127])
+        (receive! h [0xb0 72 1])
+        (receive! h [0x80 1 0])
+        (is (= 0.51 (get (values h id) :level)) "the next parameter touch edits"))
+      (finally (finish! h)))))

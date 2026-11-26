@@ -690,8 +690,11 @@
        (every? #(or (keyword? %) (and (string? %) (seq %))) knob-ids)
        (or (nil? step) (and (params/finite-number? step) (pos? step)))))
 
-(defn- track-touch-held? [state]
-  (some #(<= 0 % 7) (keys (:touches state))))
+(defn- track-touch-held?
+  "A track encoder is physically touched. A touch on a slot without a parameter
+  records only its touch mode, which its lift must still clear."
+  [state]
+  (some #(<= 0 % 7) (concat (keys (:touches state)) (keys (:encoder-touch-modes state)))))
 
 (defn- knob-page-event? [{:keys [type note controller]}]
   (or (and (#{:note-on :note-off} type) (<= 0 note 7))
