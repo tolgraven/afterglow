@@ -70,6 +70,87 @@
         (is (identical? model (:model result)))
         (is (empty? (:events result)))))))
 
+(defn- selected-ids [model field]
+  (into [] (comp (filter field) (map :id)) (:instances (:effect-selection (views/snapshot model)))))
+
+(defn- toggle-result [model operation]
+  (model/apply-command model (command model (merge {:op :effect-selection/toggle} operation))))
+
+(deftest effect-selection-mode-overrides-the-configured-mode-for-one-toggle
+  (let [launch {:op :cue/launch :cue-id :red}
+        running (-> (configured) (apply! launch) (apply! launch) (apply! launch) (apply! launch))
+        additive (-> running
+                     (apply! {:op :effect-selection/configure :modes {:solo :additive :mute :additive}})
+                     (apply! {:op :effect-selection/toggle :control :solo :selector {:instance-ids ["0:1" "0:3"]}})
+                     (apply! {:op :effect-selection/toggle :control :mute :selector {:instance-ids ["0:4"]}}))
+        stored-modes (get-in additive [:settings :effect-selection])]
+    (testing "an exclusive toggle replaces an additive selection in one commit"
+      (let [{:keys [model ack events]} (toggle-result additive {:control :solo :mode :exclusive
+                                                                :selector {:instance-ids ["0:2"]}})
+            change {:control :solo :mode :exclusive :instance-ids ["0:2"]
+                    :changed-instance-ids ["0:1" "0:2" "0:3"] :selected-instance-ids ["0:2"]}]
+        (is (= :accepted (:status ack)))
+        (is (= (inc (:revision additive)) (:revision ack) (:revision model)) "One revision, one commit")
+        (is (= change (select-keys ack (keys change))))
+        (is (= [(assoc change :type :effect-selection/changed)] events) "One event for the whole replacement")
+        (is (= ["0:2"] (selected-ids model :soloed?)))
+        (is (= ["0:4"] (selected-ids model :muted?)) "An exclusive Solo leaves Mute alone")
+        (is (= ["0:2"] (get-in (views/snapshot model) [:effect-selection :included-instance-ids])))
+        (is (= stored-modes (get-in model [:settings :effect-selection])
+               (get-in (views/snapshot model) [:effect-selection :modes]))
+            "The override does not change the stored modes")
+        (testing "a later toggle without a mode uses the stored additive mode"
+          (is (= ["0:2" "0:3"] (selected-ids (apply! model {:op :effect-selection/toggle :control :solo
+                                                           :selector {:instance-ids ["0:3"]}})
+                                             :soloed?))))
+        (testing "repeating it on exactly the selected targets clears the control"
+          (let [cleared (toggle-result model {:control :solo :mode :exclusive :selector {:instance-ids ["0:2"]}})]
+            (is (= [] (get-in cleared [:ack :selected-instance-ids])))
+            (is (= [] (selected-ids (:model cleared) :soloed?)))))
+        (testing "a target already selected among others keeps only the targets"
+          (let [kept (toggle-result additive {:control :solo :mode :exclusive :selector {:instance-ids ["0:3"]}})]
+            (is (= ["0:1"] (get-in kept [:ack :changed-instance-ids])))
+            (is (= ["0:3"] (selected-ids (:model kept) :soloed?)))))))
+    (testing "an additive toggle adds while the configured mode is exclusive"
+      (let [soloed (apply! running {:op :effect-selection/toggle :control :solo :selector {:instance-ids ["0:3"]}})
+            {:keys [model ack]} (toggle-result soloed {:control :solo :mode :additive :selector {:instance-ids ["0:1"]}})]
+        (is (= :additive (:mode ack)))
+        (is (= ["0:1" "0:3"] (selected-ids model :soloed?)))
+        (is (= {:solo :exclusive :mute :exclusive} (get-in (views/snapshot model) [:effect-selection :modes])))
+        (is (= ["0:3"] (selected-ids (apply! model {:op :effect-selection/toggle :control :solo
+                                                   :selector {:instance-ids ["0:3"]}})
+                                     :soloed?))
+            "The next toggle without a mode is exclusive again")))
+    (testing ":additive? keeps its meaning, alone or agreeing with :mode"
+      (let [soloed (apply! running {:op :effect-selection/toggle :control :solo :selector {:instance-ids ["0:3"]}})
+            outcome (fn [operation]
+                      (let [{:keys [model ack]} (toggle-result soloed (merge {:control :solo :selector {:instance-ids ["0:1"]}}
+                                                                             operation))]
+                        [(:mode ack) (selected-ids model :soloed?)]))]
+        (is (= [:additive ["0:1" "0:3"]] (outcome {:additive? true}) (outcome {:mode :additive})
+               (outcome {:mode :additive :additive? true})))
+        (is (= [:exclusive ["0:1"]] (outcome {}) (outcome {:additive? false}) (outcome {:mode :exclusive})
+               (outcome {:mode :exclusive :additive? false})))))
+    (testing "nothing matching leaves the selection unchanged"
+      (let [{:keys [model ack events]} (toggle-result additive {:control :solo :mode :exclusive
+                                                                :selector {:categories [:movement]}})]
+        (is (= :accepted (:status ack)))
+        (is (= [] (:instance-ids ack) (:changed-instance-ids ack)))
+        (is (= ["0:1" "0:3"] (:selected-instance-ids ack) (selected-ids model :soloed?)))
+        (is (empty? events))))
+    (testing "invalid or contradictory modes are rejected without a change"
+      (doseq [[operation code] [[{:mode :exclusive :additive? true} :invalid-value]
+                                [{:mode :additive :additive? false} :invalid-value]
+                                [{:mode :replace} :invalid-value]
+                                [{:mode "exclusive"} :invalid-value]
+                                [{:mode nil} :invalid-value]
+                                [{:mode :exclusive :selector {:instance-ids ["0:2" "0:99"]}} :unknown-instance]]]
+        (let [result (toggle-result additive (merge {:control :solo :selector {:instance-ids ["0:2"]}} operation))]
+          (is (= :rejected (get-in result [:ack :status])) (pr-str operation))
+          (is (= code (get-in result [:ack :code])) (pr-str operation))
+          (is (identical? additive (:model result)))
+          (is (empty? (:events result))))))))
+
 (deftest effect-selection-reads-only-supported-defaults-from-previous-show-settings
   (doseq [[settings expected] [["legacy setting" {:solo :exclusive :mute :exclusive}]
                                [{:solo :additive :mute :unknown :unused :value}
