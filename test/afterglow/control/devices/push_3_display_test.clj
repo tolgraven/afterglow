@@ -3,6 +3,7 @@
             [clojure.java.shell :as shell]
             [clojure.test :refer [deftest is testing]]
             [afterglow.control.devices.push-3.display :as display]
+            [afterglow.control.devices.push-3.qualification :as qualification]
             [afterglow.control.devices.push-3.screen :as screen]
             [afterglow.control.devices.push-3.usb :as usb])
   (:import [com.sun.jna Function NativeLibrary]
@@ -96,8 +97,55 @@
       (is (= [[:first 2] [:latest 4]] @receipts))
       (finally ((:close! sink) handle)))))
 
-(deftest linux-libusb-ffi-replay
-  (when (= "Linux" (System/getProperty "os.name"))
+(deftest refresh-receipt-counts-frames-bytes-and-transfer-times
+  (let [refresh (atom nil)
+        sink (display/sink {:backend {:open! (constantly {:timing {:context :reused :open-ms 3.0}})
+                                      :write! (fn [_ ^bytes bytes]
+                                                (when (= screen/payload-length (alength bytes)) (Thread/sleep 2)))
+                                      :close! (fn [_])}
+                            :schedule! #(do (reset! refresh %) (fn []))})
+        handle ((:open! sink))
+        image (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB)]
+    (is (= 0 (:frames (display/refresh-receipt handle))))
+    ((:render! sink) handle image)
+    (dotimes [_ 3] (@refresh))
+    ((:close! sink) handle)
+    (@refresh)
+    (let [receipt (display/refresh-receipt handle)]
+      (is (= 4 (:frames receipt)))
+      (is (= (* 4 (+ 16 screen/payload-length)) (:bytes receipt)))
+      (is (nil? (:target-hz receipt)) "an injected schedule owns its cadence")
+      (is (= {:context :reused :open-ms 3.0} (:usb receipt)))
+      (is (= 4 (get-in receipt [:payload-transfer :samples])))
+      (is (<= 2.0 (get-in receipt [:payload-transfer :min-ms])))
+      (is (= 3 (get-in receipt [:interval :samples])))
+      (is (pos? (:frames-per-second receipt)))
+      (is (number? (:open-ms receipt)))
+      (is (false? (:failed? receipt))))))
+
+(deftest default-refresh-runs-on-deadlines-despite-slow-transfers
+  ;; A 15 ms payload transfer at 40 Hz (25 ms period). Waiting a fixed delay
+  ;; after each transfer, as the sink used to, gives intervals of 40 ms or more.
+  (let [frames (atom []) done (promise)
+        sink (display/sink {:refresh-hz 40
+                            :backend {:open! (constantly :replay) :close! (fn [_])
+                                      :write! (fn [_ ^bytes bytes]
+                                                (when (= screen/payload-length (alength bytes))
+                                                  (Thread/sleep 15)
+                                                  (when (= 25 (count (swap! frames conj (System/nanoTime))))
+                                                    (deliver done true))))}})
+        handle ((:open! sink))]
+    (try
+      ((:render! sink) handle (BufferedImage. 960 160 BufferedImage/TYPE_INT_RGB))
+      (is (true? (deref done 5000 false)))
+      (finally ((:close! sink) handle)))
+    (let [receipt (display/refresh-receipt handle)]
+      (is (= 40 (:target-hz receipt)))
+      (is (< (get-in receipt [:interval :median-ms]) 32.0) (pr-str receipt))
+      (is (> (:frames-per-second receipt) 30.0) (pr-str receipt)))))
+
+(deftest libusb-ffi-replay-shares-one-context
+  (when (#{"Linux" "Mac OS X"} (System/getProperty "os.name"))
     (let [file (.toFile (Files/createTempFile "push3-recording-" ".so"
                                                (make-array java.nio.file.attribute.FileAttribute 0)))
           path (.getAbsolutePath file)
@@ -110,26 +158,54 @@
                 reset-mode! #(.invokeVoid reset-fn (to-array [(int %)]))
                 counts #(mapv (fn [i] (.invokeInt count-fn (to-array [(int i)]))) (range 8))
                 options {:library path :bus 2 :address 7}]
-            (reset-mode! 0)
-            (is (= [{:vendor-id 0x2982 :product-id 0x1969 :configurations 1 :bus 2 :address 7}]
-                   (usb/locations options)))
-            (is (= screen/display-name (get-in (usb/inspect options) [:display :name])))
-            (is (= [2 2 1 1 0 0 0 0] (counts)))
-            (doseq [mode [1 2 3 4]]
-              (reset-mode! mode)
-              (is (thrown? Exception (usb/open! options)))
-              (is (= [1 1 1 1 0 0 0 0] (counts))))
-            (reset-mode! 0)
-            (is (thrown? Exception (usb/open! (assoc options :address 5))))
-            (is (= [1 1 0 0 0 0 0 0] (counts)))
-            (doseq [mode [0 5]]
-              (reset-mode! mode)
-              (let [handle (usb/open! options)]
-                (try
-                  (usb/write! handle (screen/header))
-                  (if (zero? mode)
-                    (usb/write! handle (:wire (screen/buffers)))
-                    (is (thrown-with-msg? Exception #"Incomplete" (usb/write! handle (:wire (screen/buffers))))))
-                  (finally (usb/close! handle))))
-              (is (= [1 1 1 1 1 1 1 1] (counts))))))
+            (try
+              (reset-mode! 0)
+              (is (= [{:vendor-id 0x2982 :product-id 0x1969 :configurations 1 :bus 2 :address 7}]
+                     (usb/locations options)))
+              (is (= screen/display-name (get-in (usb/inspect options) [:display :name])))
+              (testing "one libusb_init serves every later call and nothing exits it"
+                (is (= [1 0 1 1 0 0 0 0] (counts)))
+                (is (= {:library path :reused? true} (dissoc (usb/prepare! options) :init-ms))))
+              (doseq [mode [1 2 3 4]]
+                (reset-mode! mode)
+                (is (thrown? Exception (usb/open! options)))
+                (is (= [0 0 1 1 0 0 0 0] (counts))))
+              (reset-mode! 0)
+              (is (thrown? Exception (usb/open! (assoc options :address 5))))
+              (is (= [0 0 0 0 0 0 0 0] (counts)))
+              (doseq [mode [0 5]]
+                (reset-mode! mode)
+                (let [handle (usb/open! options)]
+                  (try
+                    (is (= :reused (get-in handle [:timing :context])))
+                    (is (= 0.0 (get-in handle [:timing :init-ms])))
+                    (is (every? #(number? (get-in handle [:timing %])) [:context-init-ms :open-ms :total-ms]))
+                    (usb/write! handle (screen/header))
+                    (if (zero? mode)
+                      (usb/write! handle (:wire (screen/buffers)))
+                      (is (thrown-with-msg? Exception #"Incomplete" (usb/write! handle (:wire (screen/buffers))))))
+                    (finally (usb/close! handle))))
+                (is (= [0 0 1 1 1 1 1 1] (counts))))
+              (reset-mode! 0)
+              (is (= 1 (usb/release-contexts!)))
+              (is (= [0 1 0 0 0 0 0 0] (counts)))
+              (testing "after release the next caller creates and times a new context"
+                (reset-mode! 0)
+                (let [handle (usb/open! options)]
+                  (try (is (= :created (get-in handle [:timing :context])))
+                       (is (= (get-in handle [:timing :init-ms]) (get-in handle [:timing :context-init-ms])))
+                       (finally (usb/close! handle))))
+                (is (= [1 0 1 1 1 1 0 0] (counts))))
+              (testing "the qualification CLI's timing and show-chart receipts"
+                (let [timing (qualification/timing options)]
+                  (is (true? (get-in timing [:context :reused?])))
+                  (is (= 1 (count (:locations timing))))
+                  (is (= 2 (count (:inspect-ms timing)))))
+                (reset-mode! 0)
+                (let [receipt (qualification/observe! options 1)]
+                  (is (= 30 (:target-hz receipt)))
+                  (is (= :reused (get-in receipt [:usb :context])))
+                  (is (= (:frames receipt) (nth (counts) 6) (nth (counts) 7)))
+                  (is (< 20 (:frames receipt) 40) (pr-str receipt))))
+              (finally (usb/release-contexts!)))))
         (finally (io/delete-file file true))))))

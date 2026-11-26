@@ -1,5 +1,6 @@
 (ns afterglow.control.devices.push-3.qualification
-  "Explicit CLI for the tethered Push 3. list and inspect never claim an interface."
+  "Explicit CLI for the tethered Push 3. list, inspect and timing never claim an
+  interface. show-chart prints its refresh receipt as EDN after closing."
   (:require [afterglow.control.devices.push-3.usb :as usb]
             [afterglow.control.devices.push-3.display :as display])
   (:import [java.awt Color Font]
@@ -24,7 +25,11 @@
       image
       (finally (.dispose graphics)))))
 
-(defn- observe! [options seconds]
+(defn- millis [start-ns] (/ (- (System/nanoTime) start-ns) 1e6))
+
+(defn observe!
+  "Claim the display, show the chart for seconds and return the refresh receipt."
+  [options seconds]
   (when-not (and (integer? seconds) (<= 1 seconds 30))
     (throw (ex-info "Use a whole duration from 1 to 30 seconds" {})))
   (let [sink (display/sink options)
@@ -33,7 +38,19 @@
       ((:render! sink) handle (chart))
       (Thread/sleep (* 1000 seconds))
       (when-let [failure (:failure @(:state handle))] (throw failure))
-      (finally ((:close! sink) handle)))))
+      (finally ((:close! sink) handle)))
+    (display/refresh-receipt handle)))
+
+(defn timing
+  "Measure the shared libusb context and repeated read-only access in one process:
+  the first scan, then list and inspect twice. Nothing is claimed or sent."
+  [options]
+  (let [context (usb/prepare! options)
+        step (fn [f] (let [start (System/nanoTime) result (f)] [result (millis start)]))
+        [found list-ms] (step #(usb/locations options))
+        [_ inspect-ms] (step #(usb/inspect options))
+        [_ again-ms] (step #(usb/inspect options))]
+    {:context context :locations found :list-ms list-ms :inspect-ms [inspect-ms again-ms]}))
 
 (defn -main [& args]
   (let [[command bus address duration] args
@@ -41,5 +58,6 @@
     (case [command (count args)]
       ["list" 1] (prn (usb/locations))
       ["inspect" 3] (prn (usb/inspect options))
-      ["show-chart" 4] (observe! options (parse-long duration))
-      (throw (ex-info "Use list, inspect BUS ADDRESS, or show-chart BUS ADDRESS SECONDS" {})))))
+      ["timing" 3] (prn (timing options))
+      ["show-chart" 4] (prn (observe! options (parse-long duration)))
+      (throw (ex-info "Use list, inspect BUS ADDRESS, timing BUS ADDRESS or show-chart BUS ADDRESS SECONDS" {})))))

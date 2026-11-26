@@ -214,3 +214,19 @@
       (let [result (deref task 3000 ::timeout)]
         (is (= [] (if (= result :midi/discovery-pending) (transports/midi-ports) result))))
       (finally (deliver release true)))))
+
+(deftest deadline-grid-skips-missed-deadlines-instead-of-bursting
+  (is (= 110 (transports/next-deadline-ns 100 10 105)))
+  (is (= 120 (transports/next-deadline-ns 100 10 110)))
+  (is (= 140 (transports/next-deadline-ns 100 10 137)))
+  (is (thrown? clojure.lang.ExceptionInfo (transports/deadline-scheduler 0)))
+  (is (thrown? clojure.lang.ExceptionInfo (transports/deadline-scheduler 241))))
+
+(deftest deadline-scheduler-stops-on-cancel
+  (let [runs (atom 0) started (promise)
+        cancel ((transports/deadline-scheduler 200) #(when (= 3 (swap! runs inc)) (deliver started true)))]
+    (is (true? (deref started 2000 false)))
+    (cancel)
+    (let [stopped @runs]
+      (Thread/sleep 50)
+      (is (<= (- @runs stopped) 1)))))
