@@ -229,3 +229,129 @@
         (is (= [{:position 0 :color [1 0 0]} {:position 1 :color [0 0 1]}] (get-in instance [:params :gradient]))))
       (is (not-any? #(= :param/set (:op %)) @(:commands h)))
       (finally (session/close! device)))))
+
+(defn- top-row
+  "The last first-row LCD text written to the main (0x14) or extender (0x15)."
+  [h device]
+  (some->> (sent h)
+           (filter #(= [240 0 0 102 device 18 0] (take 7 %)))
+           last (drop 7) butlast (map char) (apply str)))
+
+(defn- labels [h device]
+  (mapv clojure.string/trim (map #(apply str %) (partition 7 (top-row h device)))))
+
+(deftest bank-arithmetic-pages-by-eight-and-keeps-uneven-remainders-on-the-main-unit
+  (is (= [0 0 16 16 32] (mapv #(touch/bank-limit % 16) [9 16 17 20 40])))
+  (is (= [0 8] (mapv #(touch/bank-limit % 8) [8 9])))
+  (is (= [16 16 0 16 3 1 16] (map #(apply touch/move-bank %)
+                                  [[20 16 0 :next] [20 16 16 :next] [20 16 16 :previous] [20 16 2 :last]
+                                   [20 16 2 :channel-next] [20 16 2 :channel-previous] [20 16 40 :channel-next]])))
+  (is (thrown? clojure.lang.ExceptionInfo (touch/move-bank 20 16 0 :sideways))))
+
+(deftest shift-bank-buttons-jump-to-the-first-and-last-bank
+  (let [h (harness)
+        group (touch/connect-group! (merge (:options h)
+                                          {:channels (:channels h)
+                                           :units [{:session-id "main" :transport ((:transport h) "main")}
+                                                   {:session-id "xt" :extender? true :transport ((:transport h) "xt")}]}))
+        bank #(:bank (touch/group-status group))]
+    (try
+      (input! h "main" [144 70 127])
+      (input! h "main" [144 47 127])
+      (is (= 32 (bank)) "40 strips: the last page starts at strip 33")
+      (input! h "main" [144 46 127])
+      (is (= 0 (bank)))
+      (input! h "main" [144 49 127])
+      (is (= 32 (bank)) "SHIFT with channel right also jumps to the end")
+      (input! h "main" [128 70 0])
+      (input! h "main" [144 46 127])
+      (is (= 16 (bank)) "Releasing SHIFT restores paging by the group width")
+      (input! h "xt" [144 70 127])
+      (input! h "xt" [144 46 127])
+      (is (= 16 (bank)) "The extender has no transport buttons")
+      (session/refresh! (first (:sessions @(:state group))))
+      (is (= "Cue 16" (first (labels h 20))))
+      (is (= "Cue 24" (first (labels h 21))))
+      (finally (touch/close-group! group))))
+  (let [h (harness) device (touch/connect! (options h "solo" {:channels (subvec (:channels h) 0 20)}))
+        bank #(get-in (session/snapshot device) [:local :bank])]
+    (try
+      (input! h "solo" [144 70 127])
+      (input! h "solo" [144 47 127])
+      (is (= 16 (bank)))
+      (input! h "solo" [144 48 127])
+      (is (= 0 (bank)))
+      (finally (session/close! device)))))
+
+(deftest a-host-owned-bank-moves-both-units-through-committed-commands
+  (let [h (harness)
+        _ (swap! (:model h) assoc :surface-bank 0)
+        moves (atom [])
+        channels (subvec (:channels h) 0 20)
+        dispatch! (fn [command]
+                    (if (= :test/bank (:op command))
+                      (do (swap! moves conj command)
+                          (swap! (:model h) update :surface-bank #(touch/move-bank 20 16 % (:move command)))
+                          {:status :accepted :command-id (:command-id command)})
+                      ((get-in h [:options :dispatch!]) command)))
+        group (touch/connect-group!
+               (merge (:options h)
+                      {:channels channels :dispatch! dispatch!
+                       :model-bank :surface-bank
+                       :bank-command (fn [move] {:op :test/bank :move move})
+                       :units [{:session-id "main" :transport ((:transport h) "main")}
+                               {:session-id "xt" :extender? true :transport ((:transport h) "xt")}]}))
+        [main xt] (:sessions @(:state group))
+        refresh! #(run! session/refresh! [main xt])]
+    (try
+      (is (= ["Cue 0" "Cue 7"] ((juxt first peek) (labels h 20))))
+      (is (= ["Cue 8" "Cue 15"] ((juxt first peek) (labels h 21))))
+      (input! h "main" [144 47 127])
+      (is (= [:next] (mapv :move @moves)))
+      (is (= (select-keys @(:model h) [:show-id :epoch]) (select-keys (peek @moves) [:show-id :epoch])))
+      (is (= 0 (:bank (touch/group-status group))) "The group never owns a host bank")
+      (refresh!)
+      (is (= ["Cue 16" "Cue 17" "Cue 18" "Cue 19" "" "" "" ""] (labels h 20))
+          "20 strips: the remainder sits on the main unit")
+      (is (= (vec (repeat 8 "")) (labels h 21)))
+      (input! h "main" [144 24 127])
+      (is (instance-for h :cue-16) "Strip buttons address the committed window")
+      (input! h "xt" [144 46 127])
+      (is (= 1 (count @moves)))
+      (input! h "main" [144 70 127])
+      (input! h "main" [144 46 127])
+      (input! h "main" [128 70 0])
+      (is (= [:next :first] (mapv :move @moves)))
+      ;; Another client (Studio, the REPL) commits a new window directly.
+      (swap! (:model h) assoc :surface-bank 3)
+      (refresh!)
+      (is (= "Cue 3" (first (labels h 20))))
+      (is (= "Cue 11" (first (labels h 21))))
+      (finally (touch/close-group! group)))))
+
+(deftest one-unit-closes-and-reopens-without-disturbing-the-other
+  (let [h (harness)
+        group (touch/connect-group! (merge (:options h)
+                                          {:channels (:channels h)
+                                           :units [{:session-id "main" :transport ((:transport h) "main")}
+                                                   {:session-id "xt" :extender? true :transport ((:transport h) "xt")}]}))]
+    (try
+      (input! h "xt" [144 0 127])
+      (is (= :held (:launch-mode (instance-for h :cue-8))))
+      (reset! (:log h) [])
+      (let [status (touch/close-unit! group "xt")]
+        (is (= [["main" 0 false :active] ["xt" 8 true :closed]]
+               (mapv (juxt :session-id :channel-offset :extender? :status) (:units status)))))
+      (is (= :releasing (:phase (instance-for h :cue-8))) "A closed unit releases its own held cue")
+      (is (= (apply str (repeat 56 " ")) (top-row h 21)) "Closing blanks the extender LCD")
+      (is (some #{[:close "xt"]} @(:log h)))
+      (input! h "main" [144 47 127])
+      (is (= 16 (:bank (touch/group-status group))))
+      (reset! (:log h) [])
+      (touch/reopen-unit! group "xt")
+      (is (= "Cue 24" (first (labels h 21))) "The reopened unit joins at the current bank")
+      (input! h "xt" [144 24 127])
+      (is (instance-for h :cue-24))
+      (is (thrown? clojure.lang.ExceptionInfo (touch/close-unit! group "missing")))
+      (finally (touch/close-group! group)))
+    (is (thrown? clojure.lang.ExceptionInfo (touch/reopen-unit! group "xt")))))

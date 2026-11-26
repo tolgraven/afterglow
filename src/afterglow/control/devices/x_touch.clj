@@ -17,7 +17,7 @@
 
 (defn- fail! [message] (throw (ex-info message {:x-touch/error :invalid-profile})))
 
-(defn- initial [bank] {:bank bank :touches {} :holds {} :hold-keys {} :sent {} :flip? false :selected nil})
+(defn- initial [bank] {:bank bank :touches {} :holds {} :hold-keys {} :sent {} :flip? false :selected nil :shift? false})
 
 (defn- latest-instance [model cue-id]
   (when cue-id
@@ -74,12 +74,46 @@
 (defn- channels-for [{:keys [channels group-channels]} model]
   (if group-channels (into (vec (group-channels model)) channels) channels))
 
-(defn- channel-at [options state channels strip]
-  (get channels (+ (:bank state) (:channel-offset options) strip)))
+(defn- current-bank
+  "A host-owned bank (:model-bank) is read from the committed model, so every
+  unit and every other client sees the same window. Otherwise the session's
+  local bank applies."
+  [options state model]
+  (if-let [model-bank (:model-bank options)]
+    (let [bank (model-bank model)] (if (and (integer? bank) (<= 0 bank)) bank 0))
+    (:bank state)))
 
-(defn- step-bank [channels bank delta]
-  (let [maximum (* 8 (quot (max 0 (dec (count channels))) 8))]
-    (max 0 (min maximum (+ bank delta)))))
+(defn- channel-at [options bank channels strip]
+  (get channels (+ bank (:channel-offset options) strip)))
+
+(defn bank-limit
+  "Largest first strip of a surface window `width` strips wide over `strip-count`
+  strips. Everything fits at 0; otherwise pages stay on multiples of eight, so
+  a remainder that does not fill the surface starts on the main unit."
+  [strip-count width]
+  (if (<= strip-count width) 0 (* 8 (quot (dec strip-count) 8))))
+
+(defn move-bank
+  "Next first strip after a bank `move`: :previous/:next by `width`,
+  :channel-previous/:channel-next by one, :first or :last. Clamped to
+  bank-limit; a stale offset beyond the strips returns to the limit."
+  [strip-count width bank move]
+  (let [limit (bank-limit strip-count width)
+        target (case move
+                 :previous (- bank width) :next (+ bank width)
+                 :channel-previous (dec bank) :channel-next (inc bank)
+                 :first 0 :last limit
+                 (fail! "Unknown bank move"))]
+    (max 0 (min limit target))))
+
+(def ^:private bank-moves {46 :previous 47 :next 48 :channel-previous 49 :channel-next})
+
+(def ^:private shift-bank-moves {46 :first 47 :last 48 :first 49 :last})
+
+(def shift-note "MCU SHIFT on the main unit (note 46 hex)." 70)
+
+(defn- bank-move [state note]
+  ((if (:shift? state) shift-bank-moves bank-moves) note))
 
 (defn- control-kind [state physical]
   (if (:flip? state) ({:fader :encoder :encoder :fader} physical) physical))
@@ -111,7 +145,7 @@
   [options state event model envelope]
   (let [{:keys [type strip pressed? note]} event
         channels (channels-for options model)
-        at (partial channel-at options state channels)
+        at (partial channel-at options (current-bank options state model) channels)
         channel (when (and (integer? strip) (<= 0 strip 7)) (at strip))
         touched? (contains? (:touches state) strip)
         changed (fn [next-state & commands] {:state next-state :commands (vec commands)})]
@@ -152,6 +186,8 @@
                      (changed state (write-command selected (value-at selected adjusted)))) (changed state)))
       :button
       (cond
+        (and (not (:extender? options)) (= shift-note note))
+        (changed (assoc state :shift? (boolean pressed?)))
         (<= 0 note 7)
         (if pressed?
           (if (get-in state [:hold-keys note]) (changed state)
@@ -174,9 +210,11 @@
         (if-let [selected (target model (at (- note 32)) (control-kind state :encoder))]
           (if (some? (get-in selected [:schema :default]))
             (changed state (write-command selected (get-in selected [:schema :default]))) (changed state)) (changed state))
-        (and (not (:extender? options)) (#{46 47 48 49} note))
-        (let [delta ({46 (- (:bank-step options)) 47 (:bank-step options) 48 -1 49 1} note)]
-          (changed (update state :bank #(step-bank channels % delta))))
+        (and (not (:extender? options)) (bank-moves note))
+        (let [move (bank-move state note)]
+          (if-let [bank-command (:bank-command options)]
+            (changed state (merge (bank-command move) (select-keys envelope [:show-id :epoch])))
+            (changed (update state :bank #(move-bank (count channels) (:bank-step options) % move)))))
         (and (not (:extender? options)) (= 50 note)) (changed (update state :flip? not))
         (and (not (:extender? options)) (#{93 94} note)) (changed state {:op :transport/set :transport {:playing? (= note 94)}})
         :else (changed state))
@@ -192,9 +230,10 @@
   "Pure strip projection. Categories can supply :color in channel metadata;
   transport encoding and IO do not belong to the shared show model."
   [options state model]
-  (let [channels (channels-for options model)]
+  (let [channels (channels-for options model)
+        bank (current-bank options state model)]
     (mapv (fn [strip]
-            (let [{:keys [cue-id group-id] :as channel} (channel-at options state channels strip)
+            (let [{:keys [cue-id group-id] :as channel} (channel-at options bank channels strip)
                   cue (get-in model [:registry :cues cue-id])
                   instance (when cue-id (latest-instance model cue-id))
                   fader (fader-target options state model channel strip)
@@ -239,7 +278,13 @@
   pure :group-channels (model -> [{:group-id :label :color :level :active?}])
   and :group-level-command (group-id, value -> host command template).
   Profiles with group strips require touch for all faders. Flip and encoders
-  apply to cue strips."
+  apply to cue strips.
+
+  A host that owns the bank supplies :model-bank (model -> first strip) and
+  :bank-command (move -> host command template). The main unit then sends
+  bank/channel buttons as moves (:previous :next :channel-previous
+  :channel-next, or :first/:last with SHIFT) instead of changing its own bank;
+  every unit reads the committed bank on its next input or feedback."
   [options]
   (let [options (merge {:channels [] :extender? false :channel-offset 0 :bank 0 :bank-step 8
                         :encoder-step 0.01 :require-touch? true} options)]
@@ -249,6 +294,8 @@
                    (boolean? (:extender? options)) (boolean? (:require-touch? options))
                    (or (every? nil? ((juxt :group-channels :group-level-command) options))
                        (every? ifn? ((juxt :group-channels :group-level-command) options)))
+                   (or (every? nil? ((juxt :model-bank :bank-command) options))
+                       (every? ifn? ((juxt :model-bank :bank-command) options)))
                    (number? (:encoder-step options)) (< 0 (:encoder-step options) 1))
       (fail! "Invalid X-Touch profile options"))
     (doseq [channel (:channels options)]
@@ -262,7 +309,7 @@
           (fail! "Controls need a parameter key and optional nonnegative component"))))
     {:id (if (:extender? options) :x-touch-xt :x-touch)
      :capabilities (assoc capabilities :extender? (:extender? options))
-     :unique-command-prefix? (boolean (:group-channels options))
+     :unique-command-prefix? (boolean (or (:group-channels options) (:bank-command options)))
      :fence-captured-commands? (boolean (:group-channels options))
      :initial-state (initial (:bank options))
      :decode #(if (map? %) % (codec/decode %))
@@ -306,10 +353,15 @@
   (doseq [device sessions] (session/receive! device {:type :bank/set :bank bank}))
   bank)
 
-(defn group-status [group]
+(defn group-status
+  "Shared bank and each unit's session ID, physical offset, role and status."
+  [group]
   (let [{:keys [bank closed? sessions]} @(:state group)]
     {:bank bank :closed? closed?
-     :units (mapv #(select-keys (session/snapshot %) [:status :generation :epoch :errors]) sessions)}))
+     :units (mapv #(merge (select-keys (:options %) [:session-id :channel-offset])
+                          {:extender? (boolean (get-in % [:options :extender?]))}
+                          (select-keys (session/snapshot %) [:status :generation :epoch :errors]))
+                  sessions)}))
 
 (defn bank-group!
   "Explicit shared bank change for one main unit and its extenders. Ordered
@@ -323,6 +375,30 @@
     (set-bank! (:sessions @(:state group)) bank))
   (group-status group))
 
+(defn- unit-session [group session-id]
+  (or (some #(when (= session-id (get-in % [:options :session-id])) %) (:sessions @(:state group)))
+      (fail! "No unit with that session ID in this X-Touch group")))
+
+(defn close-unit!
+  "Close one unit of an open group (for example an unplugged extender). The
+  other units keep their offsets and the shared bank. Held cues on that unit
+  are released as for any closed session."
+  [group session-id]
+  (locking (:lock group)
+    (when (:closed? @(:state group)) (fail! "X-Touch group is closed"))
+    (session/close! (unit-session group session-id)))
+  (group-status group))
+
+(defn reopen-unit!
+  "Reopen one closed unit at its original offset and the group's current bank."
+  [group session-id]
+  (locking (:lock group)
+    (when (:closed? @(:state group)) (fail! "X-Touch group is closed"))
+    (let [device (unit-session group session-id)]
+      (session/open! device)
+      (session/receive! device {:type :bank/set :bank (:bank @(:state group))})))
+  (group-status group))
+
 (defn close-group! [group]
   (let [sessions (locking (:lock group)
                    (let [state @(:state group)]
@@ -333,7 +409,7 @@
     (group-status group)))
 
 (defn- group-transport [group unit-session options]
-  (let [{:keys [extender? bank-step model!]} options
+  (let [{:keys [extender? bank-step model! bank-command]} options
         transport (or (:transport options) (transports/midi-transport options))
         current-open (volatile! nil)]
     (assoc transport
@@ -345,11 +421,13 @@
                            (when (and (identical? opened @current-open) (not (:closed? @(:state group))))
                              (let [{:keys [type pressed? note]} (if (map? raw) raw
                                                                   (try (codec/decode raw) (catch Exception _ nil)))
-                                   delta ({46 (- bank-step) 47 bank-step 48 -1 49 1} note)]
-                               (if (and (not extender?) (= :button type) pressed? delta)
-                                 (when (some-> @unit-session session/snapshot :status (= :active))
-                                   (bank-group! group (step-bank (channels-for options (model!))
-                                                                (:bank @(:state group)) delta)))
+                                   ;; A host-owned bank goes through the main profile's command.
+                                   move? (and (not extender?) (not bank-command) (= :button type) pressed? (bank-moves note))]
+                               (if move?
+                                 (when-let [snapshot (some-> @unit-session session/snapshot)]
+                                   (when (= :active (:status snapshot))
+                                     (bank-group! group (move-bank (count (channels-for options (model!))) bank-step
+                                                                   (:bank @(:state group)) (bank-move (:local snapshot) note)))))
                                  (receive! raw)))))))))
            :close! (fn [handle]
                      (vreset! current-open nil)
@@ -359,7 +437,10 @@
   "Open an explicitly ordered vector of :units, exactly one main and any
   extenders. Each unit has its own :session-id, selected ports/:transport and
   :extender? flag. Common :channels/model!/dispatch!/now-ms! are shared options.
-  Bank buttons on the main move the whole group; channel buttons move one slot.
+  Bank buttons on the main move the whole group; channel buttons move one slot;
+  with SHIFT held either pair jumps to the first or last bank. With
+  :model-bank/:bank-command (see profile) the host owns the bank instead and
+  the group never changes it. close-unit!/reopen-unit! handle one unit.
   No discovery/automatic port pairing or shared global state is introduced."
   [{:keys [units channels] :as options}]
   (when-not (and (vector? units) (<= 1 (count units) 16)
