@@ -61,4 +61,4 @@ jobs:
       - name: Exercise Mesa on an isolated Linux display
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
-        run: xvfb-run -a lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test afterglow.render.gpu-session-test afterglow.render.native-compute-test afterglow.render.native-chain-test
+        run: xvfb-run -a lein with-profile +native-gpu test afterglow.render.native-gpu-test afterglow.render.gpu-expressions-test afterglow.render.gpu-session-test afterglow.render.native-compute-test afterglow.render.native-chain-test afterglow.render.gpu-shader-frames-test
