@@ -195,7 +195,7 @@
     {:state state}))
 
 (defn- encoder [options state {:keys [control-id delta]} model envelope]
-  (let [{:keys [target param step]} (get-in options [:encoder-bindings control-id])
+  (let [{:keys [target param step control]} (get-in options [:encoder-bindings control-id])
         fine? (boolean (shift-held? options state))
         active (encoder-gesture/active state control-id)
         mode (get-in state [:encoder-touch-modes control-id])]
@@ -204,6 +204,8 @@
       (= target :master)
       (let [increment (or step 0.01) value (bindings/clamp (+ (:master model) (* delta (if fine? (/ increment 10) increment))) [0 1])]
         {:state state :commands (if (= value (:master model)) [] [{:op :master/set :value value}])})
+      (= target :host)
+      {:state state :commands (vec ((:host-encoder options) control delta fine? model))}
       active (encoder-gesture/edit state active
                #(turn-parameter options state model (:instance-id active) (:param active) step delta fine?))
       (or (= :temporary mode)
@@ -517,11 +519,22 @@
     (set-held-button options state control-id pressed?)
     :else state))
 
+(defn- touched-host-control
+  "The first touched encoder bound to a host control, in the touch list's stable order."
+  [options touches]
+  (some (fn [id]
+          (let [{:keys [target control]} (get-in options [:encoder-bindings id])]
+            (when (= :host target) control)))
+        touches))
+
 (defn- user-profile
   "Construct a pure profile from a captured :layout. Explicit :user-mode? true
   confirms manual User Mode; :expression-mode is :poly-aftertouch or
   :mono-aftertouch. Optional :encoder-bindings maps captured IDs to {:param k,
-  :step n} or {:target :master}; :button-bindings maps IDs to semantic actions.
+  :step n}, {:target :master} or {:target :host :control c}, where c is a map
+  the host chooses. A host target calls the :host-encoder option with c, the
+  detents, fine? (Shift) and the model, and dispatches the commands it returns;
+  its touch starts no parameter gesture and c is the view's :touched-control. :button-bindings maps IDs to semantic actions.
   :pressure-param and :touch-strip-param opt into expression parameter control."
   [{:keys [layout user-mode? expression-mode page-id encoder-bindings button-bindings temporary-encoder-modifier]
     :or {page-id :main encoder-bindings {} button-bindings {}} :as options}]
@@ -533,11 +546,13 @@
     (valid! (and (map? encoder-bindings) (map? button-bindings)) "Control bindings must be maps" {})
     (doseq [[id binding] encoder-bindings]
       (valid! (and (contains? (:encoders layout) id) (map? binding)
-                   (every? #{:param :target :step} (keys binding))
-                   (or (and (keyword? (:param binding)) (nil? (:target binding)))
-                       (and (= :master (:target binding)) (nil? (:param binding))))
+                   (every? #{:param :target :step :control} (keys binding))
+                   (or (and (keyword? (:param binding)) (nil? (:target binding)) (not (contains? binding :control)))
+                       (and (= :master (:target binding)) (nil? (:param binding)) (not (contains? binding :control)))
+                       (and (= :host (:target binding)) (nil? (:param binding)) (nil? (:step binding))
+                            (map? (:control binding)) (ifn? (:host-encoder options))))
                    (or (nil? (:step binding)) (and (params/finite-number? (:step binding)) (pos? (:step binding)))))
-              "Encoder bindings need a captured ID, numeric parameter/master target and positive step" {:id id}))
+              "Encoder bindings need a captured ID, numeric parameter/master/host target and positive step" {:id id}))
     (doseq [[id action] button-bindings]
       (valid! (and (contains? (:buttons layout) id)
                    (or (display/action? action)
@@ -699,12 +714,13 @@
         index (push-view/cue-index model)
         instance (or (get-in model [:instances (:selected-instance controls)])
                      (when-not (get-in controls [:cue-gesture :selection]) (last (:active index))))
+        touched-ids (sort-by str (:touches controls))
         touches (push-view/touched-parameters
                   (keep (fn [id]
                           (when-let [k (get-in options [:encoder-bindings id :param])]
                             (when (get-in instance [:definition :params k])
                               {:instance-id (:id instance) :param k :component 0})))
-                        (sort-by str (:touches controls))))
+                        touched-ids))
         touch (first touches)
         selected (cond-> controls instance (assoc :selected-instance (:id instance) :selected-cue (:cue-id instance)))
         projection (when-let [selection (:pad-overlay selected)]
@@ -720,7 +736,8 @@
                 {:generation generation :identity (select-keys model [:show-id :epoch])
                  :projection (:view projection) :display overlay-display})
         view (cond-> (assoc (push-view/view selected model index {:status :ready :touched-parameter touch
-                                                                 :touched-parameters touches})
+                                                                 :touched-parameters touches
+                                                                 :touched-control (touched-host-control options touched-ids)})
                              :fine? (boolean (shift-held? options controls)))
                overlay-display (assoc :display-mode :parameters :pad-overlay overlay-display)
                frame (vary-meta assoc ::overlay-frame frame))

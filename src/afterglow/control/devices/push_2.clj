@@ -537,7 +537,19 @@
                         (and overlay-state (nil? next-overlay)) (assoc :pad-overlay-clearing? true))
                :commands (:commands change)})))))))
 
-(defn- feedback [device-id timeout-ms batch-size pad-overlay state model envelope]
+(defn- encoder-overlay-input
+  "Offer a decoded event to the host's encoder overlay. A nil result leaves the
+  event to Push; otherwise the result's :state and :commands are the outcome."
+  [overlay state event model]
+  (when (and overlay (:ready? state))
+    (when-let [change ((:input overlay) (:encoder-overlay state) event model
+                       {:shift? (boolean (:shift? state))
+                        :touched (into (sorted-set) (filter #(<= 0 % 7))
+                                       (concat (keys (:touches state)) (keys (:encoder-touch-modes state))))})]
+      {:state (assoc state :encoder-overlay (:state change (:encoder-overlay state)))
+       :commands (vec (:commands change))})))
+
+(defn- feedback [device-id timeout-ms batch-size pad-overlay encoder-overlay state model envelope]
   (let [time (:time-ms envelope)
         state (encoder-gesture/observe-temporary-tails (selected-state state model) time)
         alive (set (keys (:instances model)))
@@ -564,6 +576,7 @@
                 (-> (dissoc :pad-overlay :pad-overlay-projection :pad-overlay-presented)
                     (assoc :pad-overlay-clearing? true)))
         display (cond-> (indexed-display state model index)
+                  encoder-overlay (merge ((:project encoder-overlay) (:encoder-overlay state) model))
                   grid (assoc :active-cue-grid (:view grid))
                   overlay (assoc :pad-overlay (:display overlay (:view overlay)))
                   (get-in overlay [:display :title]) (assoc :title (get-in overlay [:display :title])))
@@ -668,6 +681,14 @@
                             (seq commands) (update :commands #(into commands %))
                             resolved? (assoc :refresh-model? true)))))))
 
+(defn- with-encoder-overlay-reset [profile reset]
+  (let [{:keys [stop reset-model]} profile
+        reset-overlay #(cond-> % (contains? % :encoder-overlay) (update :encoder-overlay reset))]
+    (assoc profile
+           :stop (fn [state model envelope disconnected?]
+                   (update (stop state model envelope disconnected?) :state reset-overlay))
+           :reset-model (fn [state] (reset-overlay (reset-model state))))))
+
 (defn profile
   "Build a Push 2 profile with an explicitly known MIDI device-id and page-id.
   Sequential palette acquisition precedes writes; LEDs use acknowledged batches.
@@ -689,13 +710,24 @@
   overlay :state and optional :commands, or nil to leave the event to Push.
   Optional :parameter-editor takes model, instance, parameter, input and edit
   options. Return {:value v} to use a host-specific exact representation through
-  the normal parameter and gesture dispatch, or nil to use Afterglow typed editing."
+  the normal parameter and gesture dispatch, or nil to use Afterglow typed editing.
+  Optional :encoder-overlay {:input f :project f :reset f} lets a host take
+  encoders, touches and buttons. :input takes the overlay state, a decoded event,
+  the committed model and {:shift? :touched}, where :touched is the set of track
+  encoders (0-7) Push holds a touch or touch mode for. Return {:state s :commands
+  [...]} to consume the event, or nil to leave it to Push. :project takes the
+  overlay state and model and returns a map merged into the display view.
+  Optional :reset takes the overlay state when Push resets or stops."
   [{:keys [device-id page-id timeout-ms led-batch-size target-search display launch-receipt
-           operator-gestures? temporary-encoder-modifier active-cue-grid? pad-overlay parameter-editor]
+           operator-gestures? temporary-encoder-modifier active-cue-grid? pad-overlay parameter-editor
+           encoder-overlay]
     :or {device-id 0 page-id :main timeout-ms 1500 led-batch-size 8} :as options}]
   (codec/palette-request device-id 0)
   (when (and pad-overlay (not (every? ifn? ((juxt :input :project) pad-overlay))))
     (throw (ex-info "Pad overlay requires input and projection functions" {})))
+  (when (and encoder-overlay (not (and (every? ifn? ((juxt :input :project) encoder-overlay))
+                                       (or (nil? (:reset encoder-overlay)) (ifn? (:reset encoder-overlay))))))
+    (throw (ex-info "Encoder overlay requires input and projection functions" {})))
   (when-not (and (number? timeout-ms) (pos? timeout-ms)
                  (integer? led-batch-size) (<= 1 led-batch-size 16))
     (throw (ex-info "Invalid Push 2 timeout/batch size" {})))
@@ -733,11 +765,14 @@
                     down? (and control (pos? (:raw-value event)))
                     cc (when down? control)
                     modifier-input? (and control (= modifier-cc control))
-                    overlay-input (when (and pad-overlay (not modifier-input?))
+                    encoder-input (when-not modifier-input?
+                                    (encoder-overlay-input encoder-overlay state event model))
+                    overlay-input (when (and pad-overlay (not modifier-input?) (not encoder-input))
                                     (pad-overlay-input pad-overlay (selected-state state model) event model))
                     [x y] (when (= :note-on (:type event)) (codec/pad-coordinates (:note event)))]
                 (cond
                   modifier-input? {:state (assoc state modifier-key down?)}
+                  encoder-input encoder-input
                   overlay-input overlay-input
                   (and target-search (= 111 cc))
                   {:state (targets/toggle (cond-> state (:active-grid state) (set-active-grid-mode nil))
@@ -751,7 +786,7 @@
                               {:state (targets/pad state (:note event) [x y])}
                               (targets/launch state (input device-id grid (true? operator-gestures?)
                                                            modifier-key parameter-editor state event model envelope)))))))
-     :feedback (partial feedback device-id timeout-ms led-batch-size pad-overlay)
+     :feedback (partial feedback device-id timeout-ms led-batch-size pad-overlay encoder-overlay)
      :stop (partial stop device-id)
      :resume-event? #(and (= :control-change (:type %)) (= 59 (:controller %)) (pos? (:raw-value %)))
      :reset-model (fn [state]
@@ -783,6 +818,7 @@
                  :commands (:commands hold)})))}
       grid launch-receipt)
       modifier-key (assoc :stale-input (partial retain-stale-encoder-input modifier-cc modifier-key))
+      (:reset encoder-overlay) (with-encoder-overlay-reset (:reset encoder-overlay))
       (true? operator-gestures?) with-encoder-gestures)))
 
 (defn connect!

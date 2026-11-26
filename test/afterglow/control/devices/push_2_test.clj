@@ -1708,3 +1708,89 @@
                 (is (= expected (bytes-at output 1 1 2 3))))
               (receive! h [0x80 36 0])))
           (finally (finish! h)))))))
+
+(defn- test-overlay
+  "A host overlay for the tests: CC 52 toggles it, and while it is shown the
+  track encoders and their touches are the host's."
+  [contexts]
+  {:input (fn [overlay {:keys [type note controller raw-value]} _model context]
+            (swap! contexts conj context)
+            (cond
+              (and (= :control-change type) (= 52 controller))
+              {:state (cond-> overlay (and (pos? raw-value) (empty? (:touched context))) (update :on? not))}
+              (and (:on? overlay) (= :control-change type) (<= 71 controller 78))
+              {:state overlay :commands [{:op :test/turn :slot (- controller 71)
+                                          :detents (codec/signed-encoder raw-value) :shift? (:shift? context)}]}
+              (and (:on? overlay) (#{:note-on :note-off} type) (<= 0 note 7))
+              {:state (if (= :note-on type) (assoc-in overlay [:touches note] true) (update overlay :touches dissoc note))}))
+   :project (fn [overlay _model] (when (:on? overlay) {:host-overlay (select-keys overlay [:on? :touches])}))
+   :reset (fn [overlay] (dissoc overlay :touches))})
+
+(defn- overlay-harness [overlay]
+  (let [h (fixture/harness {:profile (push/profile {:encoder-overlay overlay :operator-gestures? true})})
+        host (atom [])
+        apply! (get-in h [:options :dispatch!])
+        h (assoc h :session (session/create
+                              (assoc (:options h) :dispatch!
+                                     (fn [command]
+                                       (if (= "test" (namespace (:op command)))
+                                         (do (swap! host conj (select-keys command [:op :slot :detents :shift?]))
+                                             {:status :accepted})
+                                         (apply! command))))))]
+    (swap! (:show h) assoc-in [:registry :effects :wash :params] schemas)
+    (swap! (:show h) assoc-in [:registry :effects :wash :param-order] order)
+    (assoc (fixture/ready! h) :host host)))
+
+(defn- rendered [h]
+  (some (fn [[kind view]] (when (= :display/render kind) view)) (rseq @(:log h))))
+
+(deftest an-encoder-overlay-takes-encoders-touches-and-buttons-it-claims
+  (let [contexts (atom [])
+        h (overlay-harness (test-overlay contexts))
+        id (launch! h 36)
+        level #(get (values h id) :level)]
+    (try
+      (testing "unclaimed events reach Push"
+        (receive! h [0xb0 72 1])
+        (is (= 0.51 (level)))
+        (is (nil? (:host-overlay (rendered h)))))
+      (testing "the host sees the track encoders Push holds a touch for"
+        (receive! h [0x90 1 127])
+        (receive! h [0xb0 52 127])
+        (is (= #{1} (:touched (peek @contexts))))
+        (is (nil? (:host-overlay (rendered h))) "this overlay will not open under a held touch")
+        (receive! h [0xb0 52 0])
+        (receive! h [0x80 1 0]))
+      (testing "a claimed button, touch and turn are the host's"
+        (receive! h [0xb0 52 127])
+        (receive! h [0x90 1 127])
+        (is (= {:on? true :touches {1 true}} (:host-overlay (rendered h))))
+        (is (empty? (:touches (local h))))
+        (is (empty? (:encoder-gestures (local h))))
+        (receive! h [0xb0 72 2])
+        (receive! h [0xb0 49 127])
+        (receive! h [0xb0 72 127])
+        (receive! h [0xb0 49 0])
+        (is (= [{:op :test/turn :slot 1 :detents 2 :shift? false}
+                {:op :test/turn :slot 1 :detents -1 :shift? true}] @(:host h)))
+        (is (= 0.51 (level))))
+      (testing "master stays with Push"
+        (receive! h [0x90 8 127])
+        (is (= {:target :master :editable? true} (:touched-control (view h))))
+        (receive! h [0x80 8 0]))
+      (finally (finish! h)))))
+
+(deftest the-hosts-reset-runs-when-push-resets-or-stops
+  (let [profile (push/profile {:encoder-overlay (test-overlay (atom []))})
+        state (assoc (:initial-state profile) :encoder-overlay {:on? true :touches {1 true}})]
+    (is (= {:on? true} (:encoder-overlay ((:reset-model profile) state))))
+    (is (= {:on? true} (get-in ((:stop profile) state (fixture/initial-model) {:time-ms 0} false)
+                               [:state :encoder-overlay]))))
+  (is (not (contains? ((:reset-model (push/profile {:encoder-overlay (test-overlay (atom []))}))
+                       (:initial-state (push/profile {})))
+                      :encoder-overlay))
+      "no overlay state is invented"))
+
+(deftest an-encoder-overlay-needs-input-and-projection
+  (doseq [overlay [{:input identity} {:project identity} {:input identity :project identity :reset 7}]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Encoder overlay" (push/profile {:encoder-overlay overlay})))))

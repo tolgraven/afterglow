@@ -907,3 +907,65 @@
       (@receive [0x82 30 0])
       (is (= (subvec params 1 9) (mapv :param (:touched-parameters (last @views)))))
       (finally (session/close! device)))))
+
+(deftest host-encoder-bindings-route-turns-to-the-host-and-report-the-touch
+  (let [config {:layout (-> layout
+                            (assoc-in [:encoders :look] {:channel 2 :controller 21})
+                            (assoc-in [:encoder-touches :look] {:channel 2 :note 10})
+                            (assoc-in [:buttons :shift] {:channel 4 :controller 24}))
+                :encoder-bindings (assoc (:encoder-bindings options) :look {:target :host :control {:knob-id :look}})
+                :button-bindings (assoc (:button-bindings options) :shift :shift)
+                :host-encoder (fn [control detents fine? _model]
+                                [{:op :test/turn :control control :detents detents :fine? fine?}])
+                :operator-gestures? true}
+        host (atom [])
+        show (atom (initial-model)) receive (atom nil) views (atom [])
+        device (push/connect!
+                 (merge options config
+                        {:display {:device :push-3 :input :view :open! (constantly :usb)
+                                   :render! (fn [_ view] (swap! views conj view)) :close! (fn [_])}
+                         :session-id "push3-host" :now-ms! (constantly 0) :model! #(deref show)
+                         :schedule! nil
+                         :dispatch! (fn [command]
+                                      (if (= :test/turn (:op command))
+                                        (do (swap! host conj (select-keys command [:control :detents :fine?]))
+                                            {:status :accepted})
+                                        (let [ack (model/apply-command @show command)]
+                                          (reset! show (:model ack)) ack)))
+                         :transport {:open! #(do (reset! receive %) :midi)
+                                     :send! (fn [_ _] (throw (ex-info "Unexpected MIDI output" {})))
+                                     :close! (fn [_])}}))
+        view #(last @views)]
+    (try
+      (@receive [0x93 12 100])
+      (let [id (:instance-id (view))]
+        (testing "a touch reports the host control and opens no parameter gesture"
+          (@receive [0x92 10 127])
+          (is (= {:knob-id :look} (:touched-control (view))) "the host's control is the touched control")
+          (is (= [] (:touched-parameters (view))))
+          (is (empty? (:encoder-gestures (:local (session/snapshot device))))))
+        (testing "turns go to the host with their detents, and Shift marks them fine"
+          (@receive [0xb2 21 3])
+          (@receive [0xb4 24 127])
+          (@receive [0xb2 21 127])
+          (@receive [0xb4 24 0])
+          (is (= [{:control {:knob-id :look} :detents 3 :fine? false}
+                  {:control {:knob-id :look} :detents -1 :fine? true}] @host)))
+        (testing "parameters stay untouched and the lift clears the control"
+          (is (= 0.5 (get-in @show [:instances id :params :level])))
+          (@receive [0x82 10 0])
+          (is (nil? (:touched-control (view)))))
+        (is (empty? (:errors (session/snapshot device)))))
+      (finally (session/close! device)))))
+
+(deftest host-encoder-bindings-are-validated
+  (let [host {:host-encoder (fn [& _] [])}]
+    (doseq [[binding extra] [[{:target :host} host] [{:target :host :control {:a 1}} {}]
+                             [{:target :host :control :a} host]
+                             [{:target :host :control {:a 1} :param :level} host]
+                             [{:target :host :control {:a 1} :step 1} host]
+                             [{:target :master :control {:a 1}} host] [{:param :level :control {:a 1}} host]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Encoder bindings"
+                            (push/profile (merge options extra {:encoder-bindings {:level binding}})))
+          (pr-str binding)))
+    (is (map? (push/profile (merge options host {:encoder-bindings {:level {:target :host :control {}}}}))))))
