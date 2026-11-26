@@ -353,15 +353,10 @@
   (doseq [device sessions] (session/receive! device {:type :bank/set :bank bank}))
   bank)
 
-(defn group-status
-  "Shared bank and each unit's session ID, physical offset, role and status."
-  [group]
+(defn group-status [group]
   (let [{:keys [bank closed? sessions]} @(:state group)]
     {:bank bank :closed? closed?
-     :units (mapv #(merge (select-keys (:options %) [:session-id :channel-offset])
-                          {:extender? (boolean (get-in % [:options :extender?]))}
-                          (select-keys (session/snapshot %) [:status :generation :epoch :errors]))
-                  sessions)}))
+     :units (mapv #(select-keys (session/snapshot %) [:status :generation :epoch :errors]) sessions)}))
 
 (defn bank-group!
   "Explicit shared bank change for one main unit and its extenders. Ordered
@@ -373,30 +368,6 @@
     (when (:closed? @(:state group)) (fail! "X-Touch group is closed"))
     (swap! (:state group) assoc :bank bank)
     (set-bank! (:sessions @(:state group)) bank))
-  (group-status group))
-
-(defn- unit-session [group session-id]
-  (or (some #(when (= session-id (get-in % [:options :session-id])) %) (:sessions @(:state group)))
-      (fail! "No unit with that session ID in this X-Touch group")))
-
-(defn close-unit!
-  "Close one unit of an open group (for example an unplugged extender). The
-  other units keep their offsets and the shared bank. Held cues on that unit
-  are released as for any closed session."
-  [group session-id]
-  (locking (:lock group)
-    (when (:closed? @(:state group)) (fail! "X-Touch group is closed"))
-    (session/close! (unit-session group session-id)))
-  (group-status group))
-
-(defn reopen-unit!
-  "Reopen one closed unit at its original offset and the group's current bank."
-  [group session-id]
-  (locking (:lock group)
-    (when (:closed? @(:state group)) (fail! "X-Touch group is closed"))
-    (let [device (unit-session group session-id)]
-      (session/open! device)
-      (session/receive! device {:type :bank/set :bank (:bank @(:state group))})))
   (group-status group))
 
 (defn close-group! [group]
@@ -440,7 +411,7 @@
   Bank buttons on the main move the whole group; channel buttons move one slot;
   with SHIFT held either pair jumps to the first or last bank. With
   :model-bank/:bank-command (see profile) the host owns the bank instead and
-  the group never changes it. close-unit!/reopen-unit! handle one unit.
+  the group never changes it.
   No discovery/automatic port pairing or shared global state is introduced."
   [{:keys [units channels] :as options}]
   (when-not (and (vector? units) (<= 1 (count units) 16)

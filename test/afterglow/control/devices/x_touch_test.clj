@@ -328,30 +328,3 @@
       (is (= "Cue 3" (first (labels h 20))))
       (is (= "Cue 11" (first (labels h 21))))
       (finally (touch/close-group! group)))))
-
-(deftest one-unit-closes-and-reopens-without-disturbing-the-other
-  (let [h (harness)
-        group (touch/connect-group! (merge (:options h)
-                                          {:channels (:channels h)
-                                           :units [{:session-id "main" :transport ((:transport h) "main")}
-                                                   {:session-id "xt" :extender? true :transport ((:transport h) "xt")}]}))]
-    (try
-      (input! h "xt" [144 0 127])
-      (is (= :held (:launch-mode (instance-for h :cue-8))))
-      (reset! (:log h) [])
-      (let [status (touch/close-unit! group "xt")]
-        (is (= [["main" 0 false :active] ["xt" 8 true :closed]]
-               (mapv (juxt :session-id :channel-offset :extender? :status) (:units status)))))
-      (is (= :releasing (:phase (instance-for h :cue-8))) "A closed unit releases its own held cue")
-      (is (= (apply str (repeat 56 " ")) (top-row h 21)) "Closing blanks the extender LCD")
-      (is (some #{[:close "xt"]} @(:log h)))
-      (input! h "main" [144 47 127])
-      (is (= 16 (:bank (touch/group-status group))))
-      (reset! (:log h) [])
-      (touch/reopen-unit! group "xt")
-      (is (= "Cue 24" (first (labels h 21))) "The reopened unit joins at the current bank")
-      (input! h "xt" [144 24 127])
-      (is (instance-for h :cue-24))
-      (is (thrown? clojure.lang.ExceptionInfo (touch/close-unit! group "missing")))
-      (finally (touch/close-group! group)))
-    (is (thrown? clojure.lang.ExceptionInfo (touch/reopen-unit! group "xt")))))
