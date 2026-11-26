@@ -124,14 +124,15 @@
       (is (false? (:failed? receipt))))))
 
 (deftest default-refresh-runs-on-deadlines-despite-slow-transfers
-  ;; A 15 ms payload transfer at 40 Hz (25 ms period). Waiting a fixed delay
-  ;; after each transfer, as the sink used to, gives intervals of 40 ms or more.
+  ;; A 10 ms payload transfer at the default 30 Hz, near the hardware's 12 ms in
+  ;; 33 ms. Waiting a fixed 33 ms after each transfer, as the sink used to, gives
+  ;; intervals of 43 ms or more. A sleep that overshoots to within a few ms of
+  ;; the period would make the grid skip every other deadline, so keep margin.
   (let [frames (atom []) done (promise)
-        sink (display/sink {:refresh-hz 40
-                            :backend {:open! (constantly :replay) :close! (fn [_])
+        sink (display/sink {:backend {:open! (constantly :replay) :close! (fn [_])
                                       :write! (fn [_ ^bytes bytes]
                                                 (when (= screen/payload-length (alength bytes))
-                                                  (Thread/sleep 15)
+                                                  (Thread/sleep 10)
                                                   (when (= 25 (count (swap! frames conj (System/nanoTime))))
                                                     (deliver done true))))}})
         handle ((:open! sink))]
@@ -140,11 +141,11 @@
       (is (true? (deref done 5000 false)))
       (finally ((:close! sink) handle)))
     (let [receipt (display/refresh-receipt handle)]
-      (is (= 40 (:target-hz receipt)))
+      (is (= 30 (:target-hz receipt)))
       ;; Relative to measured transfers, so a loaded machine cannot fake a pass:
-      ;; a fixed delay cannot start frames less than 25 ms + transfer apart.
+      ;; a fixed delay cannot start frames less than 33 ms + transfer apart.
       (is (< (get-in receipt [:interval :median-ms])
-             (+ 20.0 (get-in receipt [:payload-transfer :median-ms])))
+             (+ (/ 1000.0 30) (/ (get-in receipt [:payload-transfer :median-ms]) 2)))
           (pr-str receipt)))))
 
 (deftest libusb-ffi-replay-shares-one-context
