@@ -369,6 +369,46 @@
     (is (= 2 (get-in (apply! first-show {:op :cue/put :cue {:id :red :effect-id :wash}})
                      [:registry :cues :red :version])))))
 
+(defn- publish-code [show definition]
+  (get-in (model/apply-command show (command show {:op :registry/publish :kind :effects :definition definition}))
+          [:ack :status]))
+
+(deftest publication-advances-past-every-archived-version-however-the-archive-changed
+  ;; tolgraven/tolglow#784: the archive's latest versions are indexed once and
+  ;; reused while :versions is the same map, so each check must still see
+  ;; archives other code replaced, emptied or extended.
+  (let [v3 (-> (configured)
+               (apply! {:op :registry/publish :kind :effects :definition (assoc effect :version 2)})
+               (apply! {:op :registry/publish :kind :effects :definition (assoc effect :version 3)}))
+        changed (fn [version] (assoc effect :version version :duration-ms 600))]
+    (testing "the index describes the archive it was built from"
+      (let [{:keys [versions latest]} (::model/version-index (meta (:registry v3)))]
+        (is (identical? (get-in v3 [:registry :versions]) versions))
+        (is (= 3 (get latest [:effects :wash])))
+        (is (= 1 (get latest [:cues :red])))))
+    (testing "a current revision set back by hand still leaves its archive"
+      (let [show (assoc-in v3 [:registry :effects :wash] effect)]
+        (is (= :rejected (publish-code show (changed 3))))
+        (is (= :accepted (publish-code show (changed 4))))))
+    (testing "an archive emptied by hand frees its versions"
+      (let [show (-> v3
+                     (assoc-in [:registry :effects :wash] (assoc effect :version 2))
+                     (update-in [:registry :versions] dissoc [:effects :wash 3]))]
+        (is (= :accepted (publish-code show (changed 3))))))
+    (testing "an archive extended by hand is respected"
+      (let [show (assoc-in v3 [:registry :versions [:effects :wash 9]] (assoc effect :version 9))]
+        (is (= :rejected (publish-code show (changed 5))))
+        (is (= :accepted (publish-code show (changed 10))))))
+    (testing "a registry built without the index"
+      (let [show (update v3 :registry #(with-meta % nil))]
+        (is (= :rejected (publish-code show (changed 3))))
+        (is (= :accepted (publish-code show (changed 4))))))
+    (testing "an unversioned cue takes the version after its archive"
+      (let [show (-> v3
+                     (assoc-in [:registry :versions [:cues :red 6]] {:id :red :version 6 :effect-id :wash})
+                     (apply! {:op :cue/put :cue {:id :red :effect-id :wash}}))]
+        (is (= 7 (get-in show [:registry :cues :red :version])))))))
+
 (deftest malformed-input-is-a-rejection-not-an-exception-or-partial-update
   (let [show (configured)]
     (doseq [operation [{:op :cue/launch :cue-id :red :launch {:params 3}}
