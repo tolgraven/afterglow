@@ -1070,7 +1070,8 @@
     (loop [row 0]
       (or (= row n)
           (let [id (.next rows)
-                expected (.nth order (if indices (aget indices row) row))]
+                ;; Both branches int, so the index is never boxed.
+                expected (.nth order (if indices (aget indices row) (unchecked-int row)))]
             (and (or (identical? id expected) (= id expected))
                  (recur (inc row))))))))
 
