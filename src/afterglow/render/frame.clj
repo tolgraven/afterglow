@@ -15,7 +15,8 @@
             [afterglow.render.hdr.packed :as packed-hdr]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
-            [afterglow.runtime.faults :as faults]))
+            [afterglow.runtime.faults :as faults])
+  (:import [java.util.concurrent.atomic AtomicReferenceArray]))
 
 (def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
 
@@ -37,6 +38,13 @@
 (deftype ColorCorrection [^double red ^double green ^double blue ^double white])
 
 (deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints correction])
+
+;; The patch's bounded memo of typed batch target plans (see target-plan). It
+;; prints as one short line, not as its slots.
+(deftype TargetPlans [^java.util.concurrent.atomic.AtomicReference table]
+  Object
+  (toString [_] (str "TargetPlans["
+                     (.length ^java.util.concurrent.atomic.AtomicReferenceArray (.get table)) " slots]")))
 
 (defn- compile-color-correction [trims]
   (when (seq trims)
@@ -145,6 +153,10 @@
         (when (<= (:start right) (:end left))
           (fail! "Fixture physical footprints overlap" {:left left :right right}))))))
 
+(def ^:private ^:const target-plan-slots 128)
+
+(def ^:private ^:const target-plan-max-slots 2048)
+
 (defn compile-patch
   "Validate and compile fixtures to reusable immutable channel scatter metadata.
 
@@ -162,7 +174,8 @@
   (when-not (vector? fixtures) (fail! "Fixtures must be a vector" {:path [:fixtures]}))
   (when-not (= (count fixtures) (count (set (map :id fixtures))))
     (fail! "Fixture IDs must be unique" {:path [:fixtures]}))
-  (let [compiled
+  (let [supported-sets (java.util.HashMap.)
+        compiled
         (mapv
          (fn [index fixture]
            (let [{:keys [id position surface-uv universe address channels calibration]} fixture]
@@ -196,9 +209,12 @@
                     ::emitter? (boolean (some #(contains? channels %) emitter-attributes))
                     ::dimmer? (contains? channels :dimmer)
                     ::rgb? (every? #(contains? channels %) rgb-attributes)
-                    ::supported (cond-> (conj (set (keys channels)) :dimmer)
-                                  (every? #(contains? channels %) rgb-attributes) (conj :color)
-                                  (and (contains? channels :pan) (contains? channels :tilt)) (conj :aim :direction))
+                    ;; Equal support sets share one instance, so a scan over
+                    ;; many like fixtures can compare them by identity.
+                    ::supported (let [supported (cond-> (conj (set (keys channels)) :dimmer)
+                                                  (every? #(contains? channels %) rgb-attributes) (conj :color)
+                                                  (and (contains? channels :pan) (contains? channels :tilt)) (conj :aim :direction))]
+                                  (or (.putIfAbsent supported-sets supported supported) supported))
                     :compiled-channels
                     (into {}
                           (for [[attribute spec] channels]
@@ -269,6 +285,10 @@
                                        (long (or (::compact-index channel) -1))
                                        (::scatter channel) channel)) (:compiled-channels fixture))
                 (::tints fixture) (compile-color-correction (:color-correction fixture)))) compiled)
+       ;; A bounded memo of batch target plans (see target-plan). It holds only
+       ;; derived, immutable answers; a lost race or eviction just recomputes one.
+       ::target-plans (TargetPlans. (java.util.concurrent.atomic.AtomicReference.
+                                     (AtomicReferenceArray. (int target-plan-slots))))
        ::common-attributes (if (seq compiled)
                              (reduce (fn [common fixture] (into #{} (filter (::supported fixture)) common))
                                      (::supported (first compiled)) (rest compiled)) #{})
@@ -1024,6 +1044,133 @@
             (aset indices row (int (if (< row prefix) row (fixture-index by-id (nth ids row))))))
           indices)))))
 
+;; Immutable once published. `indices` is shared by every frame and worker that
+;; hits this plan, so readers must never write to it. `supported` holds the
+;; attributes every target implements; nil means no targets (nothing to check).
+;; The key vector is held weakly so a retired effect's targets can be collected.
+(deftype ^:private TargetPlan [^java.lang.ref.WeakReference key by-id target-order indices supported])
+
+(def ^:private ^:const target-plan-probes 8)
+
+(defn- common-support
+  "Attributes every target supports. Runs of fixtures share one interned
+  support set, so only a set instance not seen on the previous row is
+  intersected; the scan itself allocates nothing."
+  [by-id ids]
+  (let [n (count ids)]
+    (when (pos? n)
+      (loop [row 0, common nil, previous nil]
+        (if (= row n)
+          common
+          (let [supported (::supported (get by-id (.nth ^clojure.lang.Indexed ids (unchecked-int row))))]
+            (cond
+              (identical? supported previous) (recur (inc row) common previous)
+              (nil? common) (recur (inc row) supported supported)
+              (every? supported common) (recur (inc row) common supported)
+              :else (recur (inc row) (into #{} (filter supported) common) supported))))))))
+
+(defn- compute-target-plan [patch ids]
+  ;; batch-target-indices faults on the first unknown ID before support is read.
+  (let [indices (batch-target-indices patch ids)]
+    (TargetPlan. (java.lang.ref.WeakReference. ids) (:by-id patch) (:target-order patch)
+                 indices (common-support (:by-id patch) ids))))
+
+(defn- rows-match?
+  "Whether every row still names the patch row the plan maps it to. `vec` of a
+  small Object[] aliases that array, so a vector's identity does not prove its
+  contents; equality with the mapped target-order ID does, because :by-id is
+  an ordinary hash map over the same IDs."
+  [^TargetPlan plan ^clojure.lang.PersistentVector ids]
+  (let [^ints indices (.-indices plan)
+        ^clojure.lang.PersistentVector order (.-target-order plan)
+        n (.count ids)
+        rows (.iterator ids)
+        ;; A prefix plan walks the patch order alongside the rows.
+        prefix (when-not indices (.iterator order))]
+    (loop [row 0]
+      (or (= row n)
+          (let [id (.next rows)
+                expected (if prefix (.next ^java.util.Iterator prefix) (.nth order (aget indices row)))]
+            (and (or (identical? id expected) (= id expected))
+                 (recur (inc row))))))))
+
+(defn- plan-key [^TargetPlan plan] (.get ^java.lang.ref.WeakReference (.-key plan)))
+
+(defn- probe-slot
+  "The first slot in the probe window that is free, stale or already holds
+  this key, or nil when every slot holds another live plan."
+  [^AtomicReferenceArray table hash ids current?]
+  (let [mask (dec (.length table))]
+    (loop [probe 0]
+      (when (< probe target-plan-probes)
+        (let [slot (bit-and (+ hash probe) mask)
+              entry (.get table slot)]
+          (if (or (nil? entry) (not (current? entry)) (identical? ids (plan-key entry)))
+            slot
+            (recur (inc probe))))))))
+
+(defn- grown-table
+  "A table twice the size holding the live plans of `table`."
+  [^AtomicReferenceArray table current?]
+  (let [bigger (AtomicReferenceArray. (* 2 (.length table)))]
+    (dotimes [slot (.length table)]
+      (let [entry (.get table slot)]
+        (when (current? entry)
+          (let [key (plan-key entry)]
+            (when-let [free (probe-slot bigger (System/identityHashCode key) key current?)]
+              (.set bigger (int free) entry))))))
+    bigger))
+
+(defn- remember-plan!
+  "Publish a plan without evicting another live one. A full probe window
+  doubles the table up to its limit; past that the plan is simply not cached."
+  [^TargetPlans plans plan ids hash current?]
+  (loop []
+    (let [^java.util.concurrent.atomic.AtomicReference holder (.-table plans)
+          ^AtomicReferenceArray table (.get holder)]
+      (if-let [slot (probe-slot table hash ids current?)]
+        (.set table (int slot) plan)
+        (when (< (.length table) target-plan-max-slots)
+          (.compareAndSet holder table (grown-table table current?))
+          (recur))))))
+
+(defn- target-plan
+  "Target indices and common support for a batch's target IDs. Only a
+  persistent vector is memoized. A hit needs the same vector instance, the same
+  fixture map and order, and rows that still match the plan, so a recompiled,
+  reassembled or aliased input recomputes. A miss also clears entries whose
+  vectors were collected or whose patch fields changed."
+  ^TargetPlan [patch ids]
+  (let [^TargetPlans plans (::target-plans patch)]
+    (if-not (and plans (instance? clojure.lang.PersistentVector ids))
+      (compute-target-plan patch ids)
+      (let [^AtomicReferenceArray table (.get ^java.util.concurrent.atomic.AtomicReference (.-table plans))
+            by-id (:by-id patch), order (:target-order patch)
+            mask (dec (.length table)), hash (System/identityHashCode ids)
+            current? (fn [^TargetPlan plan]
+                       (and plan (identical? by-id (.-by-id plan)) (identical? order (.-target-order plan))
+                            (some? (plan-key plan))))]
+        (or (loop [probe 0]
+              (when (< probe target-plan-probes)
+                (let [^TargetPlan plan (.get table (bit-and (+ hash probe) mask))]
+                  (if (and plan (identical? ids (plan-key plan)) (current? plan) (rows-match? plan ids))
+                    plan
+                    (recur (inc probe))))))
+            (let [plan (compute-target-plan patch ids)]
+              (dotimes [slot (.length table)]
+                (let [entry (.get table slot)]
+                  (when (and entry (not (current? entry)))
+                    (.compareAndSet table slot entry nil))))
+              (remember-plan! plans plan ids hash current?)
+              plan))))))
+
+(defn- memoized-target-plans
+  "The number of plans a compiled patch currently retains (for tests)."
+  [patch]
+  (let [^AtomicReferenceArray table (.get ^java.util.concurrent.atomic.AtomicReference
+                                          (.-table ^TargetPlans (::target-plans patch)))]
+    (count (filter #(.get table %) (range (.length table))))))
+
 (defn batch-field-type
   "The native field type required for one fixture assignment column."
   [attribute]
@@ -1036,7 +1183,9 @@
      (when-not (and (map? batch) (vector? target-ids) (map? outputs) (seq outputs)
                     (#{:replace :max :add} blend) (unit? opacity) (or (nil? count) (= count (clojure.core/count target-ids))))
        (fail! "Invalid batch shape, count or blend" {}))
-     (let [target-indices (batch-target-indices patch target-ids)
+     (let [^TargetPlan plan (target-plan patch target-ids)
+           target-indices (.-indices plan)
+           supported (.-supported plan)
            columns (mapv
                     (fn [[attribute {:keys [type components values] :as field}]]
                       (let [expected-type (batch-field-type attribute)
@@ -1051,7 +1200,9 @@
                         (when (and (geometric-attributes attribute) (not= :replace blend))
                           (fail! "Geometry assignments require :replace blend" {:attribute attribute}))
                         (when-not (or (and layer? (= :beat-ratio attribute))
-                                      (contains? (::common-attributes patch) attribute))
+                                      (contains? (::common-attributes patch) attribute)
+                                      (nil? supported) (contains? supported attribute))
+                          ;; Report the first row that lacks it, as an uncached check would.
                           (doseq [id target-ids]
                             (when-not (contains? (::supported (get (:by-id patch) id)) attribute)
                               (fail! "Fixture does not implement batch attribute" {:target-id id :attribute attribute}))))

@@ -41,9 +41,27 @@ values differ from explicit nil. Input equality distinguishes numeric types,
 decimal scale and signed zero. Bindings support plain value semantics for maps
 with keyword/string keys, vectors and scalars. Mutable or opaque inputs, larger
 payloads and unsupported results pass through without retention. Each caller
-owns its primitive output arrays. Exceptions leave the last successful entry
-intact. Concurrent misses may evaluate independently. Workers do not wait on
-each other to compute a miss.
+owns its primitive output arrays by default: a miss retains a copy and a hit
+returns another copy. Exceptions leave the last successful entry intact.
+Concurrent misses may evaluate independently. Workers do not wait on each
+other to compute a miss.
+
+`:shared-outputs? true` removes both copies. The calculation must return fresh
+arrays, and the caller and every later reader must treat them as read-only.
+The binding retains the returned value itself and returns that same value on a
+hit, possibly to several effect workers in one frame. A caller that needs a
+different value, such as an envelope-scaled level, writes a new array it owns.
+Tolglow's typed batch compiler binds its evaluated fields this way. A stopped
+transport therefore reuses one retained field per group without allocating.
+
+Nothing enforces read-only use, and one stray write corrupts every instance
+that shares the binding and every later frame while its inputs are unchanged.
+Never pass shared outputs to an in-place writer. `afterglow.render.fields/scale-field!`
+(the field-request envelope scaler called by `evaluate-request!` on the
+result of the `evaluate!` callback) writes its argument arrays, as do `aset`/`aset-double` loops and any `System/arraycopy`
+into a received array. It is safe only on the fresh arrays that field-request
+evaluation creates each frame; do not route that evaluator through a shared
+binding. Scale or rewrite into a new array instead.
 
 The GPU session owns a separate binding for each resident numeric program. Its
 inputs are the actual captured uniform values, after conversion to float32.

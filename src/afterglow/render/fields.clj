@@ -13,6 +13,9 @@
 
 (defn uniform-field? [field] (instance? UniformField field))
 
+;; Writes the evaluated array in place. The field evaluator must return arrays
+;; this request owns; never route it through a reuse binding with
+;; :shared-outputs? true (see doc/architecture/pure-effect-reuse.md).
 (defn- scale-field! [outputs attribute gain]
   (let [values (get-in outputs [attribute :values])]
     (when-not (and (instance? double/1 values)
