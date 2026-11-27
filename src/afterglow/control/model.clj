@@ -90,11 +90,38 @@
           (when (= version (:version current)) current)))
     (get-in model [:registry :effects (:effect-id cue)])))
 
-(defn- latest-version [model kind id]
-  (reduce max (get-in model [:registry kind id :version] 0)
-          (keep (fn [[[entry-kind entry-id version] _]]
-                  (when (and (= kind entry-kind) (= id entry-id)) version))
-                (get-in model [:registry :versions]))))
+(defn- archived-versions
+  "The latest archived version of each [kind id] in `registry`'s :versions.
+  A publication records this index in the registry's metadata together with
+  the archive map it describes, and it is reused only while :versions is that
+  identical immutable map; any other archive is scanned once. Publishing then
+  costs the same however many revisions the show has kept
+  (tolgraven/tolglow#784)."
+  [registry]
+  (let [versions (:versions registry)
+        {indexed :versions latest :latest} (::version-index (meta registry))]
+    (if (and (some? latest) (identical? versions indexed))
+      latest
+      (persistent!
+       (reduce-kv (fn [index [kind id version] _]
+                    (if (number? version)
+                      (let [k [kind id]] (assoc! index k (max version (get index k version))))
+                      index))
+                  (transient {}) versions)))))
+
+(defn- latest-version
+  ([model kind id] (latest-version model kind id (archived-versions (:registry model))))
+  ([model kind id archived]
+   (let [current (get-in model [:registry kind id :version] 0)]
+     (if-let [latest (get archived [kind id])] (max current latest) current))))
+
+(defn- index-versions
+  "Record `archived`, plus `version` of [kind id] just archived, as the index
+  of `model`'s current :versions map."
+  [model archived kind id version]
+  (update model :registry vary-meta assoc ::version-index
+          {:versions (get-in model [:registry :versions])
+           :latest (update archived [kind id] (fnil max version) version)}))
 
 (defn- check-params! [schemas values]
   (let [errors (params/validate-values schemas values)]
@@ -142,9 +169,10 @@
 (defn- publish-definition [model kind definition]
   (validate-definition! model kind definition)
   (let [id (:id definition)
-        previous (get-in model [:registry kind id])]
+        previous (get-in model [:registry kind id])
+        archived (archived-versions (:registry model))]
     (require! (or (= definition previous)
-                   (> (:version definition) (latest-version model kind id)))
+                   (> (:version definition) (latest-version model kind id archived)))
               :stale-definition-version "Publication must advance the definition version")
     (when (and (= :effects kind) (not= (:params previous) (:params definition)))
       (let [errors (params/dependent-cue-errors (get-in model [:registry :cues]) definition)]
@@ -154,7 +182,8 @@
                        (assoc-in [:registry kind id] definition)
                        (assoc-in [:registry :versions [kind id (:version definition)]] definition))
               (not= definition previous) (update-in [:registry :revision] (fnil inc 0))
-              (and (= :cues kind) (nil? previous)) (pages/forget-cue id))
+              (and (= :cues kind) (nil? previous)) (pages/forget-cue id)
+              true (index-versions archived kind id (:version definition)))
      :events [{:type :registry/published :kind kind :id id :version (:version definition)}]
      :result {:id id :version (:version definition)}}))
 
