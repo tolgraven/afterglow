@@ -49,6 +49,12 @@ and readback. Effect steps return data to the renderer.
   paths byte-equivalent. No input arrays may be mutated during a call.
 - Dense fixture/channel plans contain only final fields and persistent values.
   Owned mutable scratch belongs to an invocation, never to these shared plans.
+  The one exception is `::target-plans`, a bounded memo of each typed batch's
+  target indices and the attributes all its targets support. It is keyed by the
+  identity of the caller's target-ID vector and checked against the patch's
+  `:by-id` and `:target-order`, so hold one vector per compiled effect to hit
+  it. Its entries are immutable once published; never write to their shared
+  `int[]` indices. A failed check is not cached and still reports the first row.
 - `ir/compile-batch` compiles scalar float64 components without eval or generated
   Clojure code. `evaluate-batch` returns independent named fields, including aim
   (vec3) and focus (number). It is CPU batching, not SIMD. Exact numeric inputs

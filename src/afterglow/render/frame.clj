@@ -15,7 +15,8 @@
             [afterglow.render.hdr.packed :as packed-hdr]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
-            [afterglow.runtime.faults :as faults]))
+            [afterglow.runtime.faults :as faults])
+  (:import [java.util.concurrent.atomic AtomicReferenceArray]))
 
 (def ^:private emitter-attributes (set (keys photometry/emitter-spectrum)))
 
@@ -269,6 +270,11 @@
                                        (long (or (::compact-index channel) -1))
                                        (::scatter channel) channel)) (:compiled-channels fixture))
                 (::tints fixture) (compile-color-correction (:color-correction fixture)))) compiled)
+       ;; A bounded memo of batch target plans (see target-plan), keyed by the
+       ;; identity of a caller's target-ID vector. It holds only derived,
+       ;; immutable answers; a lost race or eviction just recomputes one. At
+       ;; most 512 plans stay reachable until the patch itself is dropped.
+       ::target-plans (AtomicReferenceArray. 512)
        ::common-attributes (if (seq compiled)
                              (reduce (fn [common fixture] (into #{} (filter (::supported fixture)) common))
                                      (::supported (first compiled)) (rest compiled)) #{})
@@ -1024,6 +1030,52 @@
             (aset indices row (int (if (< row prefix) row (fixture-index by-id (nth ids row))))))
           indices)))))
 
+;; Immutable once published. `indices` is shared by every frame and worker that
+;; hits this plan, so readers must never write to it. `supported` holds the
+;; attributes every target implements; nil means no targets (nothing to check).
+(deftype ^:private TargetPlan [ids by-id target-order indices supported])
+
+(def ^:private ^:const target-plan-probes 4)
+
+(defn- common-support [by-id ids]
+  (when (seq ids)
+    (reduce (fn [common id]
+              (let [supported (::supported (get by-id id))]
+                (if (every? supported common) common (into #{} (filter supported) common))))
+            (::supported (get by-id (nth ids 0))) ids)))
+
+(defn- compute-target-plan [patch ids]
+  ;; batch-target-indices faults on the first unknown ID before support is read.
+  (let [indices (batch-target-indices patch ids)]
+    (TargetPlan. ids (:by-id patch) (:target-order patch) indices (common-support (:by-id patch) ids))))
+
+(defn- target-plan
+  "Target indices and common support for a batch's target IDs. The memo hits
+  only for the same vector instance against the same fixture map and order, so
+  a recompiled or reassembled patch never reuses another patch's answer."
+  ^TargetPlan [patch ids]
+  (let [^AtomicReferenceArray table (::target-plans patch)]
+    (if-not table
+      (compute-target-plan patch ids)
+      (let [by-id (:by-id patch), order (:target-order patch)
+            mask (dec (.length table)), hash (System/identityHashCode ids)
+            current? (fn [^TargetPlan plan]
+                       (and plan (identical? by-id (.-by-id plan)) (identical? order (.-target-order plan))))]
+        (or (loop [probe 0]
+              (when (< probe target-plan-probes)
+                (let [^TargetPlan plan (.get table (bit-and (+ hash probe) mask))]
+                  (if (and plan (identical? ids (.-ids plan)) (current? plan))
+                    plan
+                    (recur (inc probe))))))
+            (let [plan (compute-target-plan patch ids)
+                  slot (or (some (fn [probe]
+                                   (let [slot (bit-and (+ hash probe) mask)]
+                                     (when-not (current? (.get table slot)) slot)))
+                                 (range target-plan-probes))
+                           (bit-and hash mask))]
+              (.set table (int slot) plan)
+              plan))))))
+
 (defn batch-field-type
   "The native field type required for one fixture assignment column."
   [attribute]
@@ -1036,7 +1088,9 @@
      (when-not (and (map? batch) (vector? target-ids) (map? outputs) (seq outputs)
                     (#{:replace :max :add} blend) (unit? opacity) (or (nil? count) (= count (clojure.core/count target-ids))))
        (fail! "Invalid batch shape, count or blend" {}))
-     (let [target-indices (batch-target-indices patch target-ids)
+     (let [^TargetPlan plan (target-plan patch target-ids)
+           target-indices (.-indices plan)
+           supported (.-supported plan)
            columns (mapv
                     (fn [[attribute {:keys [type components values] :as field}]]
                       (let [expected-type (batch-field-type attribute)
@@ -1051,7 +1105,9 @@
                         (when (and (geometric-attributes attribute) (not= :replace blend))
                           (fail! "Geometry assignments require :replace blend" {:attribute attribute}))
                         (when-not (or (and layer? (= :beat-ratio attribute))
-                                      (contains? (::common-attributes patch) attribute))
+                                      (contains? (::common-attributes patch) attribute)
+                                      (nil? supported) (contains? supported attribute))
+                          ;; Report the first row that lacks it, as an uncached check would.
                           (doseq [id target-ids]
                             (when-not (contains? (::supported (get (:by-id patch) id)) attribute)
                               (fail! "Fixture does not implement batch attribute" {:target-id id :attribute attribute}))))
