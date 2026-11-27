@@ -206,9 +206,7 @@
         (is (every? #(= [true true] %) results)))
       (finally (.shutdownNow pool) (.awaitTermination pool 5 TimeUnit/SECONDS)))))
 
-(defn- memo-entries [patch]
-  (let [^java.util.concurrent.atomic.AtomicReferenceArray table (::frame/target-plans patch)]
-    (count (keep #(.get table %) (range (.length table))))))
+(defn- memo-entries [patch] (#'frame/memoized-target-plans patch))
 
 (deftest a-compiled-patch-reuses-one-plan-per-target-vector
   (let [patch (frame/compile-patch (mixed-rig))]
@@ -216,3 +214,50 @@
       (frame/resolve-batches patch (frame-batches frame) {:include-values? false}))
     (is (= (count targets) (memo-entries patch)) "one entry per target vector, not per frame")
     (is (zero? (memo-entries (frame/compile-patch (mixed-rig)))) "a recompiled patch starts empty")))
+
+(deftest a-vector-aliasing-a-mutated-array-is-rechecked
+  ;; clojure.core/vec adopts an Object[] of 32 or fewer elements, so the same
+  ;; vector instance can change contents when the array is written.
+  (let [patch (frame/compile-patch (mixed-rig))
+        cold #(outcome (fn [] (frame/resolve-batches (frame/compile-patch (mixed-rig)) [%] {:include-values? false})))
+        warm #(outcome (fn [] (frame/resolve-batches patch [%] {:include-values? false})))]
+    (testing "a row now naming a fixture without the attribute"
+      (let [array (object-array [:p1 :p0])
+            ids (vec array)
+            batch (one ids :red)]
+        (is (contains? (warm batch) :bytes))
+        (aset array 1 :d0)
+        (is (= [:p1 :d0] ids) "the vector aliases the array")
+        (is (= {:message "Fixture does not implement batch attribute"
+                :data {:target-id :d0 :attribute :red :type ::frame/invalid-frame}}
+               (cold batch) (warm batch)))))
+    (testing "rows that now map to other fixtures"
+      (let [array (object-array [:p2 :p3 :m0])
+            ids (vec array)
+            batch (one ids :white)
+            bytes #(bytes-of (frame/resolve-frame patch (assignments [batch]) {:include-values? false}))]
+        (is (= (bytes) (:bytes (warm batch))))
+        (aset array 0 :m1) (aset array 2 :p5)
+        (is (= (bytes) (:bytes (warm batch)) (:bytes (cold batch))))))
+    (testing "an unknown ID written into a cached prefix vector"
+      (let [array (object-array [:p0 :p1 :p2])
+            ids (vec array)
+            batch (one ids :red)]
+        (is (contains? (warm batch) :bytes))
+        (aset array 1 :gone)
+        (is (= {:message "Unknown batch target" :data {:target-id :gone :type ::frame/invalid-frame}}
+               (cold batch) (warm batch)))))))
+
+(deftest only-persistent-vectors-are-memoized-and-the-memo-stays-bounded
+  (let [patch (frame/compile-patch (mixed-rig))
+        pixels (ids "p" 12)]
+    (frame/resolve-batches patch [(one (subvec pixels 2 7) :red)] {:include-values? false})
+    (frame/resolve-batches patch [(one (into (vector-of :long) []) :red 0)] {:include-values? false})
+    (is (zero? (memo-entries patch)) "subvectors and primitive vectors bypass the memo")
+    (let [held (vec (for [i (range 1000)] (vec (take (inc (mod i 12)) (drop (mod i 5) (cycle pixels))))))]
+      (doseq [ids held] (frame/resolve-batches patch [(one ids :red)] {:include-values? false}))
+      (is (<= (memo-entries patch) 128))
+      (is (pos? (memo-entries patch))))
+    (testing "the patch prints its memo as one short token"
+      (is (re-find #"TargetPlans\[128 slots\]" (pr-str patch)))
+      (is (not (re-find #"null, null" (pr-str patch)))))))

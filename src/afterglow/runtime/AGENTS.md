@@ -54,7 +54,8 @@ of this runtime alone.
 Use `afterglow.runtime.reuse` for declared pure calculations. Fold only captured
 inputs and immutable bindings into their results. Preserve per-frame intent
 delivery and distinct caller-owned output arrays, unless the binding declares
-`:shared-outputs? true` and every reader keeps its arrays read-only. See
+`:shared-outputs? true` and every reader keeps its arrays read-only. Shared
+outputs must never reach an in-place writer such as `fields/scale-field!`. See
 [the declaration and cache contract](../../../doc/architecture/pure-effect-reuse.md).
 
 Only certify stateless, continuous-output samplers for [predictive effect

@@ -54,6 +54,15 @@ different value, such as an envelope-scaled level, writes a new array it owns.
 Tolglow's typed batch compiler binds its evaluated fields this way. A stopped
 transport therefore reuses one retained field per group without allocating.
 
+Nothing enforces read-only use, and one stray write corrupts every instance
+that shares the binding and every later frame while its inputs are unchanged.
+Never pass shared outputs to an in-place writer. `afterglow.render.fields/scale-field!`
+(the field-request envelope scaler called by `evaluate-request!` on the
+result of the `evaluate!` callback) writes its argument arrays, as do `aset`/`aset-double` loops and any `System/arraycopy`
+into a received array. It is safe only on the fresh arrays that field-request
+evaluation creates each frame; do not route that evaluator through a shared
+binding. Scale or rewrite into a new array instead.
+
 The GPU session owns a separate binding for each resident numeric program. Its
 inputs are the actual captured uniform values, after conversion to float32.
 Equal uniforms and the same uploaded positions reuse the completed readback.

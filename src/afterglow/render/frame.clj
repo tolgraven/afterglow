@@ -39,6 +39,12 @@
 
 (deftype DenseFixture [^boolean emitter ^boolean dimmer ^boolean extractMin emission channels tints correction])
 
+;; The patch's bounded memo of typed batch target plans (see target-plan). It
+;; prints as one short line, not as its slots.
+(deftype TargetPlans [^java.util.concurrent.atomic.AtomicReferenceArray table]
+  Object
+  (toString [_] (str "TargetPlans[" (.length table) " slots]")))
+
 (defn- compile-color-correction [trims]
   (when (seq trims)
     (ColorCorrection. (double (get trims :red 1.0)) (double (get trims :green 1.0))
@@ -145,6 +151,8 @@
       (doseq [[left right] (partition 2 1 (sort-by :start ranges))]
         (when (<= (:start right) (:end left))
           (fail! "Fixture physical footprints overlap" {:left left :right right}))))))
+
+(def ^:private ^:const target-plan-slots 128)
 
 (defn compile-patch
   "Validate and compile fixtures to reusable immutable channel scatter metadata.
@@ -270,11 +278,9 @@
                                        (long (or (::compact-index channel) -1))
                                        (::scatter channel) channel)) (:compiled-channels fixture))
                 (::tints fixture) (compile-color-correction (:color-correction fixture)))) compiled)
-       ;; A bounded memo of batch target plans (see target-plan), keyed by the
-       ;; identity of a caller's target-ID vector. It holds only derived,
-       ;; immutable answers; a lost race or eviction just recomputes one. At
-       ;; most 512 plans stay reachable until the patch itself is dropped.
-       ::target-plans (AtomicReferenceArray. 512)
+       ;; A bounded memo of batch target plans (see target-plan). It holds only
+       ;; derived, immutable answers; a lost race or eviction just recomputes one.
+       ::target-plans (TargetPlans. (AtomicReferenceArray. (int target-plan-slots)))
        ::common-attributes (if (seq compiled)
                              (reduce (fn [common fixture] (into #{} (filter (::supported fixture)) common))
                                      (::supported (first compiled)) (rest compiled)) #{})
@@ -1033,7 +1039,8 @@
 ;; Immutable once published. `indices` is shared by every frame and worker that
 ;; hits this plan, so readers must never write to it. `supported` holds the
 ;; attributes every target implements; nil means no targets (nothing to check).
-(deftype ^:private TargetPlan [ids by-id target-order indices supported])
+;; The key vector is held weakly so a retired effect's targets can be collected.
+(deftype ^:private TargetPlan [^java.lang.ref.WeakReference key by-id target-order indices supported])
 
 (def ^:private ^:const target-plan-probes 4)
 
@@ -1047,34 +1054,70 @@
 (defn- compute-target-plan [patch ids]
   ;; batch-target-indices faults on the first unknown ID before support is read.
   (let [indices (batch-target-indices patch ids)]
-    (TargetPlan. ids (:by-id patch) (:target-order patch) indices (common-support (:by-id patch) ids))))
+    (TargetPlan. (java.lang.ref.WeakReference. ids) (:by-id patch) (:target-order patch)
+                 indices (common-support (:by-id patch) ids))))
+
+(defn- rows-match?
+  "Whether every row still names the patch row the plan maps it to. `vec` of a
+  small Object[] aliases that array, so a vector's identity does not prove its
+  contents; equality with the mapped target-order ID does, because :by-id is
+  an ordinary hash map over the same IDs."
+  [^TargetPlan plan ^clojure.lang.PersistentVector ids]
+  (let [^ints indices (.-indices plan)
+        ^clojure.lang.PersistentVector order (.-target-order plan)
+        n (.count ids)
+        rows (.iterator ids)]
+    (loop [row 0]
+      (or (= row n)
+          (let [id (.next rows)
+                expected (.nth order (if indices (aget indices row) row))]
+            (and (or (identical? id expected) (= id expected))
+                 (recur (inc row))))))))
 
 (defn- target-plan
-  "Target indices and common support for a batch's target IDs. The memo hits
-  only for the same vector instance against the same fixture map and order, so
-  a recompiled or reassembled patch never reuses another patch's answer."
+  "Target indices and common support for a batch's target IDs. Only a
+  persistent vector is memoized. A hit needs the same vector instance, the same
+  fixture map and order, and rows that still match the plan, so a recompiled,
+  reassembled or aliased input recomputes. A miss also clears entries whose
+  vectors were collected or whose patch fields changed."
   ^TargetPlan [patch ids]
-  (let [^AtomicReferenceArray table (::target-plans patch)]
-    (if-not table
+  (let [^TargetPlans plans (::target-plans patch)]
+    (if-not (and plans (instance? clojure.lang.PersistentVector ids))
       (compute-target-plan patch ids)
-      (let [by-id (:by-id patch), order (:target-order patch)
+      (let [^AtomicReferenceArray table (.-table plans)
+            by-id (:by-id patch), order (:target-order patch)
             mask (dec (.length table)), hash (System/identityHashCode ids)
             current? (fn [^TargetPlan plan]
-                       (and plan (identical? by-id (.-by-id plan)) (identical? order (.-target-order plan))))]
+                       (and plan (identical? by-id (.-by-id plan)) (identical? order (.-target-order plan))
+                            (some? (.get ^java.lang.ref.WeakReference (.-key plan)))))]
         (or (loop [probe 0]
               (when (< probe target-plan-probes)
                 (let [^TargetPlan plan (.get table (bit-and (+ hash probe) mask))]
-                  (if (and plan (identical? ids (.-ids plan)) (current? plan))
+                  (if (and plan (identical? ids (.get ^java.lang.ref.WeakReference (.-key plan)))
+                           (current? plan) (rows-match? plan ids))
                     plan
                     (recur (inc probe))))))
-            (let [plan (compute-target-plan patch ids)
-                  slot (or (some (fn [probe]
-                                   (let [slot (bit-and (+ hash probe) mask)]
-                                     (when-not (current? (.get table slot)) slot)))
-                                 (range target-plan-probes))
-                           (bit-and hash mask))]
-              (.set table (int slot) plan)
+            (let [plan (compute-target-plan patch ids)]
+              (dotimes [slot (.length table)]
+                (let [entry (.get table slot)]
+                  (when (and entry (not (current? entry)))
+                    (.compareAndSet table slot entry nil))))
+              (.set table (int (or (some (fn [probe]
+                                           (let [slot (bit-and (+ hash probe) mask)
+                                                 ^TargetPlan entry (.get table slot)]
+                                             (when (or (nil? entry)
+                                                       (identical? ids (.get ^java.lang.ref.WeakReference (.-key entry))))
+                                               slot)))
+                                         (range target-plan-probes))
+                                   (bit-and hash mask)))
+                    plan)
               plan))))))
+
+(defn- memoized-target-plans
+  "The number of plans a compiled patch currently retains (for tests)."
+  [patch]
+  (let [^AtomicReferenceArray table (.-table ^TargetPlans (::target-plans patch))]
+    (count (filter #(.get table %) (range (.length table))))))
 
 (defn batch-field-type
   "The native field type required for one fixture assignment column."
