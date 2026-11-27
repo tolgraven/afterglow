@@ -17,8 +17,10 @@
     (throw uncacheable)))
 
 (defn- snapshot
-  "Admit plain persistent data. Detach private primitive arrays in outputs.
-  Return original persistent subtrees when every member is immutable."
+  "Admit plain persistent data. Detach private primitive arrays in outputs
+  (arrays? true), or admit them by reference when the caller has declared them
+  read-only (arrays? :shared). Return original persistent subtrees when every
+  member is immutable or shared."
   [x ^longs remaining arrays? depth]
   (charge! remaining 1)
   (when (or (> depth 64) (meta x)) (throw uncacheable))
@@ -38,9 +40,11 @@
          (.isPrimitive ^Class (.getComponentType ^Class (class x))))
     (let [n (Array/getLength x)]
       (charge! remaining n)
-      (let [copy (Array/newInstance (.getComponentType ^Class (class x)) n)]
-        (System/arraycopy x 0 copy 0 n)
-        copy))
+      (if (= :shared arrays?)
+        x
+        (let [copy (Array/newInstance (.getComponentType ^Class (class x)) n)]
+          (System/arraycopy x 0 copy 0 n)
+          copy)))
     :else (throw uncacheable)))
 
 (defn- capture [value limit arrays?]
@@ -73,16 +77,24 @@
 
   Each binding holds at most one successful value. :max-values bounds both
   input and output capture (default 65536 nodes and primitive elements).
-  Uncacheable values still evaluate. Primitive output buffers are private to
-  the caller on every invocation. Inputs use Java value equality so signed
-  zero and numeric representation remain observable. Concurrent misses may
-  evaluate independently; no callback runs inside a lock or CAS retry."
-  [{:keys [pure? inputs max-values] :or {pure? false max-values 65536} :as declaration} calculate]
-  (when-not (and (fn? calculate) (boolean? pure?)
+  Uncacheable values still evaluate. By default primitive output buffers are
+  private to the caller on every invocation: a miss retains a copy and a hit
+  returns a new copy. :shared-outputs? true attests that the calculation
+  returns fresh arrays and that the caller and every later reader treat them
+  as read-only. The binding then retains the returned value itself and returns
+  that same value on a hit, possibly to several workers at once; nothing is
+  copied. A caller that must change a value writes a new array it owns.
+  Inputs use Java value equality so signed zero and numeric representation
+  remain observable. Concurrent misses may evaluate independently; no
+  callback runs inside a lock or CAS retry."
+  [{:keys [pure? inputs max-values shared-outputs?]
+    :or {pure? false max-values 65536 shared-outputs? false} :as declaration} calculate]
+  (when-not (and (fn? calculate) (boolean? pure?) (boolean? shared-outputs?)
                  (vector? inputs) (every? #(and (vector? %) (seq %) (every? keyword? %)) inputs)
                  (pos-int? max-values))
     (throw (ex-info "Expected a calculation, boolean purity and a vector of keyword paths" {})))
-  (let [entry (AtomicReference.)]
+  (let [entry (AtomicReference.)
+        arrays (if shared-outputs? :shared true)]
     (with-meta
       (fn [context]
         (let [inputs (inputs-for inputs context)
@@ -91,9 +103,9 @@
             (calculate inputs)
             (let [prior (.get entry)]
               (if (and prior (.equals ^Object key (:key prior)))
-                (if (:copy? prior) (capture (:value prior) max-values true) (:value prior))
+                (if (:copy? prior) (capture (:value prior) max-values arrays) (:value prior))
                 (let [result (calculate inputs)
-                      value (capture result max-values true)]
+                      value (capture result max-values arrays)]
                   (when-not (identical? value missing)
                     (.compareAndSet entry prior
                                     {:key key :value value :copy? (not (identical? result value))}))

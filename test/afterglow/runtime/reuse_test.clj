@@ -66,6 +66,51 @@
       (calc {:v v}) (calc {:v v}))
     (is (= 7 @calls))))
 
+(deftest shared-outputs-retain-the-returned-arrays-without-copying
+  (let [calls (atom 0)
+        calc (reuse/evaluator {:pure? true :inputs [[:v]] :max-values 12 :shared-outputs? true}
+                              (fn [{:keys [v]}] (swap! calls inc)
+                                {:outputs {:red {:values (double-array [v 0.5])}}}))
+        miss (calc {:v 0.25})
+        hit (calc {:v 0.25})]
+    (testing "a hit returns the value the miss returned, arrays included"
+      (is (identical? miss hit))
+      (is (identical? (get-in miss [:outputs :red :values]) (get-in hit [:outputs :red :values])))
+      (is (= [0.25 0.5] (vec (get-in hit [:outputs :red :values]))))
+      (is (= 1 @calls)))
+    (testing "changed inputs evaluate again and replace the retained value"
+      (let [next-value (calc {:v 0.75})]
+        (is (not (identical? miss next-value)))
+        (is (identical? next-value (calc {:v 0.75})))
+        (is (= [0.75 0.5] (vec (get-in next-value [:outputs :red :values]))))
+        (is (= 2 @calls))))
+    (testing "the bound still limits retained array elements"
+      (let [big (reuse/evaluator {:pure? true :inputs [[:v]] :max-values 12 :shared-outputs? true}
+                                 (fn [_] (swap! calls inc) {:values (double-array 16)}))]
+        (is (not (identical? (big {:v 1}) (big {:v 1}))))
+        (is (= 4 @calls))))
+    (testing "the default still gives each caller private arrays"
+      (let [private (reuse/evaluator {:pure? true :inputs [[:v]]}
+                                     (fn [_] {:values (double-array [1.0])}))
+            a (private {:v 1}) b (private {:v 1})]
+        (is (not (identical? (:values a) (:values b))))))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (reuse/evaluator {:pure? true :inputs [] :shared-outputs? :yes} identity)))))
+
+(deftest shared-outputs-reach-concurrent-readers-unchanged
+  (let [calls (atom 0)
+        calc (reuse/evaluator {:pure? true :inputs [[:beat]] :shared-outputs? true}
+                              (fn [{:keys [beat]}] (swap! calls inc)
+                                {:values (double-array (repeat 1024 (double beat)))}))
+        retained (calc {:beat 2.0})
+        pool (java.util.concurrent.Executors/newFixedThreadPool 4)]
+    (try
+      (let [results (mapv deref (.invokeAll pool (vec (repeat 64 (fn [] (calc {:beat 2.0})))) ))]
+        (is (every? #(identical? retained %) results))
+        (is (every? #(== 2.0 %) (:values retained)))
+        (is (= 1 @calls)))
+      (finally (.shutdownNow pool)))))
+
 (deftest overlapping-submissions-return-their-own-calculation
   (let [entered (promise) release (promise)
         calc (reuse/evaluator {:pure? true :inputs [[:x]]}
