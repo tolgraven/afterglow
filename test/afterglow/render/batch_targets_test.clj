@@ -251,13 +251,35 @@
 (deftest only-persistent-vectors-are-memoized-and-the-memo-stays-bounded
   (let [patch (frame/compile-patch (mixed-rig))
         pixels (ids "p" 12)]
+    (testing "the patch prints its memo as one short token"
+      (is (re-find #"TargetPlans\[128 slots\]" (pr-str patch)))
+      (is (not (re-find #"null, null" (pr-str patch)))))
     (frame/resolve-batches patch [(one (subvec pixels 2 7) :red)] {:include-values? false})
     (frame/resolve-batches patch [(one (into (vector-of :long) []) :red 0)] {:include-values? false})
     (is (zero? (memo-entries patch)) "subvectors and primitive vectors bypass the memo")
-    (let [held (vec (for [i (range 1000)] (vec (take (inc (mod i 12)) (drop (mod i 5) (cycle pixels))))))]
+    (let [held (vec (for [i (range 3000)] (vec (take (inc (mod i 12)) (drop (mod i 5) (cycle pixels))))))]
       (doseq [ids held] (frame/resolve-batches patch [(one ids :red)] {:include-values? false}))
-      (is (<= (memo-entries patch) 128))
-      (is (pos? (memo-entries patch))))
-    (testing "the patch prints its memo as one short token"
-      (is (re-find #"TargetPlans\[128 slots\]" (pr-str patch)))
-      (is (not (re-find #"null, null" (pr-str patch)))))))
+      (is (<= 1 (memo-entries patch) 2048) "the table grows for live vectors up to its limit")
+      (is (re-find #"TargetPlans\[2048 slots\]" (pr-str patch))))))
+
+(defn- steady-misses
+  "Plan computations per frame once `live` held target vectors are warm."
+  [live frames]
+  (let [rig (vec (for [i (range 64)] {:id (keyword (str "q" i)) :universe 1 :address (inc (* 3 i))
+                                      :channels {:red 1 :green 2 :blue 3}}))
+        patch (frame/compile-patch rig)
+        order (:target-order patch)
+        vectors (vec (for [i (range live)] (vec (take (inc (mod i 60)) (drop (mod i 4) order)))))
+        computed (atom 0)
+        compute @#'frame/compute-target-plan]
+    (with-redefs [frame/compute-target-plan (fn [p ids] (swap! computed inc) (compute p ids))]
+      (dotimes [_ 2] (doseq [v vectors] (#'frame/target-plan patch v)))
+      (reset! computed 0)
+      (dotimes [_ frames] (doseq [v vectors] (#'frame/target-plan patch v)))
+      {:misses @computed :entries (memo-entries patch)})))
+
+(deftest many-live-target-vectors-hit-every-frame
+  ;; Colliding live keys must not evict each other: a full probe window grows
+  ;; the table instead. Identity hashes differ per run, so use several sizes.
+  (doseq [live [24 64 96 160 400]]
+    (is (= {:misses 0 :entries live} (steady-misses live 20)) (str live " live vectors"))))

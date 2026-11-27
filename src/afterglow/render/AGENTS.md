@@ -49,17 +49,21 @@ and readback. Effect steps return data to the renderer.
   paths byte-equivalent. No input arrays may be mutated during a call.
 - Dense fixture/channel plans contain only final fields and persistent values.
   Owned mutable scratch belongs to an invocation, never to these shared plans.
-  The one exception is `::target-plans`, a bounded memo (128 slots) of each
-  typed batch's target indices and the attributes all its targets support. Only
-  a `PersistentVector` of target IDs is memoized, keyed weakly by its identity.
+  The one exception is `::target-plans`, a bounded memo of each typed batch's
+  target indices and the attributes all its targets support. Only a
+  `PersistentVector` of target IDs is memoized, keyed weakly by its identity.
   A hit also needs the patch's own `:by-id` and `:target-order` and rows that
   still match the plan, because `vec` of a small `Object[]` aliases the array.
   Hold one vector per compiled effect to hit it. Entries are immutable once
   published; never write to their shared `int[]` indices. A failed check is not
-  cached and still reports the first row. A miss clears entries whose vectors
-  were collected, so retired effects free their plans on the next new vector.
-  Until then the memo retains at most 128 index arrays: measured 4.9 MB for
-  128 stale 10,000-row reordered subsets on JDK 25 (prefix groups hold none).
+  cached and still reports the first row. A new plan never evicts a live one:
+  a full 8-slot probe window doubles the table (128 slots, up to 2048), and
+  past that the plan is not cached. A miss clears entries whose vectors were
+  collected, so retired effects free their plans on the next new vector. Until
+  then the memo retains the index arrays of recently dropped vectors: measured
+  4.9 MB for 127 stale 10,000-row reordered subsets on JDK 25 (prefix groups
+  hold none). Fixtures with equal support share one interned set, so
+  computing a plan intersects only distinct sets and allocates nothing else.
 - `ir/compile-batch` compiles scalar float64 components without eval or generated
   Clojure code. `evaluate-batch` returns independent named fields, including aim
   (vec3) and focus (number). It is CPU batching, not SIMD. Exact numeric inputs
