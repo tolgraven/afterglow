@@ -283,3 +283,25 @@
   ;; the table instead. Identity hashes differ per run, so use several sizes.
   (doseq [live [24 64 96 160 400]]
     (is (= {:misses 0 :entries live} (steady-misses live 20)) (str live " live vectors"))))
+
+(deftest a-miss-sweeps-a-bounded-run-of-stale-plans
+  ;; Each miss clears at most 32 stale slots, continuing from the last, so a
+  ;; burst of new target vectors does not sweep the whole table per vector
+  ;; (tolgraven/tolglow#810), and every stale plan is still released.
+  (let [patch (frame/compile-patch (mixed-rig))
+        pixels (ids "p" 12)
+        held (vec (for [i (range 600)] (vec (take (inc (mod i 12)) (drop (mod i 5) (cycle pixels))))))]
+    (doseq [v held] (#'frame/target-plan patch v))
+    (let [filled (memo-entries patch)
+          ;; The same rig under new patch fields: every held plan is stale for it.
+          moved (assoc patch :by-id (into {} (:by-id patch)))
+          fresh (vec (for [i (range 200)] (vec (take (inc (mod i 12)) (drop (mod i 7) (cycle pixels))))))
+          slots (.length ^java.util.concurrent.atomic.AtomicReferenceArray
+                         (.get ^java.util.concurrent.atomic.AtomicReference (.-table ^afterglow.render.frame.TargetPlans (::frame/target-plans patch))))]
+      (is (< 128 filled))
+      (#'frame/target-plan moved (first fresh))
+      (is (<= (- filled 32) (dec (memo-entries patch)) filled) "one miss clears at most 32 stale plans")
+      (doseq [v (rest fresh)] (#'frame/target-plan moved v))
+      (is (<= (quot slots 32) (count fresh)) "these misses cover the whole table")
+      (is (= (count fresh) (memo-entries patch))
+          "after a full sweep only the moved patch's plans remain"))))

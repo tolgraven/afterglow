@@ -231,34 +231,14 @@
          (:done? (musical-time/sample timer clock))
          (>= (:time-ms clock) (+ (:release-at-ms instance) (get instance :release-duration-ms 0))))))
 
-(defn launch-program
-  "The program `advance` compiles for a launch of `definition` with launch
-  `targets`: the definition narrowed to those targets. This value is the
-  compile key, so hosts that compile ahead of the frame must key their
-  programs with it rather than repeat the rule.
-
-  - nil `targets` (an untargeted launch) leaves the definition unchanged;
-  - with authored `:targets`, the launch keeps the authored targets it
-    names, in launch order; targets the definition does not author are
-    dropped, so a disjoint set narrows to `[]`;
-  - without authored `:targets`, the launch targets are used as given, so
-    an empty vector stays `[]` and is never read as untargeted.
-
-  Targets are compared by exact equality and never normalised: duplicates
-  are kept and keyword and string IDs are distinct.
-
-  The captured registry definition stays on the instance verbatim for reload,
-  validation and persistence."
-  [definition targets]
+(defn- render-definition
+  "Narrow a compiled program for one launch. The captured registry definition
+  remains available verbatim for reload, validation and persistence."
+  [{:keys [definition targets]}]
   (if (nil? targets) definition
       (assoc definition :targets (if-let [authored (:targets definition)]
                                    (filterv (set authored) targets)
                                    targets))))
-
-(defn- render-definition
-  "Narrow a compiled program for one launch (see `launch-program`)."
-  [{:keys [definition targets]}]
-  (launch-program definition targets))
 
 (defn instance-lifecycle
   "Read a live instance at this frame's private clock, before running its step.
