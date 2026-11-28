@@ -152,6 +152,60 @@
       (rejected history :not-a-history-child)
       :else (travel history targets node-id))))
 
+(defn open-gestures
+  "Open gestures by target. Each names its owner (:actor, :control-id,
+  :gesture-id), its :last-sequence accepted sample and :temporary? when set,
+  which is what an end or cancel under that owner must carry."
+  [history]
+  (into {} (map (fn [[target gesture]]
+                  [target (select-keys gesture [:actor :control-id :gesture-id :last-sequence :temporary?])]))
+        (:open history)))
+
+(defn tracked-targets
+  "Every target the tree refers to: retained edits, open gestures and
+  tracked generations."
+  [{:keys [nodes open generations]}]
+  (into (into (set (keys open)) (keys generations)) (keep :target) (vals nodes)))
+
+(defn remove-targets
+  "Drop every edit to `targets`, as when the cells they wrote are discarded.
+  A child of a removed edit attaches to its nearest remaining ancestor, and a
+  cursor on a removed edit moves there. Node IDs keep their order, so each
+  parent still precedes its children. Open gestures and generations of those
+  targets are dropped. A changed tree advances the position token, so travel
+  computed against the old tree is refused."
+  [{:keys [nodes cursor open generations] :as history} targets]
+  (let [targets (set targets)
+        removed (into #{} (keep (fn [[id node]] (when (contains? targets (:target node)) id))) nodes)
+        live (fn [id] (loop [id id] (if (contains? removed id) (recur (get-in nodes [id :parent])) id)))
+        tracked? (some #(contains? targets %) (concat (keys open) (keys generations)))]
+    (if (and (empty? removed) (not tracked?))
+      history
+      (cond-> (assoc history
+                     :open (reduce dissoc (or open {}) targets)
+                     :generations (reduce dissoc (or generations {}) targets))
+        (seq removed)
+        (-> (assoc :nodes (into {} (keep (fn [[id node]]
+                                          (when-not (contains? removed id)
+                                            [id (cond-> node (some? (:parent node)) (update :parent live))])))
+                                nodes)
+                   :cursor (live cursor))
+            (assoc :position (inc (position history))))))))
+
+(defn retarget
+  "Address every edit, open gesture and generation of `from` to `to`, as when
+  a cell passes to a new owner holding the same value and generation. Refuses
+  a `to` the tree already tracks. Cursor, node IDs and position are unchanged."
+  [{:keys [nodes open generations] :as history} from to]
+  (when (contains? (tracked-targets history) to)
+    (throw (ex-info "Edit history already tracks the destination target" {:from from :to to})))
+  (let [rename (fn [entries] (if (contains? entries from)
+                               (-> entries (dissoc from) (assoc to (get entries from)))
+                               entries))]
+    (cond-> (assoc history :nodes (update-vals nodes #(if (= from (:target %)) (assoc % :target to) %)))
+      open (assoc :open (rename open))
+      generations (assoc :generations (rename generations)))))
+
 (defn apply-action
   "Return next history and canonical writes for one admitted action. Commit both
   together through the show reducer, after validating all writes against current

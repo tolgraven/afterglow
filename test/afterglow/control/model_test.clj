@@ -1134,3 +1134,82 @@
     (is (= 0.6 (get-in undo [:instances id :params :level])))
     (is (= 0.5 (get-in undo [:settings :example])))
     (is (= (:ack mixed) (:ack (model/apply-domain-command undo cmd operation))))))
+
+(def ^:private staged-hooks
+  "A host target kind holding staged values at [:settings :staged id param]."
+  {:staged-param
+   {:cell (fn [m [_ id param]]
+            (when-let [value (get-in m [:settings :staged id param])]
+              {:value value :schema (get-in effect [:params param])}))
+    :write (fn [m [_ id param] value]
+             {:model (assoc-in m [:settings :staged id param] value)
+              :events [{:type :staged/changed :stage-id id :param param :value value}]})
+    :display (fn [_ [_ id]] {:cue-id :red :cue-label (str "Staged " id)})}})
+
+(deftest host-edit-targets-share-the-history-without-instance-events
+  (let [authority (assoc studio-operator ::model/edit-targets staged-hooks)
+        host! (fn [show operation]
+                (let [{:keys [model ack events]} (model/apply-command show (operator-command show operation) authority)]
+                  (when-not (= :accepted (:status ack)) (throw (ex-info "Host command rejected" ack)))
+                  (vary-meta model assoc ::events events)))
+        target [:staged-param "s" :level]
+        gesture {:edit-target target :control-id :knob :gesture-id "stage-1"}
+        show (-> (apply! (configured) {:op :cue/launch :cue-id :red})
+                 (assoc-in [:settings :staged "s"] {:level 0.5 :shape :sine}))
+        id (first (keys (:instances show)))
+        sampled (-> show
+                    (host! (assoc gesture :op :gesture/begin))
+                    (host! (assoc gesture :op :gesture/sample :sequence 1 :value 0.8)))
+        staged (host! sampled (assoc gesture :op :gesture/end :last-sequence 1))
+        mixed (turn! staged (knob id :level :after-stage) 0.9)]
+    (testing "a host gesture records one step labelled by its display hook"
+      (is (= 0.8 (get-in staged [:settings :staged "s" :level])))
+      (is (= {:parent 0 :target target :actor "studio-panel" :control-id :knob :before 0.5 :after 0.8
+              :generation 0 :target-display {:cue-id :red :cue-label "Staged s"}}
+             (get-in staged [:control :edit-history :nodes 1])))
+      (is (= [{:type :staged/changed :stage-id "s" :param :level :value 0.8}] (::events (meta sampled)))))
+    (testing "travel across host and instance steps writes each through its own path"
+      (let [undone (host! (host! mixed {:op :history/undo :expected-cursor 2}) {:op :history/undo :expected-cursor 1})]
+        (is (= [0.5 0.6] [(get-in undone [:settings :staged "s" :level]) (get-in undone [:instances id :params :level])]))
+        (is (= [{:type :staged/changed :stage-id "s" :param :level :value 0.5}] (::events (meta undone))))))
+    (testing "without the hooks a host target is unavailable and its gesture is refused"
+      (let [instance-undone (operator! mixed {:op :history/undo :expected-cursor 2})]
+        (is (= :target-unavailable
+               (get-in (model/apply-command instance-undone
+                                            (operator-command instance-undone {:op :history/undo :expected-cursor 1})
+                                            studio-operator)
+                       [:ack :code]))
+            "the instance's newer edit undoes; the staged edit behind it cannot be crossed"))
+      (let [{:keys [ack]} (model/apply-command staged (operator-command staged (assoc gesture :op :gesture/begin
+                                                                                      :gesture-id "stage-2"))
+                                               studio-operator)]
+        (is (= :invalid-gesture (:code ack)))))
+    (testing "a non-numeric host cell has no history step; a malformed target is refused"
+      (is (= :target-unavailable
+             (get-in (model/apply-command staged (operator-command staged {:op :gesture/begin :edit-target [:staged-param "s" :shape]
+                                                                         :control-id :knob :gesture-id "shape"})
+                                          authority) [:ack :code])))
+      (is (= :invalid-gesture
+             (get-in (model/apply-command staged (operator-command staged {:op :gesture/begin :edit-target [:staged-param "s"]
+                                                                         :control-id :knob :gesture-id "short"})
+                                          authority) [:ack :code]))))
+    (testing "an outside host write advances the generation, so undo conflicts"
+      (let [touched (-> staged (assoc-in [:settings :staged "s" :level] 0.3) (model/touch-edit-target target))]
+        (is (= 1 (get-in touched [:control :edit-history :generations target])))
+        (is (= :history-conflict
+               (get-in (model/apply-command touched (operator-command touched {:op :history/undo :expected-cursor 1}) authority)
+                       [:ack :code])))))
+    (testing "retargeting hands the steps to an instance; removing splices them out"
+      (let [launched (-> (apply! staged {:op :cue/launch :cue-id :red :launch {:params {:level 0.8}}}))
+            new-id (last (sort (keys (:instances launched))))
+            moved (model/retarget-edit-history launched target [:instance-param new-id :level])
+            undone (operator! moved {:op :history/undo :expected-cursor 1})
+            removed (model/remove-edit-history-targets staged [target])]
+        (is (= 0.5 (get-in undone [:instances new-id :params :level])))
+        (is (= {0 {:parent nil}} (get-in removed [:control :edit-history :nodes])))
+        (is (= 0 (get-in removed [:control :edit-history :cursor])))
+        (is (empty? (get-in removed [:control :edit-history :generations])))))
+    (testing "a save closes an open host gesture without a cell"
+      (let [open (host! staged (assoc gesture :op :gesture/begin :gesture-id "stage-3"))]
+        (is (= (get-in staged [:control :edit-history :nodes]) (:nodes (model/edit-history-snapshot open))))
+        (is (nil? (:open (model/edit-history-snapshot open))))))))

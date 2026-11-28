@@ -534,8 +534,12 @@
 (defn- edit-history-operation? [op]
   (or (gesture-operations op) (#{:history/undo :history/redo :history/select} op)))
 
-(defn- parameter-target [{:keys [instance-id param]}]
-  [:instance-param instance-id param])
+(defn- parameter-target [{:keys [instance-id param edit-target]}]
+  (or edit-target [:instance-param instance-id param]))
+
+(defn- host-target? [hooks [kind id param :as target]]
+  (and (vector? target) (= 3 (count target)) (keyword? kind) (not= :instance-param kind)
+       (identifier? id) (keyword? param) (some? (get hooks kind))))
 
 (defn- target-label [id label]
   (if (and (string? label) (seq label))
@@ -544,16 +548,20 @@
 
 (defn edit-target-display
   "Return portable cue/effect labels for a live edit target. Completed edits
-  retain these labels independently of their target's availability."
-  [model [kind id]]
-  (when (= :instance-param kind)
-    (let [{:keys [cue-id effect-id definition]} (get-in model [:instances id])]
-      (not-empty
-        (cond-> {}
-          (identifier? cue-id)
-          (assoc :cue-id cue-id :cue-label (target-label cue-id (get-in model [:registry :cues cue-id :name])))
-          (identifier? effect-id)
-          (assoc :effect-id effect-id :effect-label (target-label effect-id (:name definition))))))))
+  retain these labels independently of their target's availability. A host
+  target kind supplies its labels through its :display hook."
+  ([model target] (edit-target-display model target nil))
+  ([model [kind id :as target] hooks]
+   (if (= :instance-param kind)
+     (let [{:keys [cue-id effect-id definition]} (get-in model [:instances id])]
+       (not-empty
+         (cond-> {}
+           (identifier? cue-id)
+           (assoc :cue-id cue-id :cue-label (target-label cue-id (get-in model [:registry :cues cue-id :name])))
+           (identifier? effect-id)
+           (assoc :effect-id effect-id :effect-label (target-label effect-id (:name definition))))))
+     (when-let [display (get-in hooks [kind :display])]
+       (not-empty (select-keys (display model target) [:cue-id :cue-label :effect-id :effect-label]))))))
 
 (defn- live-parameter-cell [instance param temporary?]
   (let [schema (get-in instance [:definition :params param])
@@ -563,12 +571,62 @@
                (params/valid-value? schema value))
       {:type (:type schema) :value value})))
 
-(defn- history-cell [model history [kind id param :as target] temporary?]
-  (when (= :instance-param kind)
+(defn- host-cell
+  "A host target's live cell: {:value :schema} from its :cell hook, held to
+  the same numeric and schema rules as an instance parameter."
+  [model hooks [kind :as target] temporary?]
+  (when-let [cell-of (get-in hooks [kind :cell])]
+    (let [{:keys [value schema]} (cell-of model target)]
+      (when (and (map? schema)
+                 (or temporary? (#{:number :integer} (:type schema)))
+                 (params/valid-value? schema value))
+        {:type (:type schema) :value value :schema schema}))))
+
+(defn- history-cell [model history [kind id param :as target] temporary? & [hooks]]
+  (if (= :instance-param kind)
     (let [instance (get-in model [:instances id])]
       (when-let [cell (live-parameter-cell instance param temporary?)]
         (cond-> (assoc cell :generation (get-in history [:generations target] 0))
-          temporary? (assoc :schema (get-in instance [:definition :params param])))))))
+          temporary? (assoc :schema (get-in instance [:definition :params param])))))
+    (when-let [cell (host-cell model hooks target temporary?)]
+      (cond-> (assoc cell :generation (get-in history [:generations target] 0))
+        (not temporary?) (dissoc :schema)))))
+
+(defn- write-target
+  "Commit one history write. Instance parameters use :param/set; a host
+  target kind writes through its :write hook, returning :model and :events."
+  [model hooks [kind id param :as target] value]
+  (if (= :instance-param kind)
+    (apply-operation model {:op :param/set :instance-id id :param param :value value})
+    (let [{next-model :model events :events} ((get-in hooks [kind :write]) model target value)]
+      (require! (map? next-model) :invalid-history-target "A host edit target must return the next model")
+      {:model next-model :events (vec events)})))
+
+(defn touch-edit-target
+  "Advance a tracked target's generation after a host write outside the
+  history commands, as :param/set does for instance parameters, so undo and
+  cancel cannot claim a value the host replaced. Untracked targets are left
+  alone."
+  [model target]
+  (if (some? (get-in model [:control :edit-history :generations target]))
+    (update-in model [:control :edit-history :generations target] inc)
+    model))
+
+(defn retarget-edit-history
+  "Move a host target's edits and generation to a new target, as when the
+  host hands the cell to a launched instance holding the same value."
+  [model from to]
+  (if (get-in model [:control :edit-history])
+    (update-in model [:control :edit-history] edit-history/retarget from to)
+    model))
+
+(defn remove-edit-history-targets
+  "Discard every edit to the given targets, splicing the tree around them.
+  See edit-history/remove-targets."
+  [model targets]
+  (if (get-in model [:control :edit-history])
+    (update-in model [:control :edit-history] edit-history/remove-targets targets)
+    model))
 
 (defn track-parameter-generations
   "Advance tracked parameter generations across an instance transition outside
@@ -622,32 +680,38 @@
               (sort-by (comp pr-str key) (:open history)))
       :open)))
 
-(defn- apply-history-operation [model {:keys [op instance-id param control-id gesture-id] :as command} operator-id]
+(defn- apply-history-operation [model {:keys [op instance-id param control-id gesture-id edit-target] :as command}
+                                operator-id & [hooks]]
   (let [gesture? (gesture-operations op)
         target (when gesture? (parameter-target command))
         history (or (get-in model [:control :edit-history]) (edit-history/new-history edit-history-limit))
         _ (when gesture?
-            (require! (and (identifier? instance-id) (keyword? param)
+            (require! (and (if (contains? command :edit-target)
+                             (and (nil? instance-id) (host-target? hooks edit-target))
+                             (and (identifier? instance-id) (keyword? param)))
                            (identifier? control-id) (identifier? gesture-id))
                       :invalid-gesture "Gesture needs an instance, parameter, control and gesture ID"))
         temporary? (if (= :gesture/begin op) (true? (:temporary? command))
                       (get-in history [:open target :temporary?]))
+        rollback-schema (when (and (= :gesture/cancel op) temporary?)
+                          (if edit-target
+                            (:schema (host-cell model hooks target true))
+                            (get-in model [:instances instance-id :definition :params param])))
         ;; A reload can keep the sampled value while invalidating the rollback.
         invalid-rollback? (and (= :gesture/cancel op) temporary?
-                               (not (params/valid-value? (get-in model [:instances instance-id :definition :params param])
-                                                         (get-in history [:open target :before]))))
+                               (not (params/valid-value? rollback-schema (get-in history [:open target :before]))))
         targets (if gesture? (when-not invalid-rollback? [target]) (keys (:generations history)))
         cells (into {} (keep (fn [target]
-                               (when-let [cell (history-cell model history target temporary?)]
+                               (when-let [cell (history-cell model history target temporary? hooks)]
                                  [target cell]))) targets)
         action (cond-> (assoc command :actor operator-id :target target)
-                 (= :gesture/end op) (assoc :target-display (edit-target-display model target)))
+                 (= :gesture/end op) (assoc :target-display (edit-target-display model target hooks)))
         proposal (edit-history/apply-action history cells action)
         _ (require! (= :accepted (:status proposal)) (:code proposal)
                     "Edit history command rejected" (select-keys proposal [:target]))
         next-history (retain-history-generations (:history proposal) op target)
-        result (reduce (fn [{:keys [model events]} [[_ id param] value]]
-                         (let [write (apply-operation model {:op :param/set :instance-id id :param param :value value})]
+        result (reduce (fn [{:keys [model events]} [target value]]
+                         (let [write (write-target model hooks target value)]
                            {:model (:model write) :events (into events (:events write))}))
                        {:model model :events []}
                        (sort-by (comp pr-str key) (:writes proposal)))]
@@ -661,8 +725,9 @@
   Return the settled gestures so hosts can release corresponding runtime holds.
   The live model, receipts and revision remain untouched."
   [model]
-  (reduce-kv (fn [{:keys [model] :as projection} [_ id param :as target] {:keys [actor temporary?] :as gesture}]
-               (if temporary?
+  (reduce-kv (fn [{:keys [model] :as projection} [kind id param :as target] {:keys [actor temporary?] :as gesture}]
+               ;; A host target is not saved; edit-history-snapshot closes its gesture without a cell.
+               (if (and temporary? (= :instance-param kind))
                  (let [cancel (assoc gesture :op :gesture/cancel :instance-id id :param param)
                        result (apply-history-operation model cancel actor)]
                    (-> projection (assoc :model (:model result)) (assoc-in [:settled target] gesture)))
@@ -717,7 +782,7 @@
                       :stale-revision "Show revision changed"))
           (when (contains? command :time-ms) (time! model command))
           (let [{next-model :model events :events result :result}
-                (if operator-id (apply-history-operation model command operator-id)
+                (if operator-id (apply-history-operation model command operator-id (::edit-targets authority))
                     (track-external-write model command (operation model command)))
                 updated (cond-> (update next-model :revision inc)
                           (contains? command :time-ms) (assoc :time-ms (:time-ms command)))
@@ -772,7 +837,20 @@
   History navigation checks both the expected cursor and the edit-tree position
   within the show epoch, including after a retry receipt has been evicted.
   Ordinary :param/set keeps its original validation and numeric representation.
-  Generation tracking compares canonical model values using Clojure equality."
+  Generation tracking compares canonical model values using Clojure equality.
+
+  A host can register edit target kinds besides :instance-param, such as a
+  staged cue's parameters, under ::edit-targets in the authority:
+  {kind {:cell (fn [model target]) -> {:value :schema} or nil when unavailable,
+         :write (fn [model target value]) -> {:model :events},
+         :display (fn [model target]) -> cue/effect labels}}.
+  A gesture then names its target as :edit-target [kind id param] in place of
+  :instance-id and :param. History travel reads and writes those targets
+  through the same hooks, so their writes emit the host's events, never
+  :param/changed. Hooks are host functions supplied per call; they are not
+  saved, and edit-history-snapshot closes an open host gesture without a cell.
+  Use touch-edit-target after other host writes, and retarget-edit-history or
+  remove-edit-history-targets when the host hands a cell on or discards it."
   ([model command] (apply-command model command nil))
   ([model command authority] (admit-command model command authority apply-operation)))
 

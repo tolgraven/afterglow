@@ -169,3 +169,62 @@
     (is (= 6 (get-in rolled [:history :cursor])))
     (is (= 0.4 (get-in boundary [:targets level :value])))
     (is (= :at-history-root (:code (propose boundary (navigation boundary :history/undo)))))))
+
+(def staged [:staged-param "s" :level])
+
+(def staged-level {:actor "studio" :control-id "stage" :target staged :gesture-id "staged-1"})
+
+(defn- with-staged [show value]
+  (assoc-in show [:targets staged] {:value value :generation 0}))
+
+(deftest removing-targets-splices-their-edits-and-keeps-travel-valid
+  (let [show (-> (new-show 16) (with-staged 0.7)
+                 (edit push-level 0.4)                                        ; 1
+                 (edit staged-level 0.3)                                      ; 2
+                 (edit (assoc push-level :gesture-id "level-2") 0.5))         ; 3, child of the staged edit
+        branched (-> show (navigate :history/undo) (navigate :history/undo)
+                     (edit (assoc push-level :gesture-id "level-3") 0.6))     ; 4, from 1
+        removed (history/remove-targets (:history branched) [staged])
+        spliced (assoc branched :history removed :targets (dissoc (:targets branched) staged))]
+    (testing "children attach to the nearest remaining ancestor and IDs keep their order"
+      (is (= {0 nil 1 0 3 1 4 1} (update-vals (:nodes removed) :parent)))
+      (is (every? (fn [[id {:keys [parent]}]] (or (nil? parent) (< parent id))) (:nodes removed)))
+      (is (= 4 (:cursor removed)))
+      (is (= (inc (history/position (:history branched))) (history/position removed)))
+      (is (not (contains? (:generations removed) staged)))
+      (is (not (contains? (history/tracked-targets removed) staged))))
+    (testing "travel computed against the old tree is refused"
+      (is (= :stale-history-position (:code (propose spliced (navigation branched :history/undo))))))
+    (testing "the spliced tree still travels and redoes into the reattached edit"
+      (let [undone (navigate spliced :history/undo)
+            redone (navigate undone :history/redo 3)]
+        (is (= 0.4 (get-in undone [:targets level :value])))
+        (is (= 0.5 (get-in redone [:targets level :value])))))
+    (testing "a cursor on a removed edit moves to its ancestor"
+      (let [at-staged (navigate (navigate show :history/undo) :history/select 2)]
+        (is (= 1 (:cursor (history/remove-targets (:history at-staged) [staged]))))))
+    (testing "an untracked target changes nothing"
+      (is (identical? removed (history/remove-targets removed [[:staged-param "other" :level]]))))
+    (testing "an open gesture on a removed target is dropped"
+      (let [open (gesture (with-staged (new-show 4) 0.7) :gesture/begin staged-level)]
+        (is (= {staged {:actor "studio" :control-id "stage" :gesture-id "staged-1" :last-sequence 0}}
+               (history/open-gestures (:history open))))
+        (is (= {} (:open (history/remove-targets (:history open) [staged]))))))
+    (testing "pruning after a splice keeps a single root"
+      (let [bounded (reduce (fn [show n] (edit show (assoc push-level :gesture-id (str "p" n)) (/ n 10.0)))
+                            (assoc spliced :history (assoc removed :limit 4)) (range 1 6))]
+        (is (= 1 (count (filter #(= {:parent nil} %) (vals (get-in bounded [:history :nodes]))))))
+        (is (<= (count (get-in bounded [:history :nodes])) 4))))))
+
+(deftest retargeting-moves-edits-to-a-new-owner
+  (let [show (-> (new-show 8) (with-staged 0.7) (edit staged-level 0.3) (edit (assoc staged-level :gesture-id "staged-2") 0.35))
+        moved-target [:instance-param "1:2" :level]
+        moved (history/retarget (:history show) staged moved-target)
+        launched (-> show (assoc :history moved)
+                     (update :targets #(-> % (dissoc staged) (assoc moved-target (get % staged)))))]
+    (is (= [moved-target moved-target] (keep :target (vals (:nodes moved)))))
+    (is (= {moved-target 3} (:generations (history/retarget (assoc (:history show) :generations {staged 3})
+                                                            staged moved-target))))
+    (is (= (select-keys (:history show) [:cursor :position :next-id]) (select-keys moved [:cursor :position :next-id])))
+    (is (= 0.3 (get-in (navigate launched :history/undo) [:targets moved-target :value])))
+    (is (thrown? clojure.lang.ExceptionInfo (history/retarget moved staged moved-target)))))
