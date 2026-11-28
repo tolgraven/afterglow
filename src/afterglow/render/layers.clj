@@ -3,6 +3,7 @@
   assignment/batch rows and performs geometry and channel packing after composition."
   (:require [afterglow.runtime.faults :as faults]
             [afterglow.render.hdr :as hdr]
+            [afterglow.render.typed-layers :as typed]
             [thi.ng.color.core :as color]))
 
 (defn- fail! [msg data] (throw (ex-info msg data)))
@@ -404,6 +405,88 @@
        :else result))
    [] blocks))
 
+(defn- typed-group
+  "The typed colour plan for a group, or {::typed/fallback reason} when it
+  needs the general path. A plan needs one member with at most one typed
+  :color batch, explicit or written targets, packed opacities and a
+  colour-only transform program."
+  [high? blocks]
+  (let [members (ordered-members blocks)]
+    (if (not= 1 (count members))
+      {::typed/fallback :members}
+      (let [member (first members)
+            {:keys [source native-layer] :as first-block} (first member)
+            {:keys [transforms targets inherit-backdrop? opacity target-weights] :or {opacity 1}} native-layer
+            batches (filterv #(= :batch (:kind %)) member)
+            compiled (:compiled (first batches))]
+        (cond
+          (not (and (<= (count batches) 1)
+                    (every? #(or (= :batch (:kind %)) (and (= :assignments (:kind %)) (empty? (:assignments %)))) member)
+                    (or (nil? compiled) (= [:color] (mapv :attribute (:columns compiled))))
+                    (nil? (::opacities compiled))))
+          {::typed/fallback :member-writes}
+
+          (or (some? targets) inherit-backdrop?) {::typed/fallback :previous-targets}
+
+          (not (and (packed-factor? opacity)
+                    (or (nil? target-weights) (every-weight? packed-factor? target-weights))))
+          {::typed/fallback :exact-opacity}
+
+          :else
+          (if-let [program (typed/program transforms #(evaluate high? % {}))]
+            {:descriptor native-layer :batch compiled :program program :source source
+             :gain (::hdr/member-gain first-block) :gain-target? (::hdr/gain-target? first-block)}
+            {::typed/fallback :program}))))))
+
+(defn- typed-stream
+  "Compose the stream with typed colour groups where every native group is
+  either direct or typed. Returns the blocks with ::typed/typed metadata, or
+  the reason the frame needs the general path."
+  [blocks groups planned anchors high? ctx]
+  (let [plans (reduce-kv (fn [m id group]
+                           (if (some? (planned id))
+                             m
+                             (let [plan (typed-group high? group)]
+                               (if-let [reason (::typed/fallback plan)] (reduced reason) (assoc m id plan)))))
+                         {} groups)]
+    (if (keyword? plans)
+      plans
+      (let [out (reduce-kv
+                 (fn [out i {:keys [native-layer] :as block}]
+                   (cond
+                     (nil? native-layer) (conj out block)
+                     (not= i (get anchors (:id native-layer))) out
+                     (contains? plans (:id native-layer))
+                     (if-let [entries (typed/compose-group (plans (:id native-layer)) out high? ctx)]
+                       (into out entries)
+                       (reduced :values))
+                     :else (into out (planned (:id native-layer)))))
+                 [] blocks)]
+        (if (keyword? out) out (with-meta out {::typed/typed true}))))))
+
+(defn- general-stream
+  "Compose every native group in the stream on the general path."
+  [blocks tagged groups anchors rows blend-field validate! high? supports?]
+  (let [last-anchor (apply max (vals anchors))
+        apply-row (partial set-assignment high? blend-field validate!)
+        targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
+                  (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
+                                      (concat (:target-ids native-layer)
+                                              (if (= kind :batch) (:target-ids compiled)
+                                                  (map :target-id assignments))))) tagged))]
+    (:out
+     (reduce-kv
+      (fn [{:keys [backdrop] :as state} i block]
+        (let [layer (:native-layer block)
+              entries (cond (nil? layer) [block]
+                            (= i (get anchors (:id layer)))
+                            (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate! supports?)
+                            :else [])]
+          (cond-> (update state :out into entries)
+            (< i last-anchor)
+            (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
+      {:backdrop {} :out []} blocks))))
+
 (defn compose-fields
   "Compose tagged blocks at the last member's position in the ordinary priority
   stream. Only affected target rows are read into the native backdrop. Each
@@ -413,9 +496,20 @@
   group output. Multiply the final group opacity by this weight once, after
   composing all native transforms and their inputs. Optional supports?, a
   function of target ID and attribute, skips a transform step on a head that
-  does not implement its field, as effect outputs skip such heads."
+  does not implement its field, as effect outputs skip such heads.
+
+  Optional `typed`, the patch context described by
+  `afterglow.render.typed-layers/compose-group`, composes colour-only groups
+  from typed columns into one owned typed batch each, with bytes equal to
+  this general path's. The returned vector then has
+  `:afterglow.render.typed-layers/typed` metadata. When a group sends the
+  stream to the general path instead, its metadata names the reason under
+  `:afterglow.render.typed-layers/fallback`: :members, :member-writes,
+  :previous-targets, :exact-opacity, :program or :values (a value, target or
+  field the typed path cannot reproduce)."
   ([blocks rows blend-field validate! high?] (compose-fields blocks rows blend-field validate! high? nil))
-  ([blocks rows blend-field validate! high? supports?]
+  ([blocks rows blend-field validate! high? supports?] (compose-fields blocks rows blend-field validate! high? supports? nil))
+  ([blocks rows blend-field validate! high? supports? typed]
   (if-not (some :native-layer blocks)
     blocks
     (let [tagged (filterv :native-layer blocks)
@@ -430,25 +524,11 @@
       (let [planned (update-vals groups direct-group)]
         (if (every? some? (vals planned))
         (order-direct-blocks blocks planned anchors)
-        (let [last-anchor (apply max (vals anchors))
-              apply-row (partial set-assignment high? blend-field validate!)
-              targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
-                        (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
-                                            (concat (:target-ids native-layer)
-                                                    (if (= kind :batch) (:target-ids compiled)
-                                                        (map :target-id assignments))))) tagged))]
-          (:out
-           (reduce-kv
-            (fn [{:keys [backdrop] :as state} i block]
-              (let [layer (:native-layer block)
-                    entries (cond (nil? layer) [block]
-                                  (= i (get anchors (:id layer)))
-                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate! supports?)
-                                  :else [])]
-                (cond-> (update state :out into entries)
-                  (< i last-anchor)
-                  (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks)))))))))
+        (let [typed-result (when typed (typed-stream blocks groups planned anchors high? typed))]
+          (if (vector? typed-result)
+            typed-result
+            (cond-> (general-stream blocks tagged groups anchors rows blend-field validate! high? supports?)
+              typed-result (with-meta {::typed/fallback typed-result}))))))))))
 
 (defn compose
   "Compose native layers using a common blend function for all fields."

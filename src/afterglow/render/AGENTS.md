@@ -145,6 +145,18 @@ Resolve fields and group opacity before edge tracking, pan/tilt solving, RGBW
 extraction and DMX packing. Preserve untouched attributes and the final
 contributing member's fault source. Cover both rich and compact output.
 
+`typed-layers` composes colour-only transform groups from typed columns.
+Keep it byte-equal with `layers/compose-fields`, including validation and
+faults, and fall back to the general path instead of approximating. Run
+`afterglow.render.typed-layers-test` after changing either path. Keep the
+per-head methods small enough for the JIT to compile. A method over 8,000
+bytes of bytecode stays interpreted. That was about twenty times slower here.
+On OpenJDK 25.0.2, `run-segment` is 4,652 bytes, `Rows.composeRow` 2,421 and
+`grade!` 1,067. To recheck, AOT-compile the namespace into a scratch
+`*compile-path*` and read the last instruction offset from `javap -c -p`.
+Each new opcode's macro expansion grows `run-segment` by roughly 500 bytes.
+[Typed colour layers](../../../doc/architecture/native-layers.md#typed-colour-layers)
+
 A full-opacity compound containing only physical replacement writes can move
 the original typed buffers to its anchor in slot order. Native colors, musical
 scratch fields, transforms and nontrivial blends need the typed field reducer.
