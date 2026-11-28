@@ -2,6 +2,7 @@
   "Immutable show commands. Logical time enters through the command envelope;
   accepted commands return event data, never start hardware or invoke user code."
   (:require [afterglow.runtime.events :as events]
+            [afterglow.control.bounded :as bounded]
             [afterglow.control.edit-history :as edit-history]
             [afterglow.control.effect-selection :as effect-selection]
             [afterglow.control.instance-order :as instance-order]
@@ -686,14 +687,12 @@
 
 (defn- remember [model command ack operator-id]
   (let [id (:command-id command)
-        order (conj (get-in model [:control :history-order]) id)
-        limit (get-in model [:control :history-limit])
-        remove-count (max 0 (- (count order) limit))
-        evicted (take remove-count order)
+        [order evicted] (bounded/append (vec (get-in model [:control :history-order])) id
+                                        (get-in model [:control :history-limit]))
         entry (cond-> {:command command :ack ack} operator-id (assoc :operator-id operator-id))]
     (-> model
-        (assoc-in [:control :history-order] (vec (drop remove-count order)))
-        (update-in [:control :history] #(apply dissoc (assoc % id entry) evicted)))))
+        (assoc-in [:control :history-order] order)
+        (update-in [:control :history] #(reduce dissoc (assoc % id entry) evicted)))))
 
 (defn- admit-command [model command authority operation]
   (try

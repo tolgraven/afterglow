@@ -2,7 +2,8 @@
   "Pure cue launch scheduling on the show owner's authoritative transport.
   Within one owner boundary, apply each due command using the admission clock
   and settle its receipt before processing another input or invalidation."
-  (:require [afterglow.time :as time])
+  (:require [afterglow.control.bounded :as bounded]
+            [afterglow.time :as time])
   (:import (java.math BigDecimal RoundingMode)))
 
 (defn new-state
@@ -50,11 +51,8 @@
 
 (defn- remember [state entry]
   (let [command-id (get-in entry [:receipt :command-id])
-        order (conj (:history-order state) command-id)
-        history (assoc (:history state) command-id entry)]
-    (if (> (count order) (:history-limit state))
-      (assoc state :history-order (into [] (rest order)) :history (dissoc history (first order)))
-      (assoc state :history-order order :history history))))
+        [order evicted] (bounded/append (vec (:history-order state)) command-id (:history-limit state))]
+    (assoc state :history-order order :history (reduce dissoc (assoc (:history state) command-id entry) evicted))))
 
 (defn- fail! [code message]
   (throw (ex-info message {:quantization/error code})))
