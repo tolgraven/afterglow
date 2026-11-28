@@ -43,6 +43,23 @@ nothing to the next frame. There is no cross-frame scratch state.
 | `:add`, `:multiply`, `:divide` | Two scalar or componentwise operands, including scalar/vector broadcast |
 | `:rotate-y` | World-space XYZ vector rotated about +Y by the supplied radians |
 | `:rotate-hue` | Color rotated by the supplied number of hue turns |
+| `:color-grade` | Color shaded by `[dim desaturate hue]`: hue turned at constant saturation and value, mixed toward its own Rec. 709 luminance, then scaled by `1 - dim` |
+| `:color-guard` | Color kept in a palette by `[min-saturation restriction center]`: hue moved to the nearest edge of the `1 - restriction` turn arc around `center`, then a low saturation lifted toward the floor |
+
+The two color filters take a color and three finite settings. The settings are
+usually the member's own `{:op :incoming :attribute :color}`, so an effect
+computes them per head and per frame from its typed parameters, position and
+musical clock, and the transform consumes that color in place of writing it.
+A literal triple also works. Grade dim and desaturation and every guard setting
+are clamped to [0,1]. A zero triple leaves the color unchanged (for the guard,
+any center with zero floor and restriction), so a color envelope on the member
+fades either filter in and out. The guard lifts saturation `s` below the floor
+`f` by `(f - s) * smoothstep(s / f)`: white and faint tints stay near white,
+mid-saturation mixes reach the floor, and the mapping is continuous and
+monotonic. Its hue clamp is continuous except at the hue opposite `center`.
+Both work in HSV on linear RGB and keep the value (largest component), so
+overrange HDR light keeps its excess. Neither reads explicit white, amber or
+UV emitter channels.
 
 Each operator takes its operands in `:args`. Field references can specify a
 `:default` expression for a missing value. Otherwise a missing upstream field

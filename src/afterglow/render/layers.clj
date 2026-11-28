@@ -30,7 +30,89 @@
 
 (def ^:private reads #{:previous :incoming :field})
 
-(def ^:private operators #{:add :multiply :divide :rotate-y :rotate-hue})
+(def ^:private operators #{:add :multiply :divide :rotate-y :rotate-hue :color-grade :color-guard})
+
+(def luminance-weights
+  "Linear Rec. 709 luminance of an RGB light colour. `:color-grade`
+  desaturates toward this luminance, so it keeps the perceived brightness."
+  [0.2126 0.7152 0.0722])
+
+(defn- unit-clamp ^double [x] (min 1.0 (max 0.0 (double x))))
+
+(defn- turns ^double [x] (let [x (double x)] (- x (Math/floor x))))
+
+(defn rgb->hsv
+  "Hue in turns [0,1), saturation [0,1] and value (the largest component) of a
+  nonnegative linear RGB triple. Value may exceed 1 on the HDR path. A grey
+  has hue 0 and saturation 0."
+  [[r g b]]
+  (let [r (double r) g (double g) b (double b)
+        v (max r g b) c (- v (min r g b))
+        h (cond (zero? c) 0.0
+                (== v r) (/ (- g b) c)
+                (== v g) (+ 2.0 (/ (- b r) c))
+                :else (+ 4.0 (/ (- r g) c)))]
+    [(turns (/ h 6.0)) (if (pos? v) (/ c v) 0.0) v]))
+
+(defn hsv->rgb
+  "Inverse of `rgb->hsv`. Keeps the value, so overrange light stays overrange."
+  [[h s v]]
+  (let [v (double v) s (double s)
+        h6 (* 6.0 (turns h)) sector (long (Math/floor h6)) f (- h6 sector)
+        p (* v (- 1.0 s)) q (* v (- 1.0 (* s f))) t (* v (- 1.0 (* s (- 1.0 f))))]
+    (case (mod sector 6)
+      0 [v t p] 1 [q v p] 2 [p v t] 3 [p q v] 4 [t p v] [v p q])))
+
+(defn- settings! [op x]
+  (when-not (and (vector? x) (= 3 (count x)) (every? finite? x))
+    (fail! (str (name op) " needs a color and three finite settings") {:settings x}))
+  x)
+
+(defn color-grade
+  "Shade a light colour by `[dim desaturate hue]`. Rotate its hue by `hue`
+  turns at constant saturation and value, mix it toward its own luminance by
+  `desaturate`, then scale it by `1 - dim`. dim and desaturate are clamped to
+  [0,1]. `[0 0 0]` leaves the colour unchanged, so a fading coefficient fades
+  the grade out. Components never leave [0, max component]."
+  [rgb [dim desaturate hue]]
+  (let [[r g b] (if (zero? (double hue)) rgb
+                    (let [[h s v] (rgb->hsv rgb)] (hsv->rgb [(+ h (double hue)) s v])))
+        k (unit-clamp desaturate)
+        [wr wg wb] luminance-weights
+        lum (+ (* (double wr) (double r)) (* (double wg) (double g)) (* (double wb) (double b)))
+        top (max (double r) (double g) (double b))
+        gain (- 1.0 (unit-clamp dim))]
+    ;; The weights sum to one only within rounding, so bound the mix by the
+    ;; brightest input component: white stays exactly white.
+    (mapv #(* gain (min top (max 0.0 (+ (double %) (* k (- lum (double %))))))) [r g b])))
+
+(defn- smoothstep ^double [^double t]
+  (let [t (unit-clamp t)] (* t t (- 3.0 (* 2.0 t)))))
+
+(defn color-guard
+  "Keep a light colour inside an operator's palette with
+  `[min-saturation restriction center]`, each clamped to [0,1].
+
+  The hue first moves to the nearest edge of the arc of `1 - restriction`
+  turns centred on `center` turns: restriction 0 allows every hue and 1 locks
+  every colour to `center`. Then a saturation below `min-saturation` rises
+  toward it by `smoothstep(s / min-saturation)`. Whites and faint tints stay
+  close to white, and mid-saturation mixes reach the floor. The mapping is
+  continuous in saturation, and in hue except opposite `center`. Value is kept.
+  `[0 0 c]` leaves every colour unchanged."
+  [rgb [min-saturation restriction center]]
+  (let [floor (unit-clamp min-saturation)
+        half (* 0.5 (- 1.0 (unit-clamp restriction)))
+        [h s v] (rgb->hsv rgb)
+        centre (turns (unit-clamp center))
+        offset (- (turns (+ (- h centre) 0.5)) 0.5)
+        h (if (and (pos? s) (> (Math/abs offset) half))
+            (turns (+ centre (if (neg? offset) (- half) half)))
+            h)
+        s (if (and (pos? floor) (< s floor))
+            (+ s (* (- floor s) (smoothstep (/ s floor))))
+            s)]
+    (hsv->rgb [h s v])))
 
 (defn- validate-expr! [x depth]
   (cond
@@ -79,7 +161,11 @@
                           (let [[x y z] a c (Math/cos b) s (Math/sin b)]
                             [(+ (* x c) (* z s)) y (- (* z c) (* x s))]))
             :rotate-hue (do (when-not (finite? b) (fail! "rotate-hue needs a color and turns" {}))
-                            (color/rotate-hue (typed high? :color a) (* 2.0 Math/PI b)))))))))
+                            (color/rotate-hue (typed high? :color a) (* 2.0 Math/PI b)))
+            (:color-grade :color-guard)
+            (let [light (rgb (typed high? :color a))
+                  f (if (= op :color-grade) color-grade color-guard)]
+              (typed high? :color (f light (settings! op (rgb b)))))))))))
 
 (defn- over [high? blend-field id field before value blend opacity]
   (typed high? field (blend-field id field (rgb before) (rgb value) blend opacity)))
