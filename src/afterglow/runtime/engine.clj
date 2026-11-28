@@ -241,7 +241,11 @@
   - with authored `:targets`, the launch keeps the authored targets it
     names, in launch order; targets the definition does not author are
     dropped, so a disjoint set narrows to `[]`;
-  - without authored `:targets`, the launch targets are used as given.
+  - without authored `:targets`, the launch targets are used as given, so
+    an empty vector stays `[]` and is never read as untargeted.
+
+  Targets are compared by exact equality and never normalised: duplicates
+  are kept and keyword and string IDs are distinct.
 
   The captured registry definition stays on the instance verbatim for reload,
   validation and persistence."

@@ -326,12 +326,14 @@
       (is (identical? definition (engine/launch-program definition nil))))
     (testing "without authored targets the launch targets apply as given"
       (is (= [:c :a] (:targets (engine/launch-program definition [:c :a]))))
-      (is (= [] (:targets (engine/launch-program definition [])))))
+      (is (= [] (:targets (engine/launch-program definition []))))
+      (is (= [:a :a "a"] (:targets (engine/launch-program definition [:a :a "a"])))))
     (testing "authored targets keep only the named ones, in launch order"
       (is (= [:b] (:targets (engine/launch-program authored [:b]))))
       (is (= [:c :a] (:targets (engine/launch-program authored [:c :a]))))
       (is (= [] (:targets (engine/launch-program authored [:x]))))
-      (is (= [] (:targets (engine/launch-program authored [])))))
+      (is (= [] (:targets (engine/launch-program authored []))))
+      (is (= [:b :b] (:targets (engine/launch-program authored [:b "b" :b])))))
     (testing "nothing else in the definition changes"
       (is (= (dissoc authored :targets) (dissoc (engine/launch-program authored [:b]) :targets))))))
 
@@ -339,18 +341,23 @@
   ;; A host compiling ahead keys programs with `launch-program`; the engine
   ;; must compile the same values, one per distinct narrowed definition.
   (let [authored (assoc definition :targets [:a :b :c])
+        open (assoc definition :id :open)
         instances [(instance "whole" :definition authored)
                    (instance "b" :definition authored :targets [:b] :order 1)
                    (instance "b-again" :definition authored :targets [:b :x] :order 2)
                    (instance "ca" :definition authored :targets [:c :a] :order 3)
-                   (instance "none" :definition authored :targets [:x] :order 4)]
+                   (instance "none" :definition authored :targets [:x] :order 4)
+                   ;; An empty launch of an untargeted definition is not untargeted.
+                   (instance "empty" :effect-id :open :cue-id :open :definition open :targets [] :order 5)]
         compiled (atom [])
-        show (assoc-in (apply model instances) [:registry :effects :pulse] authored)]
+        show (assoc-in (apply model instances) [:registry :effects :open] open)]
     (engine/advance show {:time-ms 1}
                     (fn [program] (swap! compiled conj program) (compiler program)))
     (is (= (set (map #(engine/launch-program (:definition %) (:targets %)) instances))
            (set @compiled)))
-    (is (= 4 (count @compiled)) "[:b] and [:b :x] narrow to one program")
+    (is (= 5 (count @compiled)) "[:b] and [:b :x] narrow to one program")
+    (is (some #{(assoc open :targets [])} @compiled)
+        "an empty launch of an untargeted definition compiles with no targets, not untargeted")
     (is (= (count @compiled) (count (distinct @compiled))))))
 
 (deftest effect-failures-preserve-input-and-isolate-attempts
