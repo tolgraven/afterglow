@@ -84,18 +84,101 @@
         (is (identical? next-value (calc {:v 0.75})))
         (is (= [0.75 0.5] (vec (get-in next-value [:outputs :red :values]))))
         (is (= 2 @calls))))
-    (testing "the bound still limits retained array elements"
-      (let [big (reuse/evaluator {:pure? true :inputs [[:v]] :max-values 12 :shared-outputs? true}
+    (testing "shared array elements count against bytes, not :max-values"
+      (let [long-array (reuse/evaluator {:pure? true :inputs [[:v]] :max-values 12 :shared-outputs? true}
+                                        (fn [_] (swap! calls inc) {:values (double-array 16)}))]
+        (is (identical? (long-array {:v 1}) (long-array {:v 1})))
+        (is (= 3 @calls)))
+      (let [big (reuse/evaluator {:pure? true :inputs [[:v]] :max-values 12 :shared-outputs? true
+                                  :max-shared-bytes 127}
                                  (fn [_] (swap! calls inc) {:values (double-array 16)}))]
         (is (not (identical? (big {:v 1}) (big {:v 1}))))
-        (is (= 4 @calls))))
+        (is (= 5 @calls))))
     (testing "the default still gives each caller private arrays"
       (let [private (reuse/evaluator {:pure? true :inputs [[:v]]}
                                      (fn [_] {:values (double-array [1.0])}))
             a (private {:v 1}) b (private {:v 1})]
         (is (not (identical? (:values a) (:values b))))))
     (is (thrown? clojure.lang.ExceptionInfo
-                 (reuse/evaluator {:pure? true :inputs [] :shared-outputs? :yes} identity)))))
+                 (reuse/evaluator {:pure? true :inputs [] :shared-outputs? :yes} identity)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (reuse/evaluator {:pure? true :inputs [] :shared-outputs? true :max-shared-bytes 0} identity)))))
+
+(defn- rgbw-group
+  "A typed batch evaluation of `n` pixels: a spatial colour and a white field."
+  [n]
+  (let [x {:op :position :axis :x}
+        plan (ir/compile-batch {:color {:op :vec3 :args [{:op :multiply :args [{:op :param :key :level}
+                                                                                {:op :sin :args [x]}]}
+                                                         {:op :const :value 0.2} x]}
+                                :white {:op :param :key :level}})
+        positions (double-array (mapcat (fn [i] [(* 1.0e-4 i) 0.0 0.0]) (range n)))]
+    (fn [inputs] (ir/evaluate-batch plan inputs positions))))
+
+(deftest shared-batch-outputs-are-retained-above-sixty-five-thousand-elements
+  ;; tolgraven/tolglow#875: 20,000 RGBW targets return 80,000 elements.
+  (doseq [n [20000 40000]]
+    (let [calls (atom 0)
+          group (rgbw-group n)
+          calc (reuse/evaluator {:pure? true :inputs [[:params :level]] :shared-outputs? true}
+                                (fn [inputs] (swap! calls inc) (group inputs)))
+          miss (calc {:params {:level 0.5}})
+          hit (calc {:params {:level 0.5}})]
+      (is (= (* 4 n) (+ (alength ^doubles (get-in miss [:outputs :color :values]))
+                        (alength ^doubles (get-in miss [:outputs :white :values])))))
+      (is (identical? (get-in miss [:outputs :color :values]) (get-in hit [:outputs :color :values])) (str n))
+      (is (identical? (get-in miss [:outputs :white :values]) (get-in hit [:outputs :white :values])))
+      (is (= 1 @calls) (str n " targets evaluate once"))
+      (is (not (identical? miss (calc {:params {:level 0.25}}))))
+      (is (= 2 @calls)))))
+
+(deftest the-shared-byte-bound-is-exact-and-other-bounds-are-unchanged
+  (let [bytes (* 8 (+ (* 3 1000) 1000))
+        run (fn [declaration]
+              (let [calls (atom 0)
+                    group (rgbw-group 1000)
+                    calc (reuse/evaluator (merge {:pure? true :inputs [[:params :level]]} declaration)
+                                          (fn [inputs] (swap! calls inc) (group inputs)))
+                    a (calc {:params {:level 0.5}}) b (calc {:params {:level 0.5}})]
+                (is (java.util.Arrays/equals ^doubles (get-in a [:outputs :color :values])
+                                             ^doubles (get-in b [:outputs :color :values])))
+                @calls))]
+    (testing "outputs up to :max-shared-bytes are retained, larger ones are not"
+      (is (= 1 (run {:shared-outputs? true :max-shared-bytes bytes})))
+      (is (= 2 (run {:shared-outputs? true :max-shared-bytes (dec bytes)}))))
+    (testing "the default bound admits 8 MiB of float64 and no more"
+      (is (= (* 8 1024 1024) reuse/default-max-shared-bytes (* 8 4 262144)))
+      (doseq [[n retained?] [[(* 4 262144) true] [(inc (* 4 262144)) false]]]
+        (let [calls (atom 0)
+              calc (reuse/evaluator {:pure? true :inputs [[:v]] :shared-outputs? true}
+                                    (fn [_] (swap! calls inc) {:values (double-array n)}))]
+          (calc {:v 1}) (calc {:v 1})
+          (is (= (if retained? 1 2) @calls) (str n " float64 elements under the default"))))))
+  (testing "array bytes follow the element type"
+    (doseq [[make n] [[float-array 16] [int-array 16] [long-array 8] [byte-array 64]
+                      [short-array 32] [char-array 32] [boolean-array 64]]
+            [length retained?] [[n true] [(inc n) false]]]
+      (let [calls (atom 0)
+            calc (reuse/evaluator {:pure? true :inputs [[:v]] :shared-outputs? true :max-shared-bytes 64}
+                                  (fn [_] (swap! calls inc) {:values (make length)}))
+            a (calc {:v 1}) b (calc {:v 1})]
+        (is (= (if retained? 1 2) @calls) (str (class (:values a)) " of " length))
+        (is (= retained? (identical? (:values a) (:values b)))))))
+  (testing "copied outputs keep the 65,536-element bound"
+    (doseq [[n retained?] [[65534 true] [65535 false]]]
+      (let [calls (atom 0)
+            calc (reuse/evaluator {:pure? true :inputs [[:v]]}
+                                  (fn [_] (swap! calls inc) {:values (double-array n)}))]
+        (calc {:v 1}) (calc {:v 1})
+        (is (= (if retained? 1 2) @calls) (str n " copied elements")))))
+  (testing "inputs keep the 65,536-node bound with shared outputs"
+    (doseq [[n retained?] [[65534 true] [65536 false]]]
+      (let [calls (atom 0)
+            values (vec (repeat n 0.5))
+            calc (reuse/evaluator {:pure? true :inputs [[:v]] :shared-outputs? true}
+                                  (fn [_] (swap! calls inc) {:values (double-array 4)}))]
+        (calc {:v values}) (calc {:v values})
+        (is (= (if retained? 1 2) @calls) (str n " input elements"))))))
 
 (deftest shared-outputs-reach-concurrent-readers-unchanged
   (let [calls (atom 0)
@@ -133,3 +216,31 @@
                                           {:op :phrase :clock :absolute}
                                           {:op :bar :clock :absolute}
                                           {:op :time} {:op :param :key :level}]}))))
+
+(deftest clearing-a-binding-drops-its-retained-value
+  (let [calls (atom 0)
+        group (rgbw-group 20000)
+        calc (reuse/evaluator {:pure? true :inputs [[:params :level]] :shared-outputs? true}
+                              (fn [inputs] (swap! calls inc) (group inputs)))
+        context {:params {:level 0.5}}]
+    (is (not (reuse/retains? calc)))
+    (let [first-value (calc context)]
+      (is (reuse/retains? calc))
+      (is (nil? (reuse/clear! calc)))
+      (is (not (reuse/retains? calc)) "nothing holds the 80,000 elements any more")
+      (testing "the binding stays usable and retains again"
+        (let [again (calc context)]
+          (is (= 2 @calls))
+          (is (not (identical? first-value again)))
+          (is (java.util.Arrays/equals ^doubles (get-in first-value [:outputs :color :values])
+                                       ^doubles (get-in again [:outputs :color :values])))
+          (is (identical? again (calc context)))
+          (is (= 2 @calls))))))
+  (testing "a step clears like its evaluator, and other functions are ignored"
+    (let [step (reuse/step {:pure? true :inputs [[:v]]} (fn [{:keys [v]}] {:assignments [v]}))]
+      (step {:v 1 :assignments []})
+      (is (reuse/retains? step))
+      (reuse/clear! step)
+      (is (not (reuse/retains? step))))
+    (is (nil? (reuse/clear! identity)))
+    (is (not (reuse/retains? identity)))))

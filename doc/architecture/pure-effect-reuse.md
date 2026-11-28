@@ -36,7 +36,7 @@ apply once per successful frame, even on a cache hit. System opacity, release
 and downstream blending continue to use their current inputs.
 
 Each binding retains the last successful calculation. `:max-values` defaults
-to 65,536 nodes and primitive array elements per input or output. Missing
+to 65,536 nodes and copied primitive array elements per input or output. Missing
 values differ from explicit nil. Input equality distinguishes numeric types,
 decimal scale and signed zero. Bindings support plain value semantics for maps
 with keyword/string keys, vectors and scalars. Mutable or opaque inputs, larger
@@ -53,6 +53,44 @@ hit, possibly to several effect workers in one frame. A caller that needs a
 different value, such as an envelope-scaled level, writes a new array it owns.
 Tolglow's typed batch compiler binds its evaluated fields this way. A stopped
 transport therefore reuses one retained field per group without allocating.
+
+Shared arrays have their own bound. Each one counts as one node against
+`:max-values`, and its bytes count against `:max-shared-bytes`, by default
+8 MiB (1,048,576 float64 elements). A colour and white group returns four
+float64 values per pixel, so 40,000 pixels need 1.28 MB and the default
+retains groups of up to 262,144 pixels. Before this bound, shared elements
+counted against the 65,536 of `:max-values`, and groups of 16,384 or more
+such pixels evaluated again on every frame of a stopped transport
+([tolglow#875](https://github.com/tolgraven/tolglow/issues/875)).
+
+The memory one binding can retain:
+
+| Part | Bound |
+| --- | --- |
+| Input key | `:max-values` nodes and elements (65,536) |
+| Private-copy output | `:max-values` nodes and copied elements; 512 KiB of float64 at the default |
+| Shared output | `:max-values` nodes plus `:max-shared-bytes` of arrays (8 MiB) |
+
+These bounds are per binding. Nothing in `reuse` bounds the total across
+bindings; the host bounds it by clearing bindings it no longer runs.
+
+A binding keeps its value while the binding is reachable, whether or not
+anything still calls it. The show-wide total is therefore one output per
+binding the host keeps, not per running instance. Tolglow keeps each pure
+batch group's binding inside its compiled program, and its program cache
+holds 256 programs per generation plus one retired generation. Without
+clearing, every program that has evaluated keeps its last fields after its
+cue stops: 100 previously played 40,000-pixel RGBW cues would hold about
+128 MB.
+
+`(reuse/clear! binding)` drops a binding's retained value (it also accepts a
+`reuse/step`), and `(reuse/retains? binding)` reports whether one is held.
+The binding stays usable and retains again on its next successful call.
+Clear bindings at the owner that retires their program, outside any CAS
+retry. Tolglow records the bindings each compiled program creates and, after
+every frame, clears those of programs the frame no longer ran. A released or
+replaced cue therefore retains nothing, and a stopped transport keeps only
+the fields of instances that still exist.
 
 Nothing enforces read-only use, and one stray write corrupts every instance
 that shares the binding and every later frame while its inputs are unchanged.
