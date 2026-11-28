@@ -146,8 +146,24 @@
     (testing "outputs up to :max-shared-bytes are retained, larger ones are not"
       (is (= 1 (run {:shared-outputs? true :max-shared-bytes bytes})))
       (is (= 2 (run {:shared-outputs? true :max-shared-bytes (dec bytes)}))))
-    (testing "the default admits a 262,144-pixel RGBW group and no more"
-      (is (= (* 8 1024 1024) reuse/default-max-shared-bytes (* 8 4 262144)))))
+    (testing "the default bound admits 8 MiB of float64 and no more"
+      (is (= (* 8 1024 1024) reuse/default-max-shared-bytes (* 8 4 262144)))
+      (doseq [[n retained?] [[(* 4 262144) true] [(inc (* 4 262144)) false]]]
+        (let [calls (atom 0)
+              calc (reuse/evaluator {:pure? true :inputs [[:v]] :shared-outputs? true}
+                                    (fn [_] (swap! calls inc) {:values (double-array n)}))]
+          (calc {:v 1}) (calc {:v 1})
+          (is (= (if retained? 1 2) @calls) (str n " float64 elements under the default"))))))
+  (testing "array bytes follow the element type"
+    (doseq [[make n] [[float-array 16] [int-array 16] [long-array 8] [byte-array 64]
+                      [short-array 32] [char-array 32] [boolean-array 64]]
+            [length retained?] [[n true] [(inc n) false]]]
+      (let [calls (atom 0)
+            calc (reuse/evaluator {:pure? true :inputs [[:v]] :shared-outputs? true :max-shared-bytes 64}
+                                  (fn [_] (swap! calls inc) {:values (make length)}))
+            a (calc {:v 1}) b (calc {:v 1})]
+        (is (= (if retained? 1 2) @calls) (str (class (:values a)) " of " length))
+        (is (= retained? (identical? (:values a) (:values b)))))))
   (testing "copied outputs keep the 65,536-element bound"
     (doseq [[n retained?] [[65534 true] [65535 false]]]
       (let [calls (atom 0)
@@ -200,3 +216,31 @@
                                           {:op :phrase :clock :absolute}
                                           {:op :bar :clock :absolute}
                                           {:op :time} {:op :param :key :level}]}))))
+
+(deftest clearing-a-binding-drops-its-retained-value
+  (let [calls (atom 0)
+        group (rgbw-group 20000)
+        calc (reuse/evaluator {:pure? true :inputs [[:params :level]] :shared-outputs? true}
+                              (fn [inputs] (swap! calls inc) (group inputs)))
+        context {:params {:level 0.5}}]
+    (is (not (reuse/retains? calc)))
+    (let [first-value (calc context)]
+      (is (reuse/retains? calc))
+      (is (nil? (reuse/clear! calc)))
+      (is (not (reuse/retains? calc)) "nothing holds the 80,000 elements any more")
+      (testing "the binding stays usable and retains again"
+        (let [again (calc context)]
+          (is (= 2 @calls))
+          (is (not (identical? first-value again)))
+          (is (java.util.Arrays/equals ^doubles (get-in first-value [:outputs :color :values])
+                                       ^doubles (get-in again [:outputs :color :values])))
+          (is (identical? again (calc context)))
+          (is (= 2 @calls))))))
+  (testing "a step clears like its evaluator, and other functions are ignored"
+    (let [step (reuse/step {:pure? true :inputs [[:v]]} (fn [{:keys [v]}] {:assignments [v]}))]
+      (step {:v 1 :assignments []})
+      (is (reuse/retains? step))
+      (reuse/clear! step)
+      (is (not (reuse/retains? step))))
+    (is (nil? (reuse/clear! identity)))
+    (is (not (reuse/retains? identity)))))

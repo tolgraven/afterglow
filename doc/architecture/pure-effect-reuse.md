@@ -71,9 +71,26 @@ The memory one binding can retain:
 | Private-copy output | `:max-values` nodes and copied elements; 512 KiB of float64 at the default |
 | Shared output | `:max-values` nodes plus `:max-shared-bytes` of arrays (8 MiB) |
 
-A show retains at most one output per live binding. For Tolglow that is one
-evaluated field set per compiled pure batch group, about the size of one
-frame's evaluated fields, until the group is rebound or released.
+These bounds are per binding. Nothing in `reuse` bounds the total across
+bindings; the host bounds it by clearing bindings it no longer runs.
+
+A binding keeps its value while the binding is reachable, whether or not
+anything still calls it. The show-wide total is therefore one output per
+binding the host keeps, not per running instance. Tolglow keeps each pure
+batch group's binding inside its compiled program, and its program cache
+holds 256 programs per generation plus one retired generation. Without
+clearing, every program that has evaluated keeps its last fields after its
+cue stops: 100 previously played 40,000-pixel RGBW cues would hold about
+128 MB.
+
+`(reuse/clear! binding)` drops a binding's retained value (it also accepts a
+`reuse/step`), and `(reuse/retains? binding)` reports whether one is held.
+The binding stays usable and retains again on its next successful call.
+Clear bindings at the owner that retires their program, outside any CAS
+retry. Tolglow records the bindings each compiled program creates and, after
+every frame, clears those of programs the frame no longer ran. A released or
+replaced cue therefore retains nothing, and a stopped transport keeps only
+the fields of instances that still exist.
 
 Nothing enforces read-only use, and one stray write corrupts every instance
 that shares the binding and every later frame while its inputs are unchanged.

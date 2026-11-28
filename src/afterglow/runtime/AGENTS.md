@@ -56,7 +56,9 @@ inputs and immutable bindings into their results. Preserve per-frame intent
 delivery and distinct caller-owned output arrays, unless the binding declares
 `:shared-outputs? true` and every reader keeps its arrays read-only. Shared
 outputs must never reach an in-place writer such as `fields/scale-field!`.
-Their arrays count against `:max-shared-bytes` (8 MiB), not `:max-values`. See
+Their arrays count against `:max-shared-bytes` (8 MiB), not `:max-values`.
+A binding retains its value while it is reachable; hosts that cache programs
+call `reuse/clear!` when the binding's program stops running. See
 [the declaration and cache contract](../../../doc/architecture/pure-effect-reuse.md).
 
 Only certify stateless, continuous-output samplers for [predictive effect

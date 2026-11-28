@@ -354,6 +354,105 @@
       (is (= {:type ::ir/invalid-expression :path [:args 0] :message "Division by zero"} data)
           "the first occurrence in evaluation order reports the fault"))))
 
+(deftest signed-zero-constants-stay-apart
+  (let [x {:op :position :axis :x}
+        result (agree {:negative {:op :multiply :args [x (corpus/c -0.0)]}
+                       :positive {:op :multiply :args [x (corpus/c 0.0)]}}
+                      {} [[1.0 0.0 0.0] [2.5 0.0 0.0]])
+        bits (fn [k] (get-in result [:outputs k :values]))]
+    (is (= (repeat 2 (Double/doubleToRawLongBits -0.0)) (bits :negative)))
+    (is (= (repeat 2 (Double/doubleToRawLongBits 0.0)) (bits :positive)))))
+
+(deftest every-operator-and-clock-agrees-without-faults
+  (let [x {:op :position :axis :x}
+        z {:op :position :axis :z}
+        c corpus/c
+        wave {:op :sin :args [{:op :add :args [x {:op :beat :clock :absolute}]}]}
+        outputs {:quad {:op :vec4 :args [{:op :floor :args [{:op :multiply :args [x (c 2.5)]}]}
+                                         {:op :exp :args [wave]}
+                                         {:op :pow :args [{:op :add :args [{:op :abs :args [wave]} (c 0.5)]} (c 1.5)]}
+                                         {:op :min :args [wave z {:op :phrase} {:op :phrase :clock :absolute}]}]}
+                 :pair {:op :vec2 :args [{:op :max :args [wave {:op :bar :clock :absolute}]}
+                                         {:op :add :args [{:op :time :clock :absolute} {:op :time} wave]}]}
+                 :level {:op :clamp :args [{:op :mix :args [wave {:op :fract :args [z]} (c 0.25)]} (c 0.0) (c 1.0)]}}
+        result (agree outputs corpus/environment (corpus/matrix 60 10))]
+    (is (nil? (:fault result)))
+    (is (= [4 2 1] (map #(get-in result [:outputs % :components]) [:quad :pair :level])))))
+
+(def ^:private fuzz-constants [0.0 -0.0 1.0 0.5 -2.0 3.0 1e300 -1e-300 0.1 7.0])
+
+(def ^:private fuzz-leaves
+  [{:op :position :axis :x} {:op :position :axis :y} {:op :position :axis :z}
+   {:op :beat} {:op :bar} {:op :phrase} {:op :beat :clock :absolute} {:op :bar :clock :absolute}
+   {:op :phrase :clock :absolute} {:op :time} {:op :time :clock :absolute}
+   {:op :param :key :k} {:op :param :key :j}])
+
+(defn- fuzz-batch
+  "One random batch of 1–4 fields. Subtrees are reused by value across fields
+  and components, as the authoring DSL does."
+  [^java.util.Random rng]
+  (let [pool (volatile! [])
+        pick (fn [xs] (nth xs (.nextInt rng (count xs))))
+        chance (fn [p] (< (.nextDouble rng) p))
+        scalar (fn scalar [depth]
+                 (cond
+                   (and (seq @pool) (chance 0.3)) (pick @pool)
+                   (or (zero? depth) (chance 0.2))
+                   (if (chance 0.4) {:op :const :value (pick fuzz-constants)} (pick fuzz-leaves))
+                   :else
+                   (let [s #(scalar (dec depth))
+                         op (pick [:add :subtract :multiply :divide :min :max :sin :cos :abs :floor :fract
+                                   :exp :sqrt :pow :clamp :mix :add3 :min4 :max3 :negate])
+                         e (case op
+                             (:sin :cos :abs :floor :fract :exp :sqrt) {:op op :args [(s)]}
+                             :negate {:op :subtract :args [(s)]}
+                             (:add :subtract :multiply :divide :min :max :pow) {:op op :args [(s) (s)]}
+                             :add3 {:op :add :args [(s) (s) (s)]}
+                             :min4 {:op :min :args [(s) (s) (s) (s)]}
+                             :max3 {:op :max :args [(s) (s) (s)]}
+                             (:clamp :mix) {:op op :args [(s) (s) (s)]})]
+                     (vswap! pool conj e)
+                     e)))
+        vector3 (fn vector3 [depth]
+                  (case (.nextInt rng (if (pos? depth) 5 2))
+                    0 {:op :vec3 :args [(scalar depth) (scalar depth) (scalar depth)]}
+                    1 {:op :param :key :tint :type :vec3}
+                    2 {:op :mix :args [(vector3 (dec depth)) {:op :const :value [0.0 -0.0 1.0]} (scalar depth)]}
+                    3 (ir/partial-max-blend (vector3 (dec depth))
+                                            {:op :multiply :args [(vector3 (dec depth)) (scalar depth)]} (scalar depth))
+                    4 {:op :clamp :args [{:op :add :args [(vector3 (dec depth)) (scalar depth)]}
+                                         {:op :const :value 0.0} {:op :const :value 1.0}]}))
+        field (fn []
+                (case (.nextInt rng 5)
+                  (0 1) (scalar 5)
+                  2 (vector3 3)
+                  3 {:op :vec2 :args [(scalar 4) (scalar 4)]}
+                  4 {:op :vec4 :args [(scalar 4) (scalar 3) (scalar 3) (scalar 4)]}))]
+    (into {} (for [k (take (inc (.nextInt rng 4)) [:a :b :color :white])] [k (field)]))))
+
+(deftest seeded-random-batches-agree-with-the-unshared-evaluator
+  ;; After the external 6,000-batch probe in the tolgraven/afterglow#171 review.
+  (let [rng (java.util.Random. 872875)
+        env {:params {:k 0.5 :j -0.0 :tint [0.9 -0.0 0.25]}
+             :beat 33.75 :elapsed-beats 1.625 :elapsed-ms 812.5 :time-ms 16875.0
+             :meter {:beats-per-bar 4 :bars-per-phrase 4}}
+        positions (mapv (fn [i] [(- (double (mod i 7)) 3.0) (* 0.5 (double (mod i 3))) (- (double (quot i 7)) 1.0)])
+                        (range 21))
+        flat (double-array (mapcat identity positions))
+        tally (frequencies
+               (for [_ (range 400)
+                     :let [outputs (fuzz-batch rng)
+                           env (if (< (.nextDouble rng) 0.5) env (assoc env :beat (- (.nextDouble rng) 0.5)))
+                           points (if (< (.nextDouble rng) 0.5) positions flat)]]
+                 (let [shared (outcome #(ir/evaluate-batch (ir/compile-batch outputs) env points))
+                       unshared (outcome #(reference/evaluate-batch (reference/compile-batch outputs) env points))]
+                   (cond (not= shared unshared) (do (is (= unshared shared) (pr-str outputs)) :mismatch)
+                         (:fault shared) :fault
+                         :else :value))))]
+    (is (zero? (:mismatch tally 0)))
+    (is (< 100 (:value tally 0)) (pr-str tally))
+    (is (< 100 (:fault tally 0)) (pr-str tally))))
+
 (deftest charted-fields-share-terms-like-world-fields
   (let [u {:op :surface-uv :axis :u}
         v {:op :surface-uv :axis :v}

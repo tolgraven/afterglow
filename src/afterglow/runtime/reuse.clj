@@ -113,7 +113,11 @@
   copied elements) and one output. A private-copy output holds at most
   :max-values nodes and elements, 512 KiB of float64 at the default. A shared
   output holds at most :max-values nodes plus :max-shared-bytes of arrays.
-  Inputs use Java value equality so signed zero and numeric representation
+  The binding keeps that value for as long as the binding itself is reachable,
+  whether or not anything still calls it: a host that caches compiled programs
+  retains one output per cached binding, not per running instance. Call
+  `clear!` when a binding stops being used, for example when the last
+  instance running its program releases. Inputs use Java value equality so signed zero and numeric representation
   remain observable. Concurrent misses may evaluate independently; no
   callback runs inside a lock or CAS retry."
   [{:keys [pure? inputs max-values shared-outputs? max-shared-bytes]
@@ -141,7 +145,24 @@
                     (.compareAndSet entry prior
                                     {:key key :value value :copy? (not (identical? result value))}))
                   result))))))
-      {::declaration declaration})))
+      {::declaration declaration ::entry entry})))
+
+(defn clear!
+  "Drop the value a binding or `step` retains, so its arrays can be collected.
+  The binding stays usable: its next call evaluates and may retain again. An
+  evaluation already running when this is called stores its result only if
+  nothing was retained when it started. Returns nil; other functions are
+  ignored. Call it outside any CAS retry, at the owner that retires the
+  binding's program."
+  [binding]
+  (when-let [^AtomicReference entry (::entry (meta binding))]
+    (.set entry nil))
+  nil)
+
+(defn retains?
+  "Whether a binding or `step` currently retains a value."
+  [binding]
+  (boolean (some-> ^AtomicReference (::entry (meta binding)) .get)))
 
 (defn step
   "Build effect middleware from a declared-input calculation. It returns a map
