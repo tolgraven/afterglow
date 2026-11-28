@@ -421,3 +421,20 @@
       (let [error (try (render {} [(assoc guard :value (expr :color-guard (field :previous :color) 0.5))] [0 0 0]) nil
                        (catch clojure.lang.ExceptionInfo cause cause))]
         (is (= {:instance-id 1} (:effect-source (ex-data error))))))))
+
+(deftest a-transform-skips-heads-that-lack-its-field
+  (let [mixed (frame/compile-patch [{:id :rgb :address 1 :universe 0 :channels {:red 1 :green 2 :blue 3}}
+                                    {:id :lamp :address 4 :universe 0 :channels {:white 1}}])
+        base {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.6 0.45 0.3]}
+                                               {:target-id :lamp :attribute :white :value 0.5}]}
+        guard (assoc {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.5 0 0]}]}
+                     :native-layer {:id :guard :member 0 :target-ids [:rgb :lamp]
+                                    :transforms [{:attribute :color
+                                                  :value (expr :color-grade (field :previous :color) (field :incoming :color))}]}
+                     :source {:instance-id :guard})
+        result (frame/resolve-contributions mixed [base guard] {})]
+    (is (near? [0.3 0.225 0.15] (get-in result [:values :rgb :emitted-color])))
+    (is (= 128 (bit-and 0xff (aget ^bytes (get-in result [:universes 0]) 3))) "The white-only head keeps its white")
+    (testing "an unknown head named by the layer still faults"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (frame/resolve-contributions mixed [base (assoc-in guard [:native-layer :target-ids] [:rgb :nowhere])] {}))))))

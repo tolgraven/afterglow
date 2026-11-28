@@ -212,7 +212,7 @@
               (ex-info "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer})
               source)))))
 
-(defn- apply-member [high? state blocks rows blend-field validate! allowed]
+(defn- apply-member [high? state blocks rows blend-field validate! allowed supports?]
   (let [{:keys [source native-layer] :as first-block} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
@@ -234,8 +234,13 @@
              (let [prior (get-in st [:fields id] {})
                    incoming (reduce apply-row {} assignments)
                    base (reduce apply-row prior assignments)
-                   post (transform-fields high? id prior incoming base transforms validate!)
-                   written (into (set (keys incoming)) (map :attribute) transforms)
+                   ;; Like an effect output, a transform skips a head that
+                   ;; does not implement its field (tolgraven/tolglow#688).
+                   steps (if supports?
+                           (filterv #(or (= :beat-ratio (:attribute %)) (supports? id (:attribute %))) transforms)
+                           transforms)
+                   post (transform-fields high? id prior incoming base steps validate!)
+                   written (into (set (keys incoming)) (map :attribute) steps)
                    ;; A native transform can synthesize a value independent of
                    ;; its input. Apply member gain after the transform, once.
                    gain (::hdr/member-gain first-block)
@@ -273,7 +278,7 @@
   (when (and (some? weights) (not (and (map? weights) (every-weight? unit? weights))))
     (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {}) source))))
 
-(defn- group-blocks [high? backdrop blocks rows blend-field validate!]
+(defn- group-blocks [high? backdrop blocks rows blend-field validate! supports?]
   (let [members (ordered-members blocks)
         group (:native-layer (first blocks))
         opacity (:opacity group 1)
@@ -282,7 +287,7 @@
     (if (or (zero? opacity) (and allowed (empty? allowed)))
       []
       (let [{:keys [fields sources]}
-            (reduce #(apply-member high? %1 %2 rows blend-field validate! allowed) {:fields backdrop :sources {}} members)
+            (reduce #(apply-member high? %1 %2 rows blend-field validate! allowed supports?) {:fields backdrop :sources {}} members)
             writes (for [[id attrs] (sort-by (comp pr-str key) sources)
                          [field source] (sort-by key attrs)
                          :when (not= :beat-ratio field)]
@@ -391,8 +396,11 @@
   blend function receives the target ID and attribute before the blend inputs.
   Optional :target-weights maps head IDs to [0,1]. Omitted heads receive no
   group output. Multiply the final group opacity by this weight once, after
-  composing all native transforms and their inputs."
-  [blocks rows blend-field validate! high?]
+  composing all native transforms and their inputs. Optional supports?, a
+  function of target ID and attribute, skips a transform step on a head that
+  does not implement its field, as effect outputs skip such heads."
+  ([blocks rows blend-field validate! high?] (compose-fields blocks rows blend-field validate! high? nil))
+  ([blocks rows blend-field validate! high? supports?]
   (if-not (some :native-layer blocks)
     blocks
     (let [tagged (filterv :native-layer blocks)
@@ -420,12 +428,12 @@
               (let [layer (:native-layer block)
                     entries (cond (nil? layer) [block]
                                   (= i (get anchors (:id layer)))
-                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate!)
+                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate! supports?)
                                   :else [])]
                 (cond-> (update state :out into entries)
                   (< i last-anchor)
                   (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks))))))))
+            {:backdrop {} :out []} blocks)))))))))
 
 (defn compose
   "Compose native layers using a common blend function for all fields."

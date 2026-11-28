@@ -1605,7 +1605,12 @@
                                                 attribute previous value blend opacity))
                                  (fn [{:keys [target-id attribute value] :as a}]
                                    (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
-                                                         (:blend a :replace) a (::hdr? patch))) (::hdr? patch))
+                                                         (:blend a :replace) a (::hdr? patch))) (::hdr? patch)
+                                 ;; An unknown head still faults in validation.
+                                 (fn [id attribute]
+                                   (if-let [fixture (get (:by-id patch) id)]
+                                     (contains? (::supported fixture) attribute)
+                                     true)))
           partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
       (if partitioned?
         (resolve-partitioned patch blocks options)
