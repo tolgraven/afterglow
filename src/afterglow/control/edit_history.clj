@@ -194,11 +194,17 @@
 
 (defn retarget
   "Address every edit, open gesture and generation of `from` to `to`, as when
-  a cell passes to a new owner holding the same value and generation. Refuses
-  a `to` the tree already tracks. Cursor, node IDs and position are unchanged."
+  a cell passes to a new owner holding the same value and generation. Cursor,
+  node IDs and position are unchanged.
+
+  A `to` the tree already tracks is refused with an ExceptionInfo carrying
+  :control/error :history-target-conflict and :details {:from :to}, so a
+  host operation admitted by afterglow.control.model/apply-domain-command
+  that retargets yields a structured rejection and the unchanged model."
   [{:keys [nodes open generations] :as history} from to]
   (when (contains? (tracked-targets history) to)
-    (throw (ex-info "Edit history already tracks the destination target" {:from from :to to})))
+    (throw (ex-info "Edit history already tracks the destination target"
+                    {:control/error :history-target-conflict :details {:from from :to to}})))
   (let [rename (fn [entries] (if (contains? entries from)
                                (-> entries (dissoc from) (assoc to (get entries from)))
                                entries))]

@@ -1,5 +1,6 @@
 (ns afterglow.control.model-test
   (:require [clojure.test :refer [deftest is testing]]
+            [afterglow.control.edit-history :as edit-history]
             [afterglow.control.instance-order :as instance-order]
             [afterglow.control.model :as model]
             [afterglow.control.pages :as pages]
@@ -1213,3 +1214,90 @@
       (let [open (host! staged (assoc gesture :op :gesture/begin :gesture-id "stage-3"))]
         (is (= (get-in staged [:control :edit-history :nodes]) (:nodes (model/edit-history-snapshot open))))
         (is (nil? (:open (model/edit-history-snapshot open))))))))
+
+(deftest a-retarget-conflict-inside-a-domain-reducer-is-a-structured-rejection
+  (let [authority (assoc studio-operator ::model/edit-targets staged-hooks)
+        target [:staged-param "s" :level]
+        gesture {:edit-target target :control-id :knob :gesture-id "stage-1"}
+        host! (fn [show operation]
+                (let [{:keys [model ack]} (model/apply-command show (operator-command show operation) authority)]
+                  (when-not (= :accepted (:status ack)) (throw (ex-info "Host command rejected" ack)))
+                  model))
+        show (-> (apply! (configured) {:op :cue/launch :cue-id :red})
+                 (assoc-in [:settings :staged "s"] {:level 0.5}))
+        id (first (keys (:instances show)))
+        destination [:instance-param id :level]
+        edited (-> show
+                   (host! (assoc gesture :op :gesture/begin))
+                   (host! (assoc gesture :op :gesture/sample :sequence 1 :value 0.8))
+                   (host! (assoc gesture :op :gesture/end :last-sequence 1))
+                   (turn! (knob id :level :tracked) 0.9))
+        hand-over (fn [m {:keys [to]}] {:model (model/retarget-edit-history m target to)
+                                        :events [{:type :staged/launched}]})
+        conflict (model/apply-domain-command edited (command edited {:op :stage/launch :to destination}) hand-over)
+        free [:instance-param "untracked" :level]
+        accepted (model/apply-domain-command edited (command edited {:op :stage/launch :to free}) hand-over)]
+    (is (= :rejected (get-in conflict [:ack :status])))
+    (is (= :history-target-conflict (get-in conflict [:ack :code])))
+    (is (= {:from target :to destination} (get-in conflict [:ack :details])))
+    (is (identical? edited (:model conflict)))
+    (is (= [] (:events conflict)))
+    (testing "a free destination is accepted and takes the steps"
+      (is (= :accepted (get-in accepted [:ack :status])))
+      (is (= [free destination]
+             (mapv (comp :target val) (sort (dissoc (get-in accepted [:model :control :edit-history :nodes]) 0))))))
+    (testing "the kernel and model wrapper carry the same code outside admission"
+      (is (= :history-target-conflict
+             (:control/error (ex-data (try (model/retarget-edit-history edited target destination)
+                                           (catch clojure.lang.ExceptionInfo e e)))))))))
+
+(deftest host-hooks-are-read-only-from-the-trusted-authority
+  (let [target [:staged-param "s" :level]
+        begin {:op :gesture/begin :edit-target target :control-id :knob :gesture-id "stage-1"}
+        show (assoc-in (configured) [:settings :staged "s"] {:level 0.5})
+        attempt (fn [operation authority] (model/apply-command show (operator-command show operation) authority))]
+    (testing "hooks inside the command payload enable nothing"
+      (let [{:keys [model ack]} (attempt (assoc begin ::model/edit-targets staged-hooks) studio-operator)]
+        (is (= :invalid-gesture (:code ack)))
+        (is (identical? show model))))
+    (testing "hooks in the authority still need a trusted operator"
+      (let [{:keys [model ack]} (attempt begin {::model/edit-targets staged-hooks})]
+        (is (= :operator-required (:code ack)))
+        (is (identical? show model))))
+    (testing "a domain reducer has no authority, so it cannot reach history or hooks"
+      (let [{:keys [model ack]} (model/apply-domain-command
+                                  show (operator-command show begin)
+                                  (fn [& _] (throw (AssertionError. "History operations are owner-admitted"))))]
+        (is (= :operator-required (:code ack)))
+        (is (identical? show model))))
+    (testing "hooks and operator in the authority open the host gesture"
+      (is (= :accepted (get-in (attempt begin (assoc studio-operator ::model/edit-targets staged-hooks))
+                               [:ack :status]))))))
+
+(deftest a-save-leaves-host-temporary-gestures-to-the-host
+  (let [authority (assoc studio-operator ::model/edit-targets staged-hooks)
+        target [:staged-param "s" :level]
+        gesture {:edit-target target :control-id :knob :gesture-id "preview"}
+        host! (fn [show operation]
+                (let [{:keys [model ack]} (model/apply-command show (operator-command show operation) authority)]
+                  (when-not (= :accepted (:status ack)) (throw (ex-info "Host command rejected" ack)))
+                  model))
+        show (assoc-in (configured) [:settings :staged "s"] {:level 0.5})
+        previewing (-> show
+                       (host! (assoc gesture :op :gesture/begin :temporary? true))
+                       (host! (assoc gesture :op :gesture/sample :sequence 1 :value 0.9)))
+        {settled-model :model settled :settled} (model/settle-temporary-gestures-for-save previewing)
+        snapshot (model/edit-history-snapshot previewing)]
+    (testing "the save projection neither rolls back nor reports the host preview"
+      (is (= {} settled))
+      (is (= 0.9 (get-in settled-model [:settings :staged "s" :level])))
+      (is (= {0 {:parent nil}} (:nodes snapshot)))
+      (is (nil? (:open snapshot))))
+    (testing "the host settles it on the save projection, leaving the live preview open"
+      (let [owner (get (edit-history/open-gestures (get-in settled-model [:control :edit-history])) target)
+            cancelled (host! settled-model (merge gesture (select-keys owner [:control-id :gesture-id])
+                                                  {:op :gesture/cancel}))]
+        (is (= 0.5 (get-in cancelled [:settings :staged "s" :level])))
+        (is (= {} (get-in cancelled [:control :edit-history :open])))
+        (is (= 0.9 (get-in previewing [:settings :staged "s" :level])))
+        (is (contains? (get-in previewing [:control :edit-history :open]) target))))))
