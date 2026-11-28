@@ -199,8 +199,8 @@
 
   A `to` the tree already tracks is refused with an ExceptionInfo carrying
   :control/error :history-target-conflict and :details {:from :to}, so a
-  command reducer that retargets inside afterglow.control.model admission
-  yields a structured rejection and the unchanged model."
+  host operation admitted by afterglow.control.model/apply-domain-command
+  that retargets yields a structured rejection and the unchanged model."
   [{:keys [nodes open generations] :as history} from to]
   (when (contains? (tracked-targets history) to)
     (throw (ex-info "Edit history already tracks the destination target"

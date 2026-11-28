@@ -1293,9 +1293,11 @@
       (is (= 0.9 (get-in settled-model [:settings :staged "s" :level])))
       (is (= {0 {:parent nil}} (:nodes snapshot)))
       (is (nil? (:open snapshot))))
-    (testing "the host settles it first by cancelling through apply-command with its hooks"
-      (let [owner (get (edit-history/open-gestures (get-in previewing [:control :edit-history])) target)
-            cancelled (host! previewing (merge gesture (select-keys owner [:control-id :gesture-id])
-                                               {:op :gesture/cancel}))]
+    (testing "the host settles it on the save projection, leaving the live preview open"
+      (let [owner (get (edit-history/open-gestures (get-in settled-model [:control :edit-history])) target)
+            cancelled (host! settled-model (merge gesture (select-keys owner [:control-id :gesture-id])
+                                                  {:op :gesture/cancel}))]
         (is (= 0.5 (get-in cancelled [:settings :staged "s" :level])))
-        (is (= {} (get-in cancelled [:control :edit-history :open])))))))
+        (is (= {} (get-in cancelled [:control :edit-history :open])))
+        (is (= 0.9 (get-in previewing [:settings :staged "s" :level])))
+        (is (contains? (get-in previewing [:control :edit-history :open]) target))))))

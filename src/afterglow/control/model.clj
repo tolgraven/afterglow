@@ -631,9 +631,13 @@
   "Move a host target's edits and generation to a new target, as when the
   host hands the cell to a launched instance holding the same value. A
   destination the history already tracks is refused with :control/error
-  :history-target-conflict (see edit-history/retarget): inside a command
-  reducer admitted by apply-command or apply-domain-command, that becomes a
-  rejected ack with the identical model, never an escaping exception."
+  :history-target-conflict (see edit-history/retarget). Call it from a host
+  operation admitted by apply-domain-command: a conflict there becomes a
+  rejected ack with the identical model, never an escaping exception.
+  apply-command takes no host reducer, and its edit target :write hooks must
+  not change the edit history: the history operation replaces that subtree
+  with its own result, so a retarget made inside a hook is discarded. (A
+  conflict a hook raises is still a rejected ack; that route is unsupported.)"
   [model from to]
   (if (get-in model [:control :edit-history])
     (update-in model [:control :edit-history] edit-history/retarget from to)
@@ -690,8 +694,10 @@
   open gesture on a host target closes without a cell. It records no node
   and writes no rollback, whether it is ordinary or temporary, and the
   host's sampled value stays wherever the host keeps it. A host whose
-  targets are saved must end or cancel its own gestures through apply-command
-  with its hooks before taking the snapshot."
+  targets are saved settles its own gestures on the save projection before
+  taking the snapshot: apply-command with its hooks is pure, so ending an
+  ordinary gesture or cancelling a temporary one on a copy leaves the live
+  model's in-progress drag or preview untouched."
   [model]
   (when-let [history (get-in model [:control :edit-history])]
     (dissoc
@@ -754,9 +760,11 @@
   Only :instance-param gestures are settled. Temporary gestures on host
   target kinds are skipped, their preview values are not rolled back, and
   they are absent from :settled; edit-history-snapshot then closes them
-  without a cell. A host whose targets are saved must cancel its own
-  temporary gestures through apply-command with its hooks first. The owner
-  each cancel must carry is in edit-history/open-gestures."
+  without a cell. A host whose targets are saved cancels its own temporary
+  gestures on this projection, through apply-command with its hooks, before
+  the snapshot; never on the live model, where every autosave would end the
+  operator's preview. The owner each cancel must carry is in
+  edit-history/open-gestures."
   [model]
   (reduce-kv (fn [{:keys [model] :as projection} [kind id param :as target] {:keys [actor temporary?] :as gesture}]
                ;; No hooks here: a host settles its own temporary gestures before saving.
@@ -884,8 +892,11 @@
   saved. Nothing at save time has the hooks: settle-temporary-gestures-for-save
   skips host targets and edit-history-snapshot closes an open host gesture
   without a cell (no node, no rollback write). A host whose targets are saved
-  must end or cancel its own gestures, temporary ones in particular, through
-  this function with its hooks before saving. Use touch-edit-target after
+  settles its own gestures through this function with its hooks on the save
+  projection, not the live model: end ordinary gestures and cancel temporary
+  ones (ending a temporary gesture is rejected :temporary-gesture). Write
+  hooks must not change the edit history, which the history operation
+  replaces with its own result. Use touch-edit-target after
   other host writes, and retarget-edit-history or remove-edit-history-targets
   when the host hands a cell on or discards it. The namespace docstring
   records why hooks travel in the authority."
