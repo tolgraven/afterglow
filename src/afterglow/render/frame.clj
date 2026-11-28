@@ -15,6 +15,7 @@
             [afterglow.render.hdr.packed :as packed-hdr]
             [afterglow.render.optics :as optics]
             [afterglow.render.photometry :as photometry]
+            [afterglow.render.typed-layers :as typed-layers]
             [afterglow.runtime.faults :as faults])
   (:import [java.util.concurrent.atomic AtomicReferenceArray]))
 
@@ -1620,7 +1621,21 @@
                                      ::general-assigned assigned ::geometry-sources sources)
                               values present #(pack-dense-state patch values present %))))))
 
-(defn- reduce-contributions [fixtures contributions options]
+(defn- typed-layer-context
+  "Patch lookups for `afterglow.render.typed-layers/compose-group`, as
+  primitive functions so its per-head loop does not box indices."
+  [patch]
+  (let [by-id (:by-id patch) fixtures (:fixtures patch) hdr? (::hdr? patch)]
+    {:fixtures (count fixtures)
+     :index-of (fn ^long [id] (if-let [fixture (get by-id id)] (long (::index fixture)) -1))
+     ;; As validate-assignment!: HDR lets a colour exceed one on a head with emitters.
+     :extended? (fn ^long [^long i] (if (and hdr? (::emission-channels (nth fixtures i))) 1 0))
+     :color? (fn ^long [^long i] (if (contains? (::supported (nth fixtures i)) :color) 1 0))}))
+
+(defn- prepare-contributions
+  "Normalize the options, set the patch's HDR mode and validate every block
+  ahead of native layer composition. Returns [patch options blocks]."
+  [fixtures contributions options]
   (let [patch (if (and (map? fixtures) (= ::patch (:type fixtures))) fixtures (compile-patch fixtures))
         options (merge {:master 1.0 :blackout? false :previous-values {} :include-values? true :compact-values? false} options)
         options (cond
@@ -1643,24 +1658,42 @@
                              :assignments (do (when-not (vector? (:assignments block))
                                                 (fail! "Assignment contribution needs a vector" {})) block)
                              :batch (assoc block :compiled (first (validate-batches patch [(:batch block)] (:native-layer block))))
-                             (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)
-          blocks (hdr/apply-contribution-gains blocks (:hdr options) #(get-in patch [:by-id % ::emission-channels]))
-          blocks (layers/compose-fields blocks layer-rows
-                                 (fn [id attribute previous value blend opacity]
-                                   (blend-field (when (= :fog attribute) (get (:by-id patch) id))
-                                                attribute previous value blend opacity))
-                                 (fn [{:keys [target-id attribute value] :as a}]
-                                   (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
-                                                         (:blend a :replace) a (::hdr? patch))) (::hdr? patch)
-                                 ;; An unknown head still faults in validation.
-                                 (fn [id attribute]
-                                   (if-let [fixture (get (:by-id patch) id)]
-                                     (contains? (::supported fixture) attribute)
-                                     true)))
-          partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))]
-      (if partitioned?
-        (resolve-partitioned patch blocks options)
-        (resolve-general-contributions patch blocks options)))))
+                             (fail! "Unknown contribution kind" {:kind (:kind block)})))) contributions)]
+      [patch options (hdr/apply-contribution-gains blocks (:hdr options) #(get-in patch [:by-id % ::emission-channels]))])))
+
+(defn- compose-layers
+  "Compose native layers in validated blocks, with typed colour groups when
+  `typed?` and otherwise wholly on the general path."
+  [patch blocks typed?]
+  (layers/compose-fields blocks layer-rows
+                         (fn [id attribute previous value blend opacity]
+                           (blend-field (when (= :fog attribute) (get (:by-id patch) id))
+                                        attribute previous value blend opacity))
+                         (fn [{:keys [target-id attribute value] :as a}]
+                           (validate-assignment! (get (:by-id patch) target-id) target-id attribute value
+                                                 (:blend a :replace) a (::hdr? patch))) (::hdr? patch)
+                         ;; An unknown head still faults in validation.
+                         (fn [id attribute]
+                           (if-let [fixture (get (:by-id patch) id)]
+                             (contains? (::supported fixture) attribute)
+                             true))
+                         (when typed? (typed-layer-context patch))))
+
+(defn- reduce-contributions [fixtures contributions options]
+  (let [[patch options blocks] (prepare-contributions fixtures contributions options)
+        partitioned? (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options)))
+        resolve (fn [blocks]
+                  (if partitioned?
+                    (resolve-partitioned patch blocks options)
+                    (resolve-general-contributions patch blocks options)))
+        composed (compose-layers patch blocks (:typed-layers? options true))]
+    (if (::typed-layers/typed (meta composed))
+      ;; Typed colour groups skip the general path's validation of the
+      ;; layer's lower rows. Should the frame fault, compose it again on the
+      ;; general path so the fault keeps its message, data and source.
+      (try (resolve composed)
+           (catch Exception _ (resolve (compose-layers patch blocks false))))
+      (resolve composed))))
 
 (defn resolve-contributions
   "Resolve the kernel's ordered mixed contribution stream exactly once.
@@ -1690,6 +1723,10 @@
   on shared receivers, including where a follower leads another link. A missed,
   unreachable, or overlapping spot suppresses that follower's light for the
   frame and the returned :edge-tracking reports its reason.
+  Native layer groups whose transforms only grade, guard, multiply or turn the
+  hue of colour compose from typed colour columns into one owned batch, with
+  the general path's bytes; `:typed-layers? false` composes every group on the
+  general path.
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))

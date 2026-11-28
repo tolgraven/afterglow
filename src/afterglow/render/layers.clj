@@ -3,6 +3,7 @@
   assignment/batch rows and performs geometry and channel packing after composition."
   (:require [afterglow.runtime.faults :as faults]
             [afterglow.render.hdr :as hdr]
+            [afterglow.render.typed-layers :as typed]
             [thi.ng.color.core :as color]))
 
 (defn- fail! [msg data] (throw (ex-info msg data)))
@@ -404,6 +405,50 @@
        :else result))
    [] blocks))
 
+(defn- typed-group
+  "The typed colour plan for a group, or nil when it needs the general path:
+  one member with at most one typed :color batch, explicit or written
+  targets, packed opacities and a colour-only transform program."
+  [high? blocks]
+  (let [members (ordered-members blocks)]
+    (when (= 1 (count members))
+      (let [member (first members)
+            {:keys [source native-layer] :as first-block} (first member)
+            {:keys [transforms targets inherit-backdrop? opacity target-weights] :or {opacity 1}} native-layer
+            batches (filterv #(= :batch (:kind %)) member)
+            compiled (:compiled (first batches))]
+        (when (and (<= (count batches) 1)
+                   (every? #(or (= :batch (:kind %)) (and (= :assignments (:kind %)) (empty? (:assignments %)))) member)
+                   (nil? targets) (not inherit-backdrop?)
+                   (packed-factor? opacity)
+                   (or (nil? target-weights) (every-weight? packed-factor? target-weights))
+                   (or (nil? compiled) (= [:color] (mapv :attribute (:columns compiled))))
+                   (nil? (::opacities compiled)))
+          (when-let [program (typed/program transforms #(evaluate high? % {}))]
+            {:descriptor native-layer :batch compiled :program program :source source
+             :gain (::hdr/member-gain first-block) :gain-target? (::hdr/gain-target? first-block)}))))))
+
+(defn- typed-stream
+  "Compose the stream with typed colour groups where every native group is
+  either direct or typed, or return nil for the general path."
+  [blocks groups planned anchors high? ctx]
+  (when-let [plans (reduce-kv (fn [m id group]
+                                (cond (some? (planned id)) m
+                                      :else (if-let [plan (typed-group high? group)] (assoc m id plan) (reduced nil))))
+                              {} groups)]
+    (some-> (reduce-kv
+             (fn [out i {:keys [native-layer] :as block}]
+               (cond
+                 (nil? native-layer) (conj out block)
+                 (not= i (get anchors (:id native-layer))) out
+                 (contains? plans (:id native-layer))
+                 (if-let [entries (typed/compose-group (plans (:id native-layer)) out high? ctx)]
+                   (into out entries)
+                   (reduced nil))
+                 :else (into out (planned (:id native-layer)))))
+             [] blocks)
+            (with-meta {::typed/typed true}))))
+
 (defn compose-fields
   "Compose tagged blocks at the last member's position in the ordinary priority
   stream. Only affected target rows are read into the native backdrop. Each
@@ -413,9 +458,16 @@
   group output. Multiply the final group opacity by this weight once, after
   composing all native transforms and their inputs. Optional supports?, a
   function of target ID and attribute, skips a transform step on a head that
-  does not implement its field, as effect outputs skip such heads."
+  does not implement its field, as effect outputs skip such heads.
+
+  Optional `typed`, the patch context described by
+  `afterglow.render.typed-layers/compose-group`, composes colour-only groups
+  from typed columns into one owned typed batch each, with bytes equal to
+  this general path's. The returned vector then has
+  `:afterglow.render.typed-layers/typed` metadata."
   ([blocks rows blend-field validate! high?] (compose-fields blocks rows blend-field validate! high? nil))
-  ([blocks rows blend-field validate! high? supports?]
+  ([blocks rows blend-field validate! high? supports?] (compose-fields blocks rows blend-field validate! high? supports? nil))
+  ([blocks rows blend-field validate! high? supports? typed]
   (if-not (some :native-layer blocks)
     blocks
     (let [tagged (filterv :native-layer blocks)
@@ -430,7 +482,9 @@
       (let [planned (update-vals groups direct-group)]
         (if (every? some? (vals planned))
         (order-direct-blocks blocks planned anchors)
-        (let [last-anchor (apply max (vals anchors))
+        (or
+         (when typed (typed-stream blocks groups planned anchors high? typed))
+         (let [last-anchor (apply max (vals anchors))
               apply-row (partial set-assignment high? blend-field validate!)
               targets (when-not (some #(get-in % [:native-layer :inherit-backdrop?]) tagged)
                         (into #{} (mapcat (fn [{:keys [kind assignments compiled native-layer]}]
@@ -448,7 +502,7 @@
                 (cond-> (update state :out into entries)
                   (< i last-anchor)
                   (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks)))))))))
+            {:backdrop {} :out []} blocks))))))))))
 
 (defn compose
   "Compose native layers using a common blend function for all fields."
