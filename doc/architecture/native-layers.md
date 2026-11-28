@@ -118,6 +118,51 @@ effect gets a layer at its ordinary priority. With `:targets :previous` and no
 explicit fixture IDs, that standalone effect applies to heads with prior
 writes in the current frame.
 
+### Typed colour layers
+
+Colour modifiers such as the keyhole bloom, the colour guard and the
+darkening sparkle usually cover a whole pixel rig. The renderer composes such
+a group from typed colour columns when all of these hold:
+
+- The group has one member, with at most one typed batch, whose only column
+  is `:color`. A transform-only member over explicit `:target-ids` also
+  qualifies.
+- Every transform writes `:color` with `:multiply`, `:rotate-hue`,
+  `:color-grade` or `:color-guard`. Their operands are `:previous`,
+  `:incoming` or `:field` colour reads, or literals. A read's default must
+  be a literal colour.
+- The descriptor has no `:targets :previous`, and its group opacity and
+  target weights are doubles or integers.
+- Every other group in the frame is typed or a direct physical replacement.
+
+The renderer folds the colour of the typed batches and assignments emitted
+beneath the layer into a private array for the member's heads. It evaluates
+the program per head in primitive registers and returns one typed batch at
+the layer's position. This replaces one assignment map per head. Its
+arithmetic follows the general path's operations in order. For example,
+`:rotate-hue` clamps the colour to [0,1], as thi.ng's conversion does, and
+uses the same epsilon. Validation of values, blends and transform results
+follows `layers/typed` and the per-head HDR range.
+
+When anything falls outside that subset, the whole frame uses the general
+path. This covers a missing field without a default, an out-of-range value,
+repeated targets and literal products that the general path computes exactly.
+A frame that faults downstream after typed composition is composed again on
+the general path. The fault then keeps its message, data and source. Pass
+the render option `:typed-layers? false` to compose every group on the general
+path. `afterglow.render.typed-layers-test` compares bytes, values and faults
+across seeded frames. These include HDR on and off, member gain, opacities,
+target weights, explicit targets with heads that lack colour,
+`:blackout-ids`, and lower `:add` and `:max` blends.
+
+Every array belongs to one call. After setup, the loop over heads allocates
+nothing. The output batch's values are fresh and never written after return.
+On 2,048 RGB pixels, a single colour modifier now adds no measurable time to
+the median show tick: -0.10 to 0.13 ms. The general path added 22 to 28 ms.
+The colour guard with the darkening sparkle adds 0.63 ms, down from 56.8 ms.
+The companion Tolglow benchmark `tolglow.perf.pixel-modifiers` measures this
+([tolgraven/tolglow#908](https://github.com/tolgraven/tolglow/issues/908)).
+
 ### Reordering active instances
 
 To set a running instance's priority directly, submit
