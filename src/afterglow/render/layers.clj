@@ -30,7 +30,92 @@
 
 (def ^:private reads #{:previous :incoming :field})
 
-(def ^:private operators #{:add :multiply :divide :rotate-y :rotate-hue})
+(def ^:private operators #{:add :multiply :divide :rotate-y :rotate-hue :color-grade :color-guard})
+
+(def luminance-weights
+  "Linear Rec. 709 luminance of an RGB light colour. `:color-grade`
+  desaturates toward this luminance, so it keeps the perceived brightness."
+  [0.2126 0.7152 0.0722])
+
+(defn- unit-clamp ^double [x] (min 1.0 (max 0.0 (double x))))
+
+(defn- turns ^double [x] (let [x (double x)] (- x (Math/floor x))))
+
+(defn rgb->hsv
+  "Hue in turns [0,1), saturation [0,1] and value (the largest component) of a
+  nonnegative linear RGB triple. Value may exceed 1 on the HDR path. A grey
+  has hue 0 and saturation 0."
+  [[r g b]]
+  (let [r (double r) g (double g) b (double b)
+        v (max r g b) c (- v (min r g b))
+        h (cond (zero? c) 0.0
+                (== v r) (/ (- g b) c)
+                (== v g) (+ 2.0 (/ (- b r) c))
+                :else (+ 4.0 (/ (- r g) c)))]
+    [(turns (/ h 6.0)) (if (pos? v) (/ c v) 0.0) v]))
+
+(defn hsv->rgb
+  "Inverse of `rgb->hsv`. Keeps the value, so overrange light stays overrange."
+  [[h s v]]
+  (let [v (double v) s (double s)
+        h6 (* 6.0 (turns h)) sector (long (Math/floor h6)) f (- h6 sector)
+        p (* v (- 1.0 s)) q (* v (- 1.0 (* s f))) t (* v (- 1.0 (* s (- 1.0 f))))]
+    (case (mod sector 6)
+      0 [v t p] 1 [q v p] 2 [p v t] 3 [p q v] 4 [t p v] [v p q])))
+
+(defn- settings! [op x]
+  (when-not (and (vector? x) (= 3 (count x)) (every? finite? x))
+    (fail! (str (name op) " needs a color and three finite settings") {:settings x}))
+  x)
+
+(defn color-grade
+  "Shade a light colour by `[dim desaturate hue]`. Rotate its hue by `hue`
+  turns at constant saturation and value, mix it toward its own luminance by
+  `desaturate`, then scale it by `1 - dim`. dim and desaturate are clamped to
+  [0,1]; the hue turn wraps. `[0 0 0]` leaves the colour unchanged. The hue
+  turn keeps the value, but desaturation keeps Rec. 709 luminance, so it
+  spends HDR overrange: `[3 0 0]` fully desaturated is about `[0.64 0.64 0.64]`.
+  Components never leave [0, max component]."
+  [rgb [dim desaturate hue]]
+  (let [[r g b] (if (zero? (double hue)) rgb
+                    (let [[h s v] (rgb->hsv rgb)] (hsv->rgb [(+ h (double hue)) s v])))
+        k (unit-clamp desaturate)
+        [wr wg wb] luminance-weights
+        lum (+ (* (double wr) (double r)) (* (double wg) (double g)) (* (double wb) (double b)))
+        top (max (double r) (double g) (double b))
+        gain (- 1.0 (unit-clamp dim))]
+    ;; The weights sum to one only within rounding, so bound the mix by the
+    ;; brightest input component: white stays exactly white.
+    (mapv #(* gain (min top (max 0.0 (+ (double %) (* k (- lum (double %))))))) [r g b])))
+
+(defn- smoothstep ^double [^double t]
+  (let [t (unit-clamp t)] (* t t (- 3.0 (* 2.0 t)))))
+
+(defn color-guard
+  "Keep a light colour inside an operator's palette with
+  `[min-saturation restriction center]`. The floor and restriction are clamped
+  to [0,1]; the centre is a hue in turns and wraps, so -0.1 is 0.9.
+
+  The hue first moves to the nearest edge of the arc of `1 - restriction`
+  turns centred on `center` turns: restriction 0 allows every hue and 1 locks
+  every colour to `center`. Then a saturation below `min-saturation` rises
+  toward it by `smoothstep(s / min-saturation)`. Whites and faint tints stay
+  close to white, and mid-saturation mixes reach the floor. The mapping is
+  continuous in saturation, and in hue except opposite `center`. Value is kept.
+  `[0 0 c]` leaves every colour unchanged."
+  [rgb [min-saturation restriction center]]
+  (let [floor (unit-clamp min-saturation)
+        half (* 0.5 (- 1.0 (unit-clamp restriction)))
+        [h s v] (rgb->hsv rgb)
+        centre (turns center)
+        offset (- (turns (+ (- h centre) 0.5)) 0.5)
+        h (if (and (pos? s) (> (Math/abs offset) half))
+            (turns (+ centre (if (neg? offset) (- half) half)))
+            h)
+        s (if (and (pos? floor) (< s floor))
+            (+ s (* (- floor s) (smoothstep (/ s floor))))
+            s)]
+    (hsv->rgb [h s v])))
 
 (defn- validate-expr! [x depth]
   (cond
@@ -79,7 +164,11 @@
                           (let [[x y z] a c (Math/cos b) s (Math/sin b)]
                             [(+ (* x c) (* z s)) y (- (* z c) (* x s))]))
             :rotate-hue (do (when-not (finite? b) (fail! "rotate-hue needs a color and turns" {}))
-                            (color/rotate-hue (typed high? :color a) (* 2.0 Math/PI b)))))))))
+                            (color/rotate-hue (typed high? :color a) (* 2.0 Math/PI b)))
+            (:color-grade :color-guard)
+            (let [light (rgb (typed high? :color a))
+                  f (if (= op :color-grade) color-grade color-guard)]
+              (typed high? :color (f light (settings! op (rgb b)))))))))))
 
 (defn- over [high? blend-field id field before value blend opacity]
   (typed high? field (blend-field id field (rgb before) (rgb value) blend opacity)))
@@ -126,7 +215,7 @@
               (ex-info "A layer member's contribution blocks must agree on its descriptor" {:layer native-layer})
               source)))))
 
-(defn- apply-member [high? state blocks rows blend-field validate! allowed]
+(defn- apply-member [high? state blocks rows blend-field validate! allowed supports?]
   (let [{:keys [source native-layer] :as first-block} (first blocks)
         {:keys [transforms member-opacity targets] :or {member-opacity 1}} native-layer]
     (try
@@ -143,13 +232,30 @@
                                        acc (rows block allowed)))
                              initial blocks)
               apply-row (partial set-assignment high? blend-field validate!)]
+          ;; A mixed selection, such as a white-only head under a colour
+          ;; filter, skips the heads that lack a field. A field that no target
+          ;; implements is an authoring error, such as a misspelt :colour.
+          ;; Judge the member's whole target set, not this frame's weighted
+          ;; subset: a moving volume over white-only heads must not fault.
+          (when supports?
+            (let [pool (if (seq target-ids) (distinct (concat target-ids (keys inputs)))
+                           (when-not allowed (keys inputs)))]
+              (doseq [{:keys [attribute]} transforms
+                      :when (and (not= :beat-ratio attribute) (seq pool)
+                                 (not-any? #(supports? % attribute) pool))]
+                (fail! "No target implements layer transform field" {:attribute attribute}))))
           (reduce-kv
            (fn [st id assignments]
              (let [prior (get-in st [:fields id] {})
                    incoming (reduce apply-row {} assignments)
                    base (reduce apply-row prior assignments)
-                   post (transform-fields high? id prior incoming base transforms validate!)
-                   written (into (set (keys incoming)) (map :attribute) transforms)
+                   ;; As Tolglow's compiled outputs skip heads that lack an
+                   ;; attribute (tolgraven/tolglow#688), a step skips them here.
+                   steps (if supports?
+                           (filterv #(or (= :beat-ratio (:attribute %)) (supports? id (:attribute %))) transforms)
+                           transforms)
+                   post (transform-fields high? id prior incoming base steps validate!)
+                   written (into (set (keys incoming)) (map :attribute) steps)
                    ;; A native transform can synthesize a value independent of
                    ;; its input. Apply member gain after the transform, once.
                    gain (::hdr/member-gain first-block)
@@ -187,7 +293,7 @@
   (when (and (some? weights) (not (and (map? weights) (every-weight? unit? weights))))
     (throw (faults/attributed-error (ex-info "Target weights must be a map of unit opacities" {}) source))))
 
-(defn- group-blocks [high? backdrop blocks rows blend-field validate!]
+(defn- group-blocks [high? backdrop blocks rows blend-field validate! supports?]
   (let [members (ordered-members blocks)
         group (:native-layer (first blocks))
         opacity (:opacity group 1)
@@ -196,7 +302,7 @@
     (if (or (zero? opacity) (and allowed (empty? allowed)))
       []
       (let [{:keys [fields sources]}
-            (reduce #(apply-member high? %1 %2 rows blend-field validate! allowed) {:fields backdrop :sources {}} members)
+            (reduce #(apply-member high? %1 %2 rows blend-field validate! allowed supports?) {:fields backdrop :sources {}} members)
             writes (for [[id attrs] (sort-by (comp pr-str key) sources)
                          [field source] (sort-by key attrs)
                          :when (not= :beat-ratio field)]
@@ -305,8 +411,11 @@
   blend function receives the target ID and attribute before the blend inputs.
   Optional :target-weights maps head IDs to [0,1]. Omitted heads receive no
   group output. Multiply the final group opacity by this weight once, after
-  composing all native transforms and their inputs."
-  [blocks rows blend-field validate! high?]
+  composing all native transforms and their inputs. Optional supports?, a
+  function of target ID and attribute, skips a transform step on a head that
+  does not implement its field, as effect outputs skip such heads."
+  ([blocks rows blend-field validate! high?] (compose-fields blocks rows blend-field validate! high? nil))
+  ([blocks rows blend-field validate! high? supports?]
   (if-not (some :native-layer blocks)
     blocks
     (let [tagged (filterv :native-layer blocks)
@@ -334,12 +443,12 @@
               (let [layer (:native-layer block)
                     entries (cond (nil? layer) [block]
                                   (= i (get anchors (:id layer)))
-                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate!)
+                                  (group-blocks high? backdrop (get groups (:id layer)) rows blend-field validate! supports?)
                                   :else [])]
                 (cond-> (update state :out into entries)
                   (< i last-anchor)
                   (assoc :backdrop (reduce #(update-backdrop %1 %2 targets rows apply-row) backdrop entries)))))
-            {:backdrop {} :out []} blocks))))))))
+            {:backdrop {} :out []} blocks)))))))))
 
 (defn compose
   "Compose native layers using a common blend function for all fields."

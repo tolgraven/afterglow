@@ -347,3 +347,129 @@
         (is (= (vec (get-in reference [:universes 0])) (vec (get-in fast [:universes 0]))))
         (when compact?
           (is (= (frame/project-compact (:compact reference)) (frame/project-compact (:compact fast)))))))))
+
+(defn- near? [a b] (every? #(< (abs %) 1.0e-9) (map - a b)))
+
+(deftest color-grade-dims-desaturates-and-turns-hue-from-one-coefficient-triple
+  (testing "zero coefficients leave any colour, including overrange light, unchanged"
+    (doseq [c [[0.8 0.3 0.1] [1.0 1.0 1.0] [0.0 0.0 0.0] [2.5 0.4 0.0]]]
+      (is (= c (layers/color-grade c [0 0 0])))))
+  (is (= [0.0 0.0 0.0] (layers/color-grade [0.8 0.3 0.1] [1 0 0])) "Full dim is black")
+  (is (near? [0.4 0.15 0.05] (layers/color-grade [0.8 0.3 0.1] [0.5 0 0])))
+  (let [lum (+ (* 0.2126 0.8) (* 0.7152 0.3) (* 0.0722 0.1))]
+    (is (near? [lum lum lum] (layers/color-grade [0.8 0.3 0.1] [0 1 0]))
+        "Full desaturation keeps the colour's own luminance"))
+  (is (= [1.0 1.0 1.0] (layers/color-grade [1.0 1.0 1.0] [0 0.7 0])) "White stays exactly white")
+  (is (near? [0.0 1.0 0.0] (layers/color-grade [1.0 0.0 0.0] [0 0 1/3])) "A third of a turn takes red to green")
+  (is (near? [0.0 0.0 0.0] (layers/color-grade [0.6 0.2 0.9] [2 -1 0])) "Dim and desaturation clamp to [0,1]")
+  (testing "overrange light keeps its value through a hue turn"
+    (is (near? [0.0 2.5 0.0] (layers/color-grade [2.5 0.0 0.0] [0 0 1/3])))))
+
+(defn- saturation-of [c] (second (layers/rgb->hsv c)))
+
+(deftest color-guard-lifts-muddy-mixes-and-holds-hue-to-the-palette-arc
+  (testing "no floor and no restriction is the identity"
+    (doseq [c [[0.8 0.3 0.1] [0.5 0.5 0.5] [1.0 0.0 0.6]]]
+      (is (near? c (layers/color-guard c [0 0 0.3])))))
+  (testing "a muddy mix rises to the floor and keeps its hue and value"
+    (let [mud [0.6 0.45 0.3]
+          [h _ v] (layers/rgb->hsv mud)
+          guarded (layers/color-guard mud [0.8 0 0])
+          [h2 s2 v2] (layers/rgb->hsv guarded)]
+      (is (< (saturation-of mud) 0.8))
+      (is (< (abs (- h h2)) 1.0e-9))
+      (is (< (abs (- v v2)) 1.0e-9))
+      (is (< 0.6 s2 0.8))
+      (is (near? [0.8 0.8 0.4] (layers/color-guard [0.8 0.8 0.4] [0.5 0 0])) "At the floor a colour is already guarded")))
+  (testing "white and faint tints stay close to white"
+    (is (= [1.0 1.0 1.0] (layers/color-guard [1.0 1.0 1.0] [0.9 0 0])))
+    (is (< (saturation-of (layers/color-guard [1.0 0.97 0.95] [0.9 0 0])) 0.06)))
+  (testing "saturation maps monotonically and continuously onto [floor, 1]"
+    (let [mapped (mapv #(saturation-of (layers/color-guard [1.0 (- 1.0 %) (- 1.0 %)] [0.6 0 0]))
+                       (map #(/ % 100.0) (range 101)))]
+      (is (apply <= mapped))
+      (is (every? #(< % 0.05) (map - (rest mapped) mapped)))
+      (is (every? #(>= % (- 0.6 1.0e-9)) (drop 60 mapped)))))
+  (testing "hues outside the allowed arc move to its nearest edge"
+    ;; Allow the quarter turn centred on orange (0.08): 0.08 +/- 0.125.
+    (let [guard #(first (layers/rgb->hsv (layers/color-guard (layers/hsv->rgb [% 1.0 1.0]) [0 0.75 0.08])))]
+      (is (< (abs (- 0.1 (guard 0.1))) 1.0e-9) "Inside the arc")
+      (is (< (abs (- 0.205 (guard 0.4))) 1.0e-9) "Past the warm edge")
+      (is (< (abs (- 0.955 (guard 0.8))) 1.0e-9) "Past the cool edge, across zero")))
+  (is (near? [1.0 0.5 0.0] (layers/color-guard [0.0 0.0 1.0] [0 1 1/12])) "Full restriction locks the hue")
+  (is (near? [0.5 0.5 0.5] (layers/color-guard [0.5 0.5 0.5] [0 1 0.6])) "A grey has no hue to move")
+  (is (near? [3.0 1.5 0.0] (layers/color-guard [0.0 0.0 3.0] [0 1 1/12])) "Overrange value is kept"))
+
+(deftest color-operators-read-their-settings-from-the-member-and-pack-identically
+  (let [base (block (row :color [0.6 0.45 0.3]) (row :dimmer 1.0))
+        grade {:attribute :color :value (expr :color-grade (assoc (field :previous :color) :default [0 0 0])
+                                              (field :incoming :color))}
+        guard {:attribute :color :value (expr :color-guard (field :previous :color) [0.8 0 0])}
+        render (fn [options transforms settings]
+                 (frame/resolve-contributions
+                  patch [(layer 0 1 [] base) (layer 1 1 transforms (block (row :color settings)))] options))]
+    (is (= [grade guard] (layers/validate-transforms! [grade guard])))
+    (testing "the member's colour output carries the grade, then the guard reads the graded colour"
+      (let [rich (render {:compact-values? true} [grade] [0.5 0 0])
+            packed (render {:include-values? false :compact-values? true} [grade] [0.5 0 0])]
+        (is (near? [0.3 0.225 0.15] (get-in rich [:values :head :emitted-color])))
+        (is (= (vec (get-in rich [:universes 0])) (vec (get-in packed [:universes 0]))))
+        (is (= [77 57 38 255] (take 4 (map #(bit-and % 0xff) (get-in rich [:universes 0])))))))
+    (let [both (render {} [grade (assoc guard :value (expr :color-guard (field :field :color) [0.8 0 0]))] [0 0 0])]
+      (is (< 0.6 (saturation-of (get-in both [:values :head :emitted-color])) 0.8)))
+    (testing "bad settings fault the member with its source"
+      (let [error (try (render {} [(assoc guard :value (expr :color-guard (field :previous :color) 0.5))] [0 0 0]) nil
+                       (catch clojure.lang.ExceptionInfo cause cause))]
+        (is (= {:instance-id 1} (:effect-source (ex-data error))))))))
+
+(deftest a-transform-skips-heads-that-lack-its-field
+  (let [mixed (frame/compile-patch [{:id :rgb :address 1 :universe 0 :channels {:red 1 :green 2 :blue 3}}
+                                    {:id :lamp :address 4 :universe 0 :channels {:white 1}}])
+        base {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.6 0.45 0.3]}
+                                               {:target-id :lamp :attribute :white :value 0.5}]}
+        guard (assoc {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.5 0 0]}]}
+                     :native-layer {:id :guard :member 0 :target-ids [:rgb :lamp]
+                                    :transforms [{:attribute :color
+                                                  :value (expr :color-grade (field :previous :color) (field :incoming :color))}]}
+                     :source {:instance-id :guard})
+        result (frame/resolve-contributions mixed [base guard] {})]
+    (is (near? [0.3 0.225 0.15] (get-in result [:values :rgb :emitted-color])))
+    (is (= 128 (bit-and 0xff (aget ^bytes (get-in result [:universes 0]) 3))) "The white-only head keeps its white")
+    (testing "an unknown head named by the layer still faults"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (frame/resolve-contributions mixed [base (assoc-in guard [:native-layer :target-ids] [:rgb :nowhere])] {}))))))
+
+(deftest a-transform-field-no-target-implements-faults
+  (let [mixed (frame/compile-patch [{:id :rgb :address 1 :universe 0 :channels {:red 1 :green 2 :blue 3}}
+                                    {:id :lamp :address 4 :universe 0 :channels {:white 1}}])
+        member (fn [field ids]
+                 (assoc {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.5 0 0]}]}
+                        :native-layer {:id :m :member 0 :target-ids ids
+                                       :transforms [{:attribute field :value [0.1 0.1 0.1]}]}
+                        :source {:instance-id :m}))
+        error (try (frame/resolve-contributions mixed [(member :colour [:rgb :lamp])] {}) nil
+                   (catch clojure.lang.ExceptionInfo cause cause))]
+    (is (= "No target implements layer transform field" (ex-message (or (ex-cause error) error))))
+    (is (= {:instance-id :m} (:effect-source (ex-data error))))
+    (is (map? (frame/resolve-contributions mixed [(member :color [:rgb :lamp])] {})) "A mixed group still skips the lamp")))
+
+(deftest the-guard-centre-and-the-grade-turn-wrap
+  (is (near? (layers/color-guard [0.0 0.0 1.0] [0 1 0.9]) (layers/color-guard [0.0 0.0 1.0] [0 1 -0.1])))
+  (is (near? (layers/color-guard [0.0 0.0 1.0] [0 1 0.3]) (layers/color-guard [0.0 0.0 1.0] [0 1 1.3])))
+  (is (near? (layers/color-grade [1.0 0.0 0.0] [0 0 0.9]) (layers/color-grade [1.0 0.0 0.0] [0 0 -0.1])))
+  (is (near? [0.6378 0.6378 0.6378] (mapv #(/ (Math/round (* 10000 %)) 10000.0) (layers/color-grade [3.0 0.0 0.0] [0 1 0])))
+      "Desaturation keeps luminance and spends HDR excess"))
+
+(deftest a-moving-selection-over-heads-without-the-field-does-not-fault
+  (let [mixed (frame/compile-patch [{:id :rgb :address 1 :universe 0 :channels {:red 1 :green 2 :blue 3}}
+                                    {:id :lamp :address 4 :universe 0 :channels {:white 1}}])
+        base {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.6 0.45 0.3]}
+                                               {:target-id :lamp :attribute :white :value 0.5}]}
+        member (assoc {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.5 0 0]}]}
+                      :native-layer {:id :vol :member 0 :target-ids [:rgb :lamp] :target-weights {:lamp 1.0}
+                                     :transforms [{:attribute :color
+                                                   :value (expr :color-grade (field :previous :color) (field :incoming :color))}]}
+                      :source {:instance-id :vol})
+        result (frame/resolve-contributions mixed [base member] {})]
+    (is (= 128 (bit-and 0xff (aget ^bytes (get-in result [:universes 0]) 3))) "This frame's weights cover only the lamp")
+    (is (near? [0.6 0.45 0.3] (get-in result [:values :rgb :emitted-color])) "The uncovered RGB head is untouched")))
