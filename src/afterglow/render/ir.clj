@@ -5,7 +5,8 @@
   or prove driver support. Values are finite scalars or vectors of 2–4 scalars;
   scalar arithmetic broadcasts to vectors. Time nodes return milliseconds; beat,
   bar and phrase nodes use explicit captured musical transport and meter."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:import [java.util ArrayList HashMap IdentityHashMap]))
 
 (defrecord ^:private PartialMaxBlend [op args])
 
@@ -255,13 +256,17 @@
 (defn evaluate [expression env]
   ((compile-expression expression) env))
 
-(definterface ScalarExpression
-  (^double evalDouble [^doubles inputs]))
+(definterface Instruction
+  (^void run [^doubles registers]))
 
-(defn- finite-result ^double [^double value path]
-  (when-not (Double/isFinite value)
-    (invalid! path "Expression produced a non-finite value"))
-  value)
+(defmacro ^:private store!
+  "Write one result to its register after the operation's own domain checks,
+  failing at the expression path that produced a non-finite value."
+  [registers out path value]
+  `(let [value# ~value]
+     (when-not (Double/isFinite value#)
+       (invalid! ~path "Expression produced a non-finite value"))
+     (aset ~registers ~out value#)))
 
 (defn- uniform-inputs
   "Frame inputs shared by every position, with source paths for diagnostics."
@@ -278,91 +283,131 @@
     (mapcat (fn [index child] (uniform-inputs child (conj path :args index)))
             (range) (:args expression))))
 
-(defn- arithmetic-component [op children]
-  (let [^ScalarExpression a (first children)
-        ^ScalarExpression b (get children 1)
-        n (count children)]
-    (if (= n 2)
-      (case op
-        :add (reify ScalarExpression (evalDouble [_ in] (+ (.evalDouble a in) (.evalDouble b in))))
-        :multiply (reify ScalarExpression (evalDouble [_ in] (* (.evalDouble a in) (.evalDouble b in))))
-        :min (reify ScalarExpression (evalDouble [_ in] (min (.evalDouble a in) (.evalDouble b in))))
-        :max (reify ScalarExpression (evalDouble [_ in] (max (.evalDouble a in) (.evalDouble b in)))))
-      (let [combine (case op
-                      :add (fn ^double [^double x ^double y] (+ x y))
-                      :multiply (fn ^double [^double x ^double y] (* x y))
-                      :min (fn ^double [^double x ^double y] (min x y))
-                      :max (fn ^double [^double x ^double y] (max x y)))]
-        (reify ScalarExpression
-          (evalDouble [_ in]
-            (loop [index 1, value (.evalDouble a in)]
-              (if (= index n) value
-                  (recur (inc index) (.invokePrim ^clojure.lang.IFn$DDD combine value
-                                                  (.evalDouble ^ScalarExpression (nth children index) in)))))))))))
+(defmacro ^:private fold
+  "Fold register values left from the first operand, in authored order."
+  [operator r args n first-operand]
+  `(loop [i# 1, v# (aget ~r ~first-operand)]
+     (if (= i# ~n) v# (recur (inc i#) (~operator v# (aget ~r (aget ~args i#)))))))
 
-(defn- scalar-component
-  "Compile one float64 component without per-node value vectors or apply."
-  [expression component path slots]
-  (let [op (:op expression)
-        value-at (fn [value] (double (if (vector? value) (nth value component) value)))]
+(defn- fold-instruction
+  "An :add, :multiply, :min or :max over other than two operands folds left
+  in authored order and checks only its final value."
+  [op ^ints args out path]
+  (let [n (alength args), a (aget args 0), out (int out)]
     (case op
-      :const (let [value (value-at (:value expression))]
-               (reify ScalarExpression (evalDouble [_ _] value)))
-      (:param :time :beat :bar :phrase)
-      (let [slot (int (get slots [expression component]))]
-        (reify ScalarExpression (evalDouble [_ inputs] (aget inputs slot))))
-      :surface-uv (let [slot (int ({:u 3 :v 4} (:axis expression)))]
-                    (reify ScalarExpression (evalDouble [_ inputs] (aget inputs slot))))
-      :position (let [axis (int ({:x 0 :y 1 :z 2} (:axis expression)))]
-                  (reify ScalarExpression (evalDouble [_ inputs] (aget inputs axis))))
-      (:vec2 :vec3 :vec4) (scalar-component (nth (:args expression) component) 0 (conj path :args component) slots)
-      (let [children (mapv (fn [index child]
-                             (scalar-component child (if (= :number (expression-type child)) 0 component)
-                                               (conj path :args index) slots))
-                           (range) (:args expression))
-            ^ScalarExpression a (nth children 0)
-            ^ScalarExpression b (get children 1)
-            ^ScalarExpression c (get children 2)
-            n (count children)
-            operation
-            (case op
-              (:add :multiply :min :max) (arithmetic-component op children)
-              :subtract (if (= n 1)
-                          (reify ScalarExpression (evalDouble [_ inputs] (- (.evalDouble a inputs))))
-                          (reify ScalarExpression (evalDouble [_ inputs] (- (.evalDouble a inputs) (.evalDouble b inputs)))))
-              :divide (reify ScalarExpression
-                        (evalDouble [_ inputs]
-                          (let [x (.evalDouble a inputs), y (.evalDouble b inputs)]
-                            (when (zero? y) (invalid! path "Division by zero")) (/ x y))))
-              :sin (reify ScalarExpression (evalDouble [_ inputs] (Math/sin (.evalDouble a inputs))))
-              :cos (reify ScalarExpression (evalDouble [_ inputs] (Math/cos (.evalDouble a inputs))))
-              :abs (reify ScalarExpression (evalDouble [_ inputs] (Math/abs (.evalDouble a inputs))))
-              :floor (reify ScalarExpression (evalDouble [_ inputs] (Math/floor (.evalDouble a inputs))))
-              :fract (reify ScalarExpression (evalDouble [_ inputs] (let [x (.evalDouble a inputs)] (- x (Math/floor x)))))
-              :exp (reify ScalarExpression (evalDouble [_ inputs] (Math/exp (.evalDouble a inputs))))
-              :sqrt (reify ScalarExpression (evalDouble [_ inputs] (Math/sqrt (.evalDouble a inputs))))
-              :pow (reify ScalarExpression
-                     (evalDouble [_ inputs]
-                       (let [x (.evalDouble a inputs), y (.evalDouble b inputs)]
-                         (when (or (neg? x) (and (zero? x) (not (pos? y))))
-                           (invalid! path "Pow requires a nonnegative base and a positive exponent at zero"))
-                         (Math/pow x y))))
-              :clamp (reify ScalarExpression
-                       (evalDouble [_ inputs]
-                         (let [x (.evalDouble a inputs), lo (.evalDouble b inputs), hi (.evalDouble c inputs)]
-                           (when (> lo hi) (invalid! path "Clamp lower bound exceeds upper bound"))
-                           (min hi (max lo x)))))
-              :mix (reify ScalarExpression
-                     (evalDouble [_ inputs]
-                       (let [x (.evalDouble a inputs), y (.evalDouble b inputs), amount (.evalDouble c inputs)]
-                         (+ (* (- 1.0 amount) x) (* amount y)))))
-              ::partial-max-blend
-              (reify ScalarExpression
-                (evalDouble [_ inputs]
-                  (let [x (.evalDouble a inputs), highest (max x (.evalDouble b inputs)), amount (.evalDouble c inputs)]
-                    (+ x (* amount (- highest x)))))))]
-        (reify ScalarExpression
-          (evalDouble [_ inputs] (finite-result (.evalDouble ^ScalarExpression operation inputs) path)))))))
+      :add (reify Instruction (run [_ r] (store! r out path (double (fold + r args n a)))))
+      :multiply (reify Instruction (run [_ r] (store! r out path (double (fold * r args n a)))))
+      :min (reify Instruction (run [_ r] (store! r out path (double (fold min r args n a)))))
+      :max (reify Instruction (run [_ r] (store! r out path (double (fold max r args n a))))))))
+
+(defn- instruction
+  "One float64 operation reading its operands' registers and writing its own.
+  The arithmetic and checks are those of the scalar oracle, in the same order."
+  [op ^ints args out path]
+  (let [n (alength args), out (int out)
+        a (int (if (> n 0) (aget args 0) 0))
+        b (int (if (> n 1) (aget args 1) 0))
+        c (int (if (> n 2) (aget args 2) 0))]
+    (case op
+      (:add :multiply :min :max)
+      (if (= n 2)
+        (case op
+          :add (reify Instruction (run [_ r] (store! r out path (+ (aget r a) (aget r b)))))
+          :multiply (reify Instruction (run [_ r] (store! r out path (* (aget r a) (aget r b)))))
+          :min (reify Instruction (run [_ r] (store! r out path (min (aget r a) (aget r b)))))
+          :max (reify Instruction (run [_ r] (store! r out path (max (aget r a) (aget r b))))))
+        (fold-instruction op args out path))
+      :subtract (if (= n 1)
+                  (reify Instruction (run [_ r] (store! r out path (- (aget r a)))))
+                  (reify Instruction (run [_ r] (store! r out path (- (aget r a) (aget r b))))))
+      :divide (reify Instruction
+                (run [_ r]
+                  (let [x (aget r a), y (aget r b)]
+                    (when (zero? y) (invalid! path "Division by zero"))
+                    (store! r out path (/ x y)))))
+      :sin (reify Instruction (run [_ r] (store! r out path (Math/sin (aget r a)))))
+      :cos (reify Instruction (run [_ r] (store! r out path (Math/cos (aget r a)))))
+      :abs (reify Instruction (run [_ r] (store! r out path (Math/abs (aget r a)))))
+      :floor (reify Instruction (run [_ r] (store! r out path (Math/floor (aget r a)))))
+      :fract (reify Instruction (run [_ r] (store! r out path (let [x (aget r a)] (- x (Math/floor x))))))
+      :exp (reify Instruction (run [_ r] (store! r out path (Math/exp (aget r a)))))
+      :sqrt (reify Instruction (run [_ r] (store! r out path (Math/sqrt (aget r a)))))
+      :pow (reify Instruction
+             (run [_ r]
+               (let [x (aget r a), y (aget r b)]
+                 (when (or (neg? x) (and (zero? x) (not (pos? y))))
+                   (invalid! path "Pow requires a nonnegative base and a positive exponent at zero"))
+                 (store! r out path (Math/pow x y)))))
+      :clamp (reify Instruction
+               (run [_ r]
+                 (let [x (aget r a), lo (aget r b), hi (aget r c)]
+                   (when (> lo hi) (invalid! path "Clamp lower bound exceeds upper bound"))
+                   (store! r out path (min hi (max lo x))))))
+      :mix (reify Instruction
+             (run [_ r]
+               (let [x (aget r a), y (aget r b), amount (aget r c)]
+                 (store! r out path (+ (* (- 1.0 amount) x) (* amount y))))))
+      ::partial-max-blend
+      (reify Instruction
+        (run [_ r]
+          (let [x (aget r a), highest (max x (aget r b)), amount (aget r c)]
+            (store! r out path (+ x (* amount (- highest x))))))))))
+
+(defn- type-of
+  "Type of a validated subexpression, memoised by identity for one compilation."
+  [^IdentityHashMap types expression]
+  (or (.get types expression)
+      (let [type (case (:op expression)
+                   :const (value-type (:value expression))
+                   :param (declared-type (:type expression) [])
+                   (:vec2 :vec3 :vec4) (:op expression)
+                   (:time :beat :bar :phrase :surface-uv :position) :number
+                   (common-type (mapv #(type-of types %) (:args expression)) []))]
+        (.put types expression type)
+        type)))
+
+(defn- intern-node!
+  "Register of the node with this key, adding it after its operands if new."
+  [{:keys [^HashMap index ^ArrayList nodes first-register]} key spatial? make]
+  (if-let [register (.get index key)]
+    register
+    (let [register (long (+ (long first-register) (.size nodes)))]
+      (.add nodes {:spatial? spatial? :instruction (make register)})
+      (.put index key register)
+      register)))
+
+(defn- spatial-register?
+  "Whether a register's value depends on the head's coordinates."
+  [{:keys [^ArrayList nodes first-register coordinates]} ^long register]
+  (cond (< register (long coordinates)) true
+        (< register (long first-register)) false
+        :else (:spatial? (.get nodes (- register (long first-register))))))
+
+(defn- scalar-node!
+  "Register holding one float64 component of a validated expression.
+  Registers 0–2 hold the head's xyz and 3–4 its chart UV; frame inputs follow.
+  An operation on the same operand registers as an earlier one shares its
+  register, so each structurally equal subexpression is computed once. Nodes
+  are added in post-order, the order the tree-walking evaluator visits them,
+  and keep the path of their first occurrence for fault reports."
+  [state expression component path]
+  (case (:op expression)
+    :const (let [v (:value expression)
+                 value (double (if (vector? v) (nth v component) v))]
+             ;; Raw bits keep 0.0 and -0.0 apart.
+             (intern-node! state [:const (Double/doubleToRawLongBits value)] false
+                           (fn [out] (let [out (int out)] (reify Instruction (run [_ r] (aset r out value)))))))
+    (:param :time :beat :bar :phrase) (long (get (:slots state) [expression component]))
+    :surface-uv (long ({:u 3 :v 4} (:axis expression)))
+    :position (long ({:x 0 :y 1 :z 2} (:axis expression)))
+    (:vec2 :vec3 :vec4) (scalar-node! state (nth (:args expression) component) 0 (conj path :args component))
+    (let [op (:op expression)
+          args (mapv (fn [index child]
+                       (scalar-node! state child (if (= :number (type-of (:types state) child)) 0 component)
+                                     (conj path :args index)))
+                     (range) (:args expression))]
+      (intern-node! state (into [op] args) (boolean (some #(spatial-register? state %) args))
+                    (fn [out] (instruction op (int-array args) out path))))))
 
 (defn- validate-outputs! [outputs]
   (when-not (and (map? outputs) (seq outputs) (<= (count outputs) 64)
@@ -389,12 +434,8 @@
               (distinct))
         (tree-seq #(and (map? %) (vector? (:args %))) :args expression)))
 
-(defn- compile-field [slots {:keys [expression components] :as field}]
-  (let [spatial? (some #(#{:position :surface-uv} (:op %)) (tree-seq #(vector? (:args %)) :args expression))]
-    (-> field
-        (dissoc :node :expression)
-        (assoc :spatial? (boolean spatial?)
-               :scalars (mapv #(scalar-component expression % [] slots) (range components))))))
+(defn- reads-coordinates? [expression]
+  (boolean (some #(#{:position :surface-uv} (:op %)) (tree-seq #(vector? (:args %)) :args expression))))
 
 (defn compile-batch
   "Compile named expressions to a reusable float64 CPU batch plan.
@@ -403,19 +444,43 @@
   :focus expr}. Fields retain their own type/component count, so aim and focus
   never share an overloaded RGBA buffer. Batch arithmetic converts inputs to
   float64; compare against the scalar oracle with the required application
-  tolerance for exact-number inputs. This is not SIMD or GPU execution."
+  tolerance for exact-number inputs. This is not SIMD or GPU execution.
+
+  Every scalar component of every field compiles into one register program.
+  A structurally equal subexpression, wherever it appears in the batch, is one
+  instruction. Instructions that read no coordinate run once per evaluation,
+  before the head loop, and a component that reads no coordinate is filled
+  once. Each value still comes from the same operations on the same operands
+  in the same order, so results are bit-identical to evaluating every tree at
+  every head, and faults keep their message, data and the order they surface in."
   [outputs]
   (validate-outputs! outputs)
   (let [nodes (mapv (fn [[attribute expression]]
                       (let [node (compile-node expression)]
                         {:attribute attribute :type (:type node) :components (width (:type node))
-                         :node node :expression expression}))
+                         :node node :expression expression :spatial? (reads-coordinates? expression)}))
                     (sort-by (comp str key) outputs))
         uniforms (vec (into {} (mapcat #(uniform-inputs (:expression %) []) nodes)))
-        ;; Every invocation owns one double array. Slots 0–2 hold the current
-        ;; xyz position; the remaining inputs stay fixed for the entire frame.
+        ;; Every invocation owns one double array of registers. Registers 0–2
+        ;; hold the current xyz position (3–4 its chart UV); frame inputs and
+        ;; then the compiled operations follow.
         chart? (boolean (some #(some #{[:surface-uv]} (input-paths %)) (vals outputs)))
-        slots (zipmap (map key uniforms) (iterate inc (if chart? 5 3)))]
+        coordinates (if chart? 5 3)
+        slots (zipmap (map key uniforms) (iterate inc coordinates))
+        state {:index (HashMap.) :nodes (ArrayList.) :types (IdentityHashMap.) :slots slots
+               :coordinates coordinates :first-register (+ coordinates (count uniforms))}
+        build (fn [fields]
+                (into {} (map (fn [{:keys [attribute expression components]}]
+                                [attribute (mapv #(scalar-node! state expression % []) (range components))]))
+                      fields))
+        ;; Build in evaluation order: fields that read no coordinate are
+        ;; evaluated first, as they always were, then the spatial fields.
+        constant-roots (build (remove :spatial? nodes))
+        prefix-count (.size ^ArrayList (:nodes state))
+        spatial-roots (build (filter :spatial? nodes))
+        program (vec (:nodes state))
+        later (subvec program prefix-count)
+        roots (merge constant-roots spatial-roots)]
     {:type ::batch :surface-uv? chart?
      :uniforms (mapv val uniforms)
      :params (collected (map :node nodes))
@@ -423,7 +488,22 @@
                         node (tree-seq #(and (map? %) (vector? (:args %))) :args expression)
                         :when (= :time (:op node))]
                     (if (= :absolute (:clock node :elapsed)) :time-ms :elapsed-ms)))
-     :outputs (mapv #(compile-field slots %) nodes)}))
+     :registers (+ (long (:first-register state)) (count program))
+     ;; Operations of the frame-constant fields, then the remaining operations
+     ;; that read no coordinate, then those run at every head. :first-head
+     ;; replays every operation of the spatial fields in visiting order; it only
+     ;; runs to raise a frame-constant fault where an unhoisted evaluation would.
+     :constant-fields (mapv :instruction (subvec program 0 prefix-count))
+     :hoisted (into [] (comp (remove :spatial?) (map :instruction)) later)
+     :per-head (into [] (comp (filter :spatial?) (map :instruction)) later)
+     :first-head (mapv :instruction later)
+     :outputs (mapv (fn [{:keys [attribute] :as field}]
+                      (let [registers (get roots attribute)]
+                        (-> (select-keys field [:attribute :type :components :spatial?])
+                            (assoc :roots registers
+                                   :per-head (filterv #(spatial-register? state (nth registers %))
+                                                      (range (count registers)))))))
+                    nodes)}))
 
 (def ^:private doubles-class (class (double-array 0)))
 
@@ -470,6 +550,68 @@
             (aset inputs 3 (double (nth uv 0)))
             (aset inputs 4 (double (nth uv 1))))))))
 
+(defn- execute! [instructions ^doubles registers]
+  (doseq [instruction instructions]
+    (.run ^Instruction instruction registers)))
+
+(defn- fill-component!
+  "Write one frame-constant register to a component at every head."
+  [{:keys [components roots values]} component ^doubles registers ^long n]
+  (let [^doubles target values, components (int components), component (int component)
+        value (aget registers (int (nth roots component)))]
+    (if (= components 1)
+      (java.util.Arrays/fill target value)
+      (dotimes [index n]
+        (aset target (+ (* index components) component) value)))))
+
+(defn- run-batch!
+  "Evaluate a validated plan into freshly allocated fields."
+  [batch env positions flat? surface-uvs n fields]
+  (let [n (long n)
+        uniforms (:uniforms batch)
+        chart? (:surface-uv? batch)
+        uv-flat? (instance? doubles-class surface-uvs)
+        coordinates (if chart? 5 3)
+        registers (double-array (:registers batch))
+        spatial (filterv :spatial? fields)]
+    (when (pos? n)
+      (dotimes [slot (count uniforms)]
+        (aset registers (+ slot coordinates) (double ((nth uniforms slot) env))))
+      ;; Whole-output expressions that depend only on time/params are shared by
+      ;; every head. Compute them once instead of re-reading the same inputs N times.
+      (execute! (:constant-fields batch) registers)
+      (doseq [field fields :when (not (:spatial? field))
+              component (range (:components field))]
+        (fill-component! field component registers n))
+      (try (execute! (:hoisted batch) registers)
+           (catch clojure.lang.ExceptionInfo error
+             ;; Without hoisting this fault would surface at the first head,
+             ;; after its coordinates load and after any earlier fault there.
+             ;; Replay that head unhoisted so the same first fault is raised.
+             (load-position! positions flat? 0 registers)
+             (when chart? (load-uv! surface-uvs uv-flat? 0 registers))
+             (execute! (:first-head batch) registers)
+             (throw error)))
+      (doseq [field spatial
+              component (remove (set (:per-head field)) (range (:components field)))]
+        (fill-component! field component registers n)))
+    (let [^objects program (object-array (:per-head batch))
+          steps (alength program)
+          stores (vec (for [field spatial, component (:per-head field)] [field component]))
+          ^objects targets (object-array (map #(:values (first %)) stores))
+          ^ints sources (int-array (map (fn [[field component]] (nth (:roots field) component)) stores))
+          ^ints strides (int-array (map #(:components (first %)) stores))
+          ^ints offsets (int-array (map second stores))
+          store-count (alength sources)]
+      (dotimes [index n]
+        (load-position! positions flat? index registers)
+        (when chart? (load-uv! surface-uvs uv-flat? index registers))
+        (dotimes [step steps]
+          (.run ^Instruction (aget program step) registers))
+        (dotimes [k store-count]
+          (aset ^doubles (aget targets k) (+ (* index (aget strides k)) (aget offsets k))
+                (aget registers (aget sources k))))))))
+
 (defn evaluate-batch
   "Evaluate a compiled batch for ordered positions and return owned float64 fields.
 
@@ -499,36 +641,8 @@
       (when-not (contains? (:params env) key) (invalid! [] "Missing expression parameter" {:key key}))
       (checked (get (:params env) key) type [:params key]))
     (doseq [clock (:clocks batch)] (checked (get env clock) :number [clock]))
-    (let [fields (mapv (fn [output] (assoc output :values (double-array (* count (:components output))))) (:outputs batch))
-          spatial-fields (filterv :spatial? fields)
-          spatial-count (clojure.core/count spatial-fields)
-          uniforms (:uniforms batch)
-          chart? (:surface-uv? batch)
-          uv-flat? (instance? doubles-class surface-uvs)
-          coordinates (if chart? 5 3)
-          inputs (double-array (+ coordinates (clojure.core/count uniforms)))]
-      ;; Whole-output expressions that depend only on time/params are shared by
-      ;; every head. Compute them once instead of re-reading the same inputs N times.
-      (when (pos? count)
-        (dotimes [slot (clojure.core/count uniforms)]
-          (aset inputs (+ slot coordinates) (double ((nth uniforms slot) env))))
-        (doseq [{:keys [scalars components] :as field} (remove :spatial? fields)]
-          (let [^doubles target (:values field), components (int components)]
-            (dotimes [component components]
-              (let [value (.evalDouble ^ScalarExpression (nth scalars component) inputs)]
-                (if (= components 1)
-                  (java.util.Arrays/fill target value)
-                  (dotimes [index count]
-                    (aset target (+ (* index components) component) value))))))))
-      (dotimes [index count]
-        (load-position! positions flat? index inputs)
-        (when chart? (load-uv! surface-uvs uv-flat? index inputs))
-        (dotimes [field-index spatial-count]
-          (let [field (nth spatial-fields field-index), scalars (:scalars field)
-                components (int (:components field)), base (* index components), ^doubles target (:values field)]
-            (dotimes [component components]
-              (aset target (+ base component)
-                    (.evalDouble ^ScalarExpression (nth scalars component) inputs))))))
+    (let [fields (mapv (fn [output] (assoc output :values (double-array (* count (:components output))))) (:outputs batch))]
+      (run-batch! batch env positions flat? surface-uvs count fields)
       {:count count
        :outputs (into {} (map (fn [field] [(:attribute field) (select-keys field [:type :components :values])]) fields))}))))
 

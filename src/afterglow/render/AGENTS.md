@@ -69,6 +69,13 @@ and readback. Effect steps return data to the renderer.
   (vec3) and focus (number). It is CPU batching, not SIMD. Exact numeric inputs
   convert to doubles; use appropriate oracle tolerances and quantized-output
   comparison. Preserve per-operator finite/domain rejection.
+  A batch is one register program: a structurally equal subexpression is one
+  instruction across all fields, coordinate-free instructions run once per call
+  and coordinate-free components are filled once. Results must stay
+  bit-identical to `afterglow.render.ir-reference` (the unshared evaluator in
+  `test/`), and faults keep their message, data and order: a hoisted fault
+  replays the first head unhoisted. Do not change emitted GLSL with it; the
+  golden test in `ir-test` pins `emit-glsl` and `emit-glsl-batch`.
 - Musical nodes `:beat`, `:bar`, and `:phrase` use captured `:beat` or
   `:elapsed-beats` and explicit positive finite `:meter` divisions. They return
   continuous phases. `:time` remains explicitly milliseconds. GLSL declares only
