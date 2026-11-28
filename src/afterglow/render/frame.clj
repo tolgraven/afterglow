@@ -1686,14 +1686,25 @@
                   (if partitioned?
                     (resolve-partitioned patch blocks options)
                     (resolve-general-contributions patch blocks options)))
-        composed (compose-layers patch blocks (:typed-layers? options true))]
-    (if (::typed-layers/typed (meta composed))
+        composed (compose-layers patch blocks (:typed-layers? options true))
+        composition (meta composed)
+        ;; Report how native layers were composed, for profiling and tests.
+        report (fn [frame data] (if (instance? clojure.lang.IObj frame) (vary-meta frame merge data) frame))]
+    (cond
+      (::typed-layers/typed composition)
       ;; Typed colour groups skip the general path's validation of the
       ;; layer's lower rows. Should the frame fault, compose it again on the
       ;; general path so the fault keeps its message, data and source.
-      (try (resolve composed)
-           (catch Exception _ (resolve (compose-layers patch blocks false))))
-      (resolve composed))))
+      (let [frame (try (resolve composed)
+                       (catch Exception _ ::fault))]
+        (if (= ::fault frame)
+          (report (resolve (compose-layers patch blocks false)) {::typed-layers/fallback :fault-replay})
+          (report frame {::typed-layers/typed true})))
+
+      (::typed-layers/fallback composition)
+      (report (resolve composed) (select-keys composition [::typed-layers/fallback]))
+
+      :else (resolve composed))))
 
 (defn resolve-contributions
   "Resolve the kernel's ordered mixed contribution stream exactly once.
@@ -1726,7 +1737,10 @@
   Native layer groups whose transforms only grade, guard, multiply or turn the
   hue of colour compose from typed colour columns into one owned batch, with
   the general path's bytes; `:typed-layers? false` composes every group on the
-  general path.
+  general path. The returned frame's metadata then holds
+  `:afterglow.render.typed-layers/typed` true, or the reason the typed
+  attempt fell back under `:afterglow.render.typed-layers/fallback`
+  (including :fault-replay when a typed frame faulted and was composed again).
   Options and ownership match resolve-frame. Typed arrays must remain read-only
   throughout this call; failed validation returns no frame or partial output."
   ([fixtures contributions] (resolve-contributions fixtures contributions {}))

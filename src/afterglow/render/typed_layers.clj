@@ -109,23 +109,38 @@
 (defn- literal-components [node]
   (let [v (or (:value node) (:literal node))] (if (vector? v) v [v])))
 
+(defn- literal-product
+  "The product the general path computes for two literal operands. An absent
+  read's default is a plain vector there, not a colour record, so it stays
+  exact until the transform's result is typed."
+  [a b]
+  (let [x (or (:value a) (:literal a)) y (or (:value b) (:literal b))]
+    (cond (and (vector? x) (vector? y)) (mapv * x y)
+          (vector? x) (mapv #(* % y) x)
+          (vector? y) (mapv #(* x %) y)
+          :else (* x y))))
+
 (defn- compile-op [state {:keys [op args]} fold]
   (when-let [[state a] (compile-node state (first args) fold)]
     (when-let [[state b] (compile-node state (second args) fold)]
       (case op
         :multiply
         ;; Two literals multiply exactly in the general path: keep to
-        ;; operands whose products are the same in doubles.
-        (when (or (not (and (literal-operand? a) (literal-operand? b)))
-                  (every? exact-product-operand? (concat (literal-components a) (literal-components b))))
-          (let [out (:registers state)
-                code (case [(:shape a) (:shape b)]
-                       [:triple :triple] op-mul-tt
-                       [:triple :scalar] op-mul-ts
-                       [:scalar :triple] op-mul-st
-                       nil)]
-            (when code
-              [(-> state (update :registers + 3) (emit code (:at a) (:at b) out 0)) {:at out :shape :triple}])))
+        ;; operands whose products are the same in doubles. The product is
+        ;; itself a literal for the next operation, so a nested multiply is
+        ;; checked against the exact value the general path carries.
+        (let [literal? (and (literal-operand? a) (literal-operand? b))]
+          (when (or (not literal?)
+                    (every? exact-product-operand? (concat (literal-components a) (literal-components b))))
+            (let [out (:registers state)
+                  code (case [(:shape a) (:shape b)]
+                         [:triple :triple] op-mul-tt
+                         [:triple :scalar] op-mul-ts
+                         [:scalar :triple] op-mul-st
+                         nil)]
+              (when code
+                [(-> state (update :registers + 3) (emit code (:at a) (:at b) out 0))
+                 (cond-> {:at out :shape :triple} literal? (assoc :literal (literal-product a b)))]))))
 
         :rotate-hue
         ;; Turns are a literal: the theta and its wrapped hue offset are

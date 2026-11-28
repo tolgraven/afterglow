@@ -151,6 +151,10 @@ faults, and fall back to the general path instead of approximating. Run
 `afterglow.render.typed-layers-test` after changing either path. Keep the
 per-head methods small enough for the JIT to compile. A method over 8,000
 bytes of bytecode stays interpreted. That was about twenty times slower here.
+On OpenJDK 25.0.2, `run-segment` is 4,652 bytes, `Rows.composeRow` 2,421 and
+`grade!` 1,067. To recheck, AOT-compile the namespace into a scratch
+`*compile-path*` and read the last instruction offset from `javap -c -p`.
+Each new opcode's macro expansion grows `run-segment` by roughly 500 bytes.
 [Typed colour layers](../../../doc/architecture/native-layers.md#typed-colour-layers)
 
 A full-opacity compound containing only physical replacement writes can move

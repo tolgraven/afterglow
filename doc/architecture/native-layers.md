@@ -148,12 +148,28 @@ When anything falls outside that subset, the whole frame uses the general
 path. This covers a missing field without a default, an out-of-range value,
 repeated targets and literal products that the general path computes exactly.
 A frame that faults downstream after typed composition is composed again on
-the general path. The fault then keeps its message, data and source. Pass
+the general path. The fault then keeps its message, data and source. The
+returned frame's metadata reports the outcome. It holds
+`:afterglow.render.typed-layers/typed` true when typed composition rendered
+the frame. Otherwise `:afterglow.render.typed-layers/fallback` names why the
+frame fell back:
+
+- `:members`, `:member-writes`, `:previous-targets`, `:exact-opacity` or
+  `:program` when a group's shape sent the frame to the general path
+- `:values` when a value, target or field could not be reproduced
+- `:fault-replay` when the frame was composed again after a fault
+
+Pass
 the render option `:typed-layers? false` to compose every group on the general
 path. `afterglow.render.typed-layers-test` compares bytes, values and faults
 across seeded frames. These include HDR on and off, member gain, opacities,
 target weights, explicit targets with heads that lack colour,
-`:blackout-ids`, and lower `:add` and `:max` blends.
+`:blackout-ids`, and lower `:add` and `:max` blends. They also include member
+`:add` and `:max` blends, two stacked typed groups, uniform batches, a wash
+over part of the rig, weighted translucent direct compounds, a non-colour group
+that forces the general path, and nested literal products such as
+`(previous [1 1 1]) × 2 × 5/12`. The general path keeps such a product exact,
+so the typed path defers to it.
 
 Every array belongs to one call. After setup, the loop over heads allocates
 nothing. The output batch's values are fresh and never written after return.
