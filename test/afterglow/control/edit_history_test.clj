@@ -227,4 +227,6 @@
                                                             staged moved-target))))
     (is (= (select-keys (:history show) [:cursor :position :next-id]) (select-keys moved [:cursor :position :next-id])))
     (is (= 0.3 (get-in (navigate launched :history/undo) [:targets moved-target :value])))
-    (is (thrown? clojure.lang.ExceptionInfo (history/retarget moved staged moved-target)))))
+    (is (= {:control/error :history-target-conflict :details {:from staged :to moved-target}}
+           (ex-data (try (history/retarget moved staged moved-target)
+                         (catch clojure.lang.ExceptionInfo e e)))))))

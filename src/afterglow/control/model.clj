@@ -1,6 +1,21 @@
 (ns afterglow.control.model
   "Immutable show commands. Logical time enters through the command envelope;
-  accepted commands return event data, never start hardware or invoke user code."
+  accepted commands return event data, never start hardware or invoke user code.
+
+  Where host hooks are passed: apply-command takes one trusted per-call
+  argument, the authority, beside the command. It carries :operator-id and,
+  under ::edit-targets, the host's edit target hooks. Both are resolved by the
+  admitting adapter independently of the command payload, live for one call,
+  and are never stored in receipts, history or saves; a command that carries
+  ::edit-targets itself gains nothing. Only edit history operations read
+  either, so a host target needs an operator, and apply-domain-command, which
+  passes no authority, cannot reach the hooks. The decision (tolgraven/afterglow#174)
+  is to keep the hooks there rather than add an options argument: they share
+  the authority's provenance and lifetime, the namespaced key keeps them apart
+  from the actor, and ::edit-targets is already a map of target kinds, so a
+  second host kind adds an entry, not a new channel. Add a separate options
+  argument when an operation outside edit history, or a caller without an
+  operator, needs host context."
   (:require [afterglow.runtime.events :as events]
             [afterglow.control.bounded :as bounded]
             [afterglow.control.edit-history :as edit-history]
@@ -614,7 +629,11 @@
 
 (defn retarget-edit-history
   "Move a host target's edits and generation to a new target, as when the
-  host hands the cell to a launched instance holding the same value."
+  host hands the cell to a launched instance holding the same value. A
+  destination the history already tracks is refused with :control/error
+  :history-target-conflict (see edit-history/retarget): inside a command
+  reducer admitted by apply-command or apply-domain-command, that becomes a
+  rejected ack with the identical model, never an escaping exception."
   [model from to]
   (if (get-in model [:control :edit-history])
     (update-in model [:control :edit-history] edit-history/retarget from to)
@@ -665,7 +684,14 @@
 
 (defn edit-history-snapshot
   "Return the saved edit tree. Close ordinary gestures as edits and omit
-  temporary gestures. Conflict and no-op handling match live operations."
+  temporary gestures. Conflict and no-op handling match live operations.
+
+  Host target kinds are not visible here: the snapshot has no hooks, so an
+  open gesture on a host target closes without a cell. It records no node
+  and writes no rollback, whether it is ordinary or temporary, and the
+  host's sampled value stays wherever the host keeps it. A host whose
+  targets are saved must end or cancel its own gestures through apply-command
+  with its hooks before taking the snapshot."
   [model]
   (when-let [history (get-in model [:control :edit-history])]
     (dissoc
@@ -723,10 +749,17 @@
 (defn settle-temporary-gestures-for-save
   "Project a save with temporary edits canceled under their captured owners.
   Return the settled gestures so hosts can release corresponding runtime holds.
-  The live model, receipts and revision remain untouched."
+  The live model, receipts and revision remain untouched.
+
+  Only :instance-param gestures are settled. Temporary gestures on host
+  target kinds are skipped, their preview values are not rolled back, and
+  they are absent from :settled; edit-history-snapshot then closes them
+  without a cell. A host whose targets are saved must cancel its own
+  temporary gestures through apply-command with its hooks first. The owner
+  each cancel must carry is in edit-history/open-gestures."
   [model]
   (reduce-kv (fn [{:keys [model] :as projection} [kind id param :as target] {:keys [actor temporary?] :as gesture}]
-               ;; A host target is not saved; edit-history-snapshot closes its gesture without a cell.
+               ;; No hooks here: a host settles its own temporary gestures before saving.
                (if (and temporary? (= :instance-param kind))
                  (let [cancel (assoc gesture :op :gesture/cancel :instance-id id :param param)
                        result (apply-history-operation model cancel actor)]
@@ -848,9 +881,14 @@
   :instance-id and :param. History travel reads and writes those targets
   through the same hooks, so their writes emit the host's events, never
   :param/changed. Hooks are host functions supplied per call; they are not
-  saved, and edit-history-snapshot closes an open host gesture without a cell.
-  Use touch-edit-target after other host writes, and retarget-edit-history or
-  remove-edit-history-targets when the host hands a cell on or discards it."
+  saved. Nothing at save time has the hooks: settle-temporary-gestures-for-save
+  skips host targets and edit-history-snapshot closes an open host gesture
+  without a cell (no node, no rollback write). A host whose targets are saved
+  must end or cancel its own gestures, temporary ones in particular, through
+  this function with its hooks before saving. Use touch-edit-target after
+  other host writes, and retarget-edit-history or remove-edit-history-targets
+  when the host hands a cell on or discards it. The namespace docstring
+  records why hooks travel in the authority."
   ([model command] (apply-command model command nil))
   ([model command authority] (admit-command model command authority apply-operation)))
 
