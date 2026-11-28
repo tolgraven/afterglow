@@ -235,11 +235,15 @@
           ;; A mixed selection, such as a white-only head under a colour
           ;; filter, skips the heads that lack a field. A field that no target
           ;; implements is an authoring error, such as a misspelt :colour.
+          ;; Judge the member's whole target set, not this frame's weighted
+          ;; subset: a moving volume over white-only heads must not fault.
           (when supports?
-            (doseq [{:keys [attribute]} transforms
-                    :when (and (not= :beat-ratio attribute) (seq inputs)
-                               (not-any? #(supports? % attribute) (keys inputs)))]
-              (fail! "No target implements layer transform field" {:attribute attribute})))
+            (let [pool (if (seq target-ids) (distinct (concat target-ids (keys inputs)))
+                           (when-not allowed (keys inputs)))]
+              (doseq [{:keys [attribute]} transforms
+                      :when (and (not= :beat-ratio attribute) (seq pool)
+                                 (not-any? #(supports? % attribute) pool))]
+                (fail! "No target implements layer transform field" {:attribute attribute}))))
           (reduce-kv
            (fn [st id assignments]
              (let [prior (get-in st [:fields id] {})

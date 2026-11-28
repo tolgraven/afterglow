@@ -658,8 +658,12 @@
   "Resolve :blackout-ids, heads blacked out individually, into a mask by patch
   index. Packing treats a masked head as the global blackout treats every head:
   after composition and HDR, its dimmer and every emitter drive are zero, so
-  no later contribution or spilled light can relight it. IDs the patch does
-  not contain are ignored, so a rig edit cannot fault a frame."
+  no later contribution or spilled light can relight it, and an overdriven
+  masked head casts no spill or whitening onto its neighbours. Like the global
+  blackout, the mask zeros the dimmer and the emitter channels
+  `photometry/emitter-spectrum` names; any other channel, such as an
+  unlisted :indigo or a combined shutter-intensity control, passes raw. IDs
+  the patch does not contain are ignored, so a rig edit cannot fault a frame."
   [patch options]
   (let [ids (:blackout-ids options)]
     (cond
@@ -785,7 +789,10 @@
 
 (defn- apply-hdr! [patch options ^doubles values ^booleans present ^objects general]
   (when-let [settings (cond-> (:hdr options)
-                        (::hdr-falloff options) (assoc ::hdr/falloff-weight (::hdr-falloff options)))]
+                        (::hdr-falloff options) (assoc ::hdr/falloff-weight (::hdr-falloff options))
+                        ;; A blacked-out head is dark, so it casts no spill or whitening.
+                        (::dark options) (assoc ::hdr/dark? (let [^booleans mask (::dark options)]
+                                                              (fn [i] (aget mask (int i))))))]
     (let [slots (::attribute-slots patch)
           stride (long (::stride patch))
           rich? (fn [i] (or (nil? values) (and general (some? (aget general (int i))))))

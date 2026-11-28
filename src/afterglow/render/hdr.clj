@@ -276,7 +276,8 @@
   (let [allowed (some-> (:fixture-ids settings) set)
         scoped? #(or (nil? allowed) (contains? allowed (:id %)))
         ;; The frame's carried falloff is not an authored control.
-        default-white (if (> (count settings) (if (contains? settings ::falloff-weight) 1 0)) 1.0 0.0)
+        default-white (if (pos? (count (dissoc settings ::falloff-weight ::dark?))) 1.0 0.0)
+        dark? (::dark? settings)
         source-white-mix (double (:white-mix settings default-white))
         spill-white-mix (double (:spill-white-mix settings default-white))
         gain (:gain settings 1.0)
@@ -303,7 +304,7 @@
                 peak (max (aget excess 0) (aget excess 1) (aget excess 2))]
             (aset changed i true)
             (aset gain-frame i g)
-            (when (and (pos? peak) (scoped? head))
+            (when (and (pos? peak) (scoped? head) (not (and dark? (dark? i))))
               (aset whites i (min 1.0 (* source-white-mix peak)))
               (when (and (or spill? observe?) (shutter/open? (:shutters head) read-value))
                 (let [received (when observe? (volatile! (transient {})))]

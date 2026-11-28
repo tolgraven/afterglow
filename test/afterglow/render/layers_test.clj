@@ -459,3 +459,17 @@
   (is (near? (layers/color-grade [1.0 0.0 0.0] [0 0 0.9]) (layers/color-grade [1.0 0.0 0.0] [0 0 -0.1])))
   (is (near? [0.6378 0.6378 0.6378] (mapv #(/ (Math/round (* 10000 %)) 10000.0) (layers/color-grade [3.0 0.0 0.0] [0 1 0])))
       "Desaturation keeps luminance and spends HDR excess"))
+
+(deftest a-moving-selection-over-heads-without-the-field-does-not-fault
+  (let [mixed (frame/compile-patch [{:id :rgb :address 1 :universe 0 :channels {:red 1 :green 2 :blue 3}}
+                                    {:id :lamp :address 4 :universe 0 :channels {:white 1}}])
+        base {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.6 0.45 0.3]}
+                                               {:target-id :lamp :attribute :white :value 0.5}]}
+        member (assoc {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.5 0 0]}]}
+                      :native-layer {:id :vol :member 0 :target-ids [:rgb :lamp] :target-weights {:lamp 1.0}
+                                     :transforms [{:attribute :color
+                                                   :value (expr :color-grade (field :previous :color) (field :incoming :color))}]}
+                      :source {:instance-id :vol})
+        result (frame/resolve-contributions mixed [base member] {})]
+    (is (= 128 (bit-and 0xff (aget ^bytes (get-in result [:universes 0]) 3))) "This frame's weights cover only the lamp")
+    (is (near? [0.6 0.45 0.3] (get-in result [:values :rgb :emitted-color])) "The uncovered RGB head is untouched")))
