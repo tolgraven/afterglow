@@ -654,8 +654,29 @@
     (if (and trims (not (contains? overrides attribute)))
       (photometry/corrected-level trims attribute level) level)))
 
+(defn- with-dark-heads
+  "Resolve :blackout-ids, heads blacked out individually, into a mask by patch
+  index. Packing treats a masked head as the global blackout treats every head:
+  after composition and HDR, its dimmer and every emitter drive are zero, so
+  no later contribution or spilled light can relight it. IDs the patch does
+  not contain are ignored, so a rig edit cannot fault a frame."
+  [patch options]
+  (let [ids (:blackout-ids options)]
+    (cond
+      (nil? ids) (dissoc options ::dark)
+      (not (or (set? ids) (sequential? ids))) (fail! "Blackout IDs must be a set or sequence of target IDs" {:blackout-ids ids})
+      (empty? ids) (dissoc options ::dark)
+      :else (let [mask (boolean-array (count (:fixtures patch))) by-id (:by-id patch)]
+              (doseq [id ids]
+                (when-let [fixture (get by-id id)] (aset mask (int (::index fixture)) true)))
+              (assoc options ::dark mask)))))
+
+(defn- dark? [options index]
+  (if-let [^booleans mask (::dark options)] (aget mask (int index)) false))
+
 (defn- pack-target! [fixture assigned {:keys [master blackout? include-values?] :as options} universes indexed compact]
   (let [id (:id fixture)
+        blackout? (or blackout? (dark? options (::index fixture)))
         source (when-let [^objects sources (::geometry-sources options)]
                  (get (aget sources (int (::index fixture))) (if (:aim assigned) :aim :direction)))
         previous (previous-for-target options fixture)
@@ -818,6 +839,7 @@
       (if-let [assigned (when general (aget general index))]
         (pack-target! (nth (:fixtures patch) index) assigned options universes indexed compact)
         (let [^DenseFixture fixture (nth fixtures index)
+              blackout? (or blackout? (dark? options index))
               base (* stride index)
               dimmer (if (aget present (+ base 3)) (aget values (+ base 3)) (if (.-emitter fixture) 1.0 0.0))
               intensity (if blackout? 0.0 (* master dimmer))
@@ -930,7 +952,8 @@
   "Resolve an ordered assignment vector to per-target values and fresh DMX bytes.
 
   First argument is a fixture vector or immutable compile-patch result. Options:
-  :master [0,1] (default 1), :blackout? (default false), :previous-values for aim
+  :master [0,1] (default 1), :blackout? (default false), :blackout-ids (heads
+  blacked out individually after composition and HDR), :previous-values for aim
   continuity, or :previous-compact to read pan/tilt history directly from typed
   fields. History remaps by stable ID when target order changes, without full UI
   projection. Returned :target-order preserves fixture order. :values includes
@@ -953,15 +976,16 @@
                     (map? (:previous-values options)))
        (fail! "Invalid render options" {:options options}))
      (when-not (vector? assignments) (fail! "Assignments must be a vector" {}))
-     (cond
-       (or (:hdr options) (:observe-hdr? options) (seq (:edge-tracking options)))
-       (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
+     (let [options (with-dark-heads patch options)]
+       (cond
+         (or (:hdr options) (:observe-hdr? options) (seq (:edge-tracking options)))
+         (resolve-contributions patch [{:kind :assignments :assignments assignments}] options)
 
-       (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
-            (every? (partial packed-assignment? patch) assignments))
-       (resolve-packed-only patch assignments options)
+         (and (not (:include-values? options)) (packed-plan? patch) (packed-number? (:master options))
+              (every? (partial packed-assignment? patch) assignments))
+         (resolve-packed-only patch assignments options)
 
-       :else (pack-general-state patch (reduce-assignments patch assignments) options)))))
+         :else (pack-general-state patch (reduce-assignments patch assignments) options))))))
 
 (defn- compact-view! [compact]
   (when-not (and (map? compact) (integer? (:count compact)) (not (neg? (:count compact)))
@@ -1597,7 +1621,8 @@
                   (some :emission-gain contributions) (assoc options :hdr {:white-mix 1.0})
                   (:observe-hdr? options) (assoc options :hdr {})
                   :else options)
-        patch (if (:hdr options) (assoc patch ::hdr? true) patch)]
+        patch (if (:hdr options) (assoc patch ::hdr? true) patch)
+        options (with-dark-heads patch options)]
     (when-not (and (unit? (:master options)) (instance? Boolean (:blackout? options))
                    (instance? Boolean (:include-values? options)) (instance? Boolean (:compact-values? options))
                    (map? (:previous-values options)))

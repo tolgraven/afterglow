@@ -72,8 +72,10 @@
   "Shade a light colour by `[dim desaturate hue]`. Rotate its hue by `hue`
   turns at constant saturation and value, mix it toward its own luminance by
   `desaturate`, then scale it by `1 - dim`. dim and desaturate are clamped to
-  [0,1]. `[0 0 0]` leaves the colour unchanged, so a fading coefficient fades
-  the grade out. Components never leave [0, max component]."
+  [0,1]; the hue turn wraps. `[0 0 0]` leaves the colour unchanged. The hue
+  turn keeps the value, but desaturation keeps Rec. 709 luminance, so it
+  spends HDR overrange: `[3 0 0]` fully desaturated is about `[0.64 0.64 0.64]`.
+  Components never leave [0, max component]."
   [rgb [dim desaturate hue]]
   (let [[r g b] (if (zero? (double hue)) rgb
                     (let [[h s v] (rgb->hsv rgb)] (hsv->rgb [(+ h (double hue)) s v])))
@@ -91,7 +93,8 @@
 
 (defn color-guard
   "Keep a light colour inside an operator's palette with
-  `[min-saturation restriction center]`, each clamped to [0,1].
+  `[min-saturation restriction center]`. The floor and restriction are clamped
+  to [0,1]; the centre is a hue in turns and wraps, so -0.1 is 0.9.
 
   The hue first moves to the nearest edge of the arc of `1 - restriction`
   turns centred on `center` turns: restriction 0 allows every hue and 1 locks
@@ -104,7 +107,7 @@
   (let [floor (unit-clamp min-saturation)
         half (* 0.5 (- 1.0 (unit-clamp restriction)))
         [h s v] (rgb->hsv rgb)
-        centre (turns (unit-clamp center))
+        centre (turns center)
         offset (- (turns (+ (- h centre) 0.5)) 0.5)
         h (if (and (pos? s) (> (Math/abs offset) half))
             (turns (+ centre (if (neg? offset) (- half) half)))
@@ -229,13 +232,21 @@
                                        acc (rows block allowed)))
                              initial blocks)
               apply-row (partial set-assignment high? blend-field validate!)]
+          ;; A mixed selection, such as a white-only head under a colour
+          ;; filter, skips the heads that lack a field. A field that no target
+          ;; implements is an authoring error, such as a misspelt :colour.
+          (when supports?
+            (doseq [{:keys [attribute]} transforms
+                    :when (and (not= :beat-ratio attribute) (seq inputs)
+                               (not-any? #(supports? % attribute) (keys inputs)))]
+              (fail! "No target implements layer transform field" {:attribute attribute})))
           (reduce-kv
            (fn [st id assignments]
              (let [prior (get-in st [:fields id] {})
                    incoming (reduce apply-row {} assignments)
                    base (reduce apply-row prior assignments)
-                   ;; Like an effect output, a transform skips a head that
-                   ;; does not implement its field (tolgraven/tolglow#688).
+                   ;; As Tolglow's compiled outputs skip heads that lack an
+                   ;; attribute (tolgraven/tolglow#688), a step skips them here.
                    steps (if supports?
                            (filterv #(or (= :beat-ratio (:attribute %)) (supports? id (:attribute %))) transforms)
                            transforms)

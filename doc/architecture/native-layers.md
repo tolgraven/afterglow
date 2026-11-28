@@ -50,16 +50,37 @@ The two color filters take a color and three finite settings. The settings are
 usually the member's own `{:op :incoming :attribute :color}`, so an effect
 computes them per head and per frame from its typed parameters, position and
 musical clock, and the transform consumes that color in place of writing it.
-A literal triple also works. Grade dim and desaturation and every guard setting
-are clamped to [0,1]. A zero triple leaves the color unchanged (for the guard,
-any center with zero floor and restriction), so a color envelope on the member
-fades either filter in and out. The guard lifts saturation `s` below the floor
-`f` by `(f - s) * smoothstep(s / f)`: white and faint tints stay near white,
+A literal triple also works. The grade's dim and desaturation and the guard's
+floor and restriction are clamped to [0,1]. Both hue settings are turns and
+wrap, so a guard centre of -0.1 is 0.9. A zero triple leaves the color
+unchanged (for the guard, any center with zero floor and restriction).
+
+Fade a filter through the member's opacity. The engine turns instance opacity
+and envelope gain into `:member-opacity`, a crossfade between the colour
+before and after the filter. Anything that scales the triple itself, such as
+a color envelope or an `:add` or `:max` blend from another member, also
+scales the hue settings. A 50% envelope on a guard centred on 0.6 moves its
+arc to 0.3. Only the grade's dim and desaturation and the guard's floor fade
+correctly that way.
+
+The guard lifts saturation `s` below the floor `f` by
+`(f - s) * smoothstep(s / f)`. White and faint tints stay near white,
 mid-saturation mixes reach the floor, and the mapping is continuous and
 monotonic. Its hue clamp is continuous except at the hue opposite `center`.
-Both work in HSV on linear RGB and keep the value (largest component), so
-overrange HDR light keeps its excess. Neither reads explicit white, amber or
-UV emitter channels.
+Both filters work in HSV on linear RGB. The guard and the grade's hue turn
+keep the value (largest component), so overrange HDR light keeps its excess.
+The grade's desaturation keeps Rec. 709 luminance instead, so it spends the
+excess: `[3 0 0]` fully desaturated is about `[0.64 0.64 0.64]`. Neither filter
+reads explicit white, amber or UV emitter channels.
+
+HDR member gain, from a cue or instance gain or an emission gain, applies
+after a member's transforms. On a filter member it therefore scales the light
+of every head the filter rewrote, not only the filter's own output.
+
+A transform step skips a head that does not implement its field, so a colour
+filter over a group with a white-only head leaves that head alone. A field
+that none of the member's targets implements, such as a misspelt `:colour`,
+faults on the member's source.
 
 Each operator takes its operands in `:args`. Field references can specify a
 `:default` expression for a missing value. Otherwise a missing upstream field

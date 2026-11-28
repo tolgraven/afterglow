@@ -438,3 +438,24 @@
     (testing "an unknown head named by the layer still faults"
       (is (thrown? clojure.lang.ExceptionInfo
                    (frame/resolve-contributions mixed [base (assoc-in guard [:native-layer :target-ids] [:rgb :nowhere])] {}))))))
+
+(deftest a-transform-field-no-target-implements-faults
+  (let [mixed (frame/compile-patch [{:id :rgb :address 1 :universe 0 :channels {:red 1 :green 2 :blue 3}}
+                                    {:id :lamp :address 4 :universe 0 :channels {:white 1}}])
+        member (fn [field ids]
+                 (assoc {:kind :assignments :assignments [{:target-id :rgb :attribute :color :value [0.5 0 0]}]}
+                        :native-layer {:id :m :member 0 :target-ids ids
+                                       :transforms [{:attribute field :value [0.1 0.1 0.1]}]}
+                        :source {:instance-id :m}))
+        error (try (frame/resolve-contributions mixed [(member :colour [:rgb :lamp])] {}) nil
+                   (catch clojure.lang.ExceptionInfo cause cause))]
+    (is (= "No target implements layer transform field" (ex-message (or (ex-cause error) error))))
+    (is (= {:instance-id :m} (:effect-source (ex-data error))))
+    (is (map? (frame/resolve-contributions mixed [(member :color [:rgb :lamp])] {})) "A mixed group still skips the lamp")))
+
+(deftest the-guard-centre-and-the-grade-turn-wrap
+  (is (near? (layers/color-guard [0.0 0.0 1.0] [0 1 0.9]) (layers/color-guard [0.0 0.0 1.0] [0 1 -0.1])))
+  (is (near? (layers/color-guard [0.0 0.0 1.0] [0 1 0.3]) (layers/color-guard [0.0 0.0 1.0] [0 1 1.3])))
+  (is (near? (layers/color-grade [1.0 0.0 0.0] [0 0 0.9]) (layers/color-grade [1.0 0.0 0.0] [0 0 -0.1])))
+  (is (near? [0.6378 0.6378 0.6378] (mapv #(/ (Math/round (* 10000 %)) 10000.0) (layers/color-grade [3.0 0.0 0.0] [0 1 0])))
+      "Desaturation keeps luminance and spends HDR excess"))

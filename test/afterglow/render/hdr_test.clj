@@ -294,3 +294,23 @@
       (reset! calls 0)
       (is (= expected (bytes-of ((:pack (frame/prepare-movement-frame rig blocks (assoc opts :compact-values? true))) {}))))
       (is (= 1 @calls)))))
+
+(deftest blacked-out-heads-stay-dark-after-composition-and-spill
+  (let [base (block (row :source :color [1.6 0 0]) (row :near :color [0 0 0.5]) (row :far :color [0 0.4 0]))
+        later (block (row :near :dimmer 1.0) (row :near :color [0 1 0]))
+        hdr {:spill 1 :radius 1 :white-mix 0 :spill-white-mix 0}]
+    (testing "without the mask, a later write and spilled light reach the near head"
+      (is (not-every? zero? (subvec (native-and-rich [base later] {:hdr hdr}) 3 6))))
+    (testing "a blacked-out head is dark whatever was composed or spilled onto it"
+      (let [out (native-and-rich [base later] {:hdr hdr :blackout-ids #{:near}})]
+        (is (= [0 0 0] (subvec out 3 6)))
+        (is (= (subvec (native-and-rich [base later] {:hdr hdr}) 0 3) (subvec out 0 3)) "The source is untouched")
+        (is (pos? (nth out 7)) "The far head still receives spill")))
+    (testing "a physical dimmer and its emitters both close, on the plain path too"
+      (let [p (frame/compile-patch [{:id :par :address 1 :universe 1 :channels {:dimmer 1 :red 2 :green 3 :blue 4 :white 5 :strobe 6}}])
+            rows [(row :par :dimmer 1.0) (row :par :color [0.5 0.4 0.3]) (row :par :white 0.6) (row :par :strobe 0.3)]
+            render #(mapv (fn [b] (bit-and 255 b)) (take 6 (get-in (frame/resolve-frame p rows %) [:universes 1])))]
+        (is (= [0 0 0 0 0 77] (render {:blackout-ids [:par]})) "Strobe is not emission")
+        (is (= (render {}) (render {:blackout-ids [:elsewhere]})) "An unknown ID is ignored")
+        (is (= (render {:blackout-ids [:par]}) (render {:blackout-ids [:par] :include-values? false})))
+        (is (thrown? clojure.lang.ExceptionInfo (frame/resolve-frame p rows {:blackout-ids :par})))))))
