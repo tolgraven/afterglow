@@ -41,7 +41,8 @@
 
 ;; The patch's bounded memo of typed batch target plans (see target-plan). It
 ;; prints as one short line, not as its slots.
-(deftype TargetPlans [^java.util.concurrent.atomic.AtomicReference table]
+(deftype TargetPlans [^java.util.concurrent.atomic.AtomicReference table
+                      ^java.util.concurrent.atomic.AtomicInteger sweep]
   Object
   (toString [_] (str "TargetPlans["
                      (.length ^java.util.concurrent.atomic.AtomicReferenceArray (.get table)) " slots]")))
@@ -288,7 +289,8 @@
        ;; A bounded memo of batch target plans (see target-plan). It holds only
        ;; derived, immutable answers; a lost race or eviction just recomputes one.
        ::target-plans (TargetPlans. (java.util.concurrent.atomic.AtomicReference.
-                                     (AtomicReferenceArray. (int target-plan-slots))))
+                                     (AtomicReferenceArray. (int target-plan-slots)))
+                                    (java.util.concurrent.atomic.AtomicInteger.))
        ::common-attributes (if (seq compiled)
                              (reduce (fn [common fixture] (into #{} (filter (::supported fixture)) common))
                                      (::supported (first compiled)) (rest compiled)) #{})
@@ -1052,6 +1054,10 @@
 
 (def ^:private ^:const target-plan-probes 8)
 
+(def ^:private ^:const target-plan-sweep
+  "Slots a miss clears of stale plans, continuing where the last miss stopped."
+  32)
+
 (defn- common-support
   "Attributes every target supports. Runs of fixtures share one interned
   support set, so only a set instance not seen on the previous row is
@@ -1138,8 +1144,14 @@
   "Target indices and common support for a batch's target IDs. Only a
   persistent vector is memoized. A hit needs the same vector instance, the same
   fixture map and order, and rows that still match the plan, so a recompiled,
-  reassembled or aliased input recomputes. A miss also clears entries whose
-  vectors were collected or whose patch fields changed."
+  reassembled or aliased input recomputes. A miss also clears the next
+  `target-plan-sweep` slots of entries whose vectors were collected or whose
+  patch fields changed, so the whole table is swept once per
+  length/`target-plan-sweep` misses. A frame that launches many instances
+  misses once for each, and sweeping the whole table (up to 2,048 slots) on
+  every one of those misses cost more than computing their plans
+  (tolgraven/tolglow#810). Stale entries never block a probe; they only wait
+  for the sweep to release their memory."
   ^TargetPlan [patch ids]
   (let [^TargetPlans plans (::target-plans patch)]
     (if-not (and plans (instance? clojure.lang.PersistentVector ids))
@@ -1156,9 +1168,11 @@
                   (if (and plan (identical? ids (plan-key plan)) (current? plan) (rows-match? plan ids))
                     plan
                     (recur (inc probe))))))
-            (let [plan (compute-target-plan patch ids)]
-              (dotimes [slot (.length table)]
-                (let [entry (.get table slot)]
+            (let [plan (compute-target-plan patch ids)
+                  start (.getAndAdd ^java.util.concurrent.atomic.AtomicInteger (.-sweep plans) target-plan-sweep)]
+              (dotimes [i (min target-plan-sweep (.length table))]
+                (let [slot (bit-and (+ start i) mask)
+                      entry (.get table slot)]
                   (when (and entry (not (current? entry)))
                     (.compareAndSet table slot entry nil))))
               (remember-plan! plans plan ids hash current?)

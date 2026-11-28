@@ -770,6 +770,24 @@
     (is (= 2 (count (get-in more [:control :history]))))
     (is (nil? (get-in more [:control :history (:command-id launch)])))))
 
+(deftest history-holds-the-newest-receipts-across-many-trims
+  ;; The order is trimmed as a view over its vector (afterglow.control.bounded),
+  ;; so it must still be exactly the newest receipts, with the map to match.
+  (let [limit 16
+        show (configured {:history-limit limit})
+        results (reductions (fn [m i] (apply! m {:op :master/set :value (/ (mod i 10) 10.0)})) show (range 200))
+        final (last results)
+        order (get-in final [:control :history-order])
+        ids (fn [m] (mapv #(get-in m [:control :history % :command :command-id]) (get-in m [:control :history-order])))]
+    (is (vector? order))
+    (is (= limit (count order) (count (get-in final [:control :history]))))
+    (is (= (set order) (set (keys (get-in final [:control :history])))))
+    (is (= order (ids final)))
+    (is (every? #(<= (count (get-in % [:control :history])) limit) results))
+    (testing "a retry of an evicted receipt is a new command; one still held is a retry"
+      (let [held (get-in final [:control :history (first order) :command])]
+        (is (identical? final (:model (model/apply-command final held))))))))
+
 (deftest revision-epoch-source-and-time-guards
   (let [show (configured)]
     (doseq [[change code] [[{:show-id :other} :wrong-show]
